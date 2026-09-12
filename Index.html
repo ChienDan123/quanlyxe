@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<base target="_top">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quản lý Phương tiện &amp; Bản cam kết</title>
+<?!= include('Style'); ?>
+</head>
+<body>
+
+<!-- ============ HEADER ============ -->
+<header class="app-header">
+  <div class="header-left">
+    <h1>🏍️ Quản lý Phương tiện &amp; Bản cam kết</h1>
+    <span id="recordCount" class="badge">0 bản ghi</span>
+    <span id="modeBadge" class="badge badge-mode hidden"></span>
+  </div>
+  <div class="header-right">
+    <button id="btnSettings" class="btn btn-ghost" title="Cài đặt mẫu Bản cam kết">⚙️ Cài đặt</button>
+    <button id="btnReload" class="btn btn-secondary" title="Tải lại dữ liệu từ Google Sheet">⟳ Tải lại</button>
+  </div>
+</header>
+
+<!-- ============ MODAL CÀI ĐẶT MẪU BẢN CAM KẾT ============ -->
+<div id="settingsModal" class="modal-overlay hidden">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2>⚙️ Cài đặt mẫu Bản cam kết</h2>
+      <button class="modal-close" data-close="settingsModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Nội dung bên dưới sẽ được dùng làm mẫu mặc định mỗi khi tạo Bản cam kết mới. Thay đổi sẽ được lưu lại (trình duyệt này, và đồng bộ về Google Sheet) để lần sau không phải chỉnh lại.</p>
+
+      <label class="hint-label">Nơi nhận (Kính gửi)</label>
+      <input id="tplKinhGui" type="text" class="tpl-input">
+
+      <label class="hint-label">Địa danh mặc định khi ký (VD: Đà Nẵng)</label>
+      <input id="tplDiaDanh" type="text" class="tpl-input">
+
+      <label class="hint-label">Nội dung Mục I — Phương tiện đã bán/chuyển nhượng không xác định được người mua</label>
+      <textarea id="tplMucI" class="tpl-textarea" rows="5"></textarea>
+
+      <label class="hint-label">Nội dung Mục II — Phương tiện còn đang sử dụng</label>
+      <textarea id="tplMucII" class="tpl-textarea" rows="4"></textarea>
+
+      <label class="hint-label">Lời cam đoan cuối bản cam kết</label>
+      <textarea id="tplCamDoan" class="tpl-textarea" rows="2"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button id="btnResetTemplate" class="btn btn-ghost">Khôi phục mặc định</button>
+      <div class="footer-btns">
+        <button id="btnSaveTemplate" class="btn btn-primary">💾 Lưu mẫu</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MAIN LAYOUT ============ -->
+<main class="app-main">
+
+  <!-- ---- FILTER BAR ---- -->
+  <section class="filter-bar" id="filterBar">
+    <div class="filter-field" data-field="bienSo">
+      <label>Biển số</label>
+      <div class="ms-control" data-field="bienSo"></div>
+    </div>
+    <div class="filter-field" data-field="cccd">
+      <label>Số CCCD/MST</label>
+      <div class="ms-control" data-field="cccd"></div>
+    </div>
+    <div class="filter-field" data-field="chuXe">
+      <label>Chủ phương tiện</label>
+      <div class="ms-control" data-field="chuXe"></div>
+    </div>
+    <div class="filter-field" data-field="diaChi">
+      <label>Địa chỉ / Phường-Xã</label>
+      <div class="ms-control" data-field="diaChi"></div>
+    </div>
+    <div class="filter-field" data-field="trangThaiXe">
+      <label>Trạng thái xe</label>
+      <div class="ms-control" data-field="trangThaiXe"></div>
+    </div>
+    <div class="filter-actions">
+      <span id="filteredCount" class="filtered-count">0 / 0 dòng</span>
+      <button id="btnClearFilters" class="btn btn-ghost">Xóa bộ lọc</button>
+    </div>
+  </section>
+
+  <!-- ---- TOOLBAR (export / paging size) ---- -->
+  <section class="toolbar">
+    <div class="toolbar-left">
+      <label class="chk-all"><input type="checkbox" id="chkSelectAllPage"> Chọn tất cả (trang này)</label>
+      <span id="selectedCount" class="selected-count">0 xe đã chọn để xuất</span>
+    </div>
+    <div class="toolbar-right">
+      <label>Số dòng/trang:
+        <select id="pageSizeSelect">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+      </label>
+      <button id="btnCreateCommitment" class="btn btn-primary">📄 Tạo Bản cam kết</button>
+    </div>
+  </section>
+
+  <!-- ---- DATA TABLE ---- -->
+  <section class="table-wrap">
+    <table id="dataTable">
+      <thead>
+        <tr>
+          <th class="col-chk"></th>
+          <th>STT</th>
+          <th>Biển số</th>
+          <th>Số khung</th>
+          <th>Số máy</th>
+          <th>Nhãn hiệu</th>
+          <th>Loại xe</th>
+          <th>Chủ phương tiện</th>
+          <th>Số CCCD/MST</th>
+          <th>Địa chỉ đăng ký</th>
+          <th>Phường/Xã mới</th>
+          <th>Trạng thái xe</th>
+          <th>Ngày đăng ký</th>
+          <th>SĐT</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr><td colspan="14" class="empty-state">Đang tải dữ liệu từ Google Sheet...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ---- PAGINATION ---- -->
+  <section class="pagination" id="pagination"></section>
+
+</main>
+
+<!-- ============ DETAIL PANEL (SLIDE-OVER) ============ -->
+<div id="detailOverlay" class="modal-overlay hidden">
+  <aside id="detailPanel" class="detail-panel">
+    <div class="modal-header">
+      <h2>Chi tiết chủ phương tiện</h2>
+      <button class="modal-close" data-close="detailOverlay">✕</button>
+    </div>
+    <div class="modal-body" id="detailBody"><!-- filled by JS --></div>
+  </aside>
+</div>
+
+<!-- ============ COMMITMENT (BẢN CAM KẾT) MODAL ============ -->
+<div id="commitmentOverlay" class="modal-overlay hidden">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2>Bản cam kết</h2>
+      <div class="commitment-nav">
+        <button id="btnPrevDoc" class="btn btn-ghost">‹ Trước</button>
+        <span id="docCounter">1 / 1</span>
+        <button id="btnNextDoc" class="btn btn-ghost">Sau ›</button>
+      </div>
+      <button class="modal-close" data-close="commitmentOverlay">✕</button>
+    </div>
+    <div class="modal-body commitment-body">
+      <div id="commitmentContainer"></div>
+    </div>
+    <div class="modal-footer">
+      <span class="hint">Bạn có thể chỉnh sửa trực tiếp nội dung bên trên trước khi in/tải.</span>
+      <div class="footer-btns">
+        <button id="btnPrint" class="btn btn-secondary">🖨️ In / Xuất PDF</button>
+        <button id="btnDownloadWord" class="btn btn-primary">⬇️ Tải về (Word)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.js"></script>
+<?!= include('JavaScript'); ?>
+</body>
+</html>
