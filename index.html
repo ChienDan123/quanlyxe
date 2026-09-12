@@ -13,8 +13,10 @@
   <div class="header-left">
     <h1>🏍️ Quản lý Phương tiện &amp; Bản cam kết</h1>
     <span id="recordCount" class="badge">0 bản ghi</span>
+    <span id="modeBadge" class="badge badge-mode hidden"></span>
   </div>
   <div class="header-right">
+    <button id="btnSettings" class="btn btn-ghost" title="Cài đặt mẫu Bản cam kết">⚙️ Cài đặt</button>
     <button id="btnConnect" class="btn btn-secondary">🔗 Kết nối Google Sheet</button>
     <button id="btnReload" class="btn btn-ghost" title="Tải lại dữ liệu">⟳ Tải lại</button>
   </div>
@@ -28,23 +30,84 @@
       <button class="modal-close" data-close="connectModal">✕</button>
     </div>
     <div class="modal-body">
-      <p class="hint">Dán URL Google Sheet (dạng thường, dạng "Xuất bản lên web" CSV, hoặc URL CSV bất kỳ).</p>
-      <input id="sheetUrlInput" type="text" placeholder="https://docs.google.com/spreadsheets/d/....">
-      <label class="hint-label">Gid của tab (nếu cần, để trống nếu dùng gid trong URL hoặc sheet chỉ có 1 tab)</label>
-      <input id="sheetGidInput" type="text" placeholder="0">
-      <div id="connectError" class="error-text hidden"></div>
-      <details class="hint-details">
-        <summary>Hướng dẫn lấy URL đúng cách</summary>
-        <ol>
-          <li>Mở Google Sheet → <b>Tệp → Chia sẻ → Xuất bản lên web</b>.</li>
-          <li>Chọn tab cần xuất, định dạng <b>CSV</b>, bấm Xuất bản.</li>
-          <li>Copy URL dạng <code>.../pub?output=csv</code> và dán vào ô trên.</li>
-          <li>Hoặc dùng URL sheet bình thường (đã bật "Bất kỳ ai có link đều xem được") — hệ thống sẽ tự chuyển sang dạng export CSV.</li>
-        </ol>
-      </details>
+      <div class="tabs" id="connectTabs">
+        <button class="tab-btn active" data-tab="gas">🔄 Apps Script (Đọc + Ghi)</button>
+        <button class="tab-btn" data-tab="csv">👁️ CSV công khai (Chỉ đọc)</button>
+      </div>
+
+      <!-- TAB: APPS SCRIPT (2 chiều) -->
+      <div class="tab-pane" data-pane="gas">
+        <p class="hint">Dán URL Web App của Google Apps Script (đã Deploy) để có thể <b>đọc và ghi ngược</b> dữ liệu (Trạng thái xe, Ghi chú, Ngày xuất cam kết...) về đúng Google Sheet.</p>
+        <input id="gasUrlInput" type="text" placeholder="https://script.google.com/macros/s/XXXXXXXX/exec">
+        <div id="gasError" class="error-text hidden"></div>
+        <details class="hint-details" open>
+          <summary>Hướng dẫn tạo Apps Script Web App (1 lần duy nhất)</summary>
+          <ol>
+            <li>Mở Google Sheet dữ liệu → <b>Tiện ích mở rộng → Apps Script</b>.</li>
+            <li>Xoá code mẫu, dán toàn bộ nội dung file <code>AppsScript.gs</code> (đi kèm gói tải này) vào.</li>
+            <li>Sửa hằng số <code>SHEET_NAME</code> ở đầu file cho đúng tên tab chứa dữ liệu (mặc định <code>"Data"</code>).</li>
+            <li>Bấm <b>Triển khai (Deploy) → Triển khai mới → chọn loại "Ứng dụng web"</b>.</li>
+            <li>Mục "Người có quyền truy cập" chọn <b>"Bất kỳ ai"</b> (Anyone), rồi Deploy.</li>
+            <li>Copy URL dạng <code>.../macros/s/.../exec</code> và dán vào ô trên.</li>
+          </ol>
+        </details>
+      </div>
+
+      <!-- TAB: CSV (chỉ đọc) -->
+      <div class="tab-pane hidden" data-pane="csv">
+        <p class="hint">Dán URL Google Sheet (dạng thường, dạng "Xuất bản lên web" CSV, hoặc URL CSV bất kỳ). Chế độ này <b>chỉ đọc</b>, không ghi ngược được về Sheet.</p>
+        <input id="sheetUrlInput" type="text" placeholder="https://docs.google.com/spreadsheets/d/....">
+        <label class="hint-label">Gid của tab (nếu cần, để trống nếu dùng gid trong URL hoặc sheet chỉ có 1 tab)</label>
+        <input id="sheetGidInput" type="text" placeholder="0">
+        <div id="connectError" class="error-text hidden"></div>
+        <details class="hint-details">
+          <summary>Hướng dẫn lấy URL đúng cách</summary>
+          <ol>
+            <li>Mở Google Sheet → <b>Tệp → Chia sẻ → Xuất bản lên web</b>.</li>
+            <li>Chọn tab cần xuất, định dạng <b>CSV</b>, bấm Xuất bản.</li>
+            <li>Copy URL dạng <code>.../pub?output=csv</code> và dán vào ô trên.</li>
+            <li>Hoặc dùng URL sheet bình thường (đã bật "Bất kỳ ai có link đều xem được") — hệ thống sẽ tự chuyển sang dạng export CSV.</li>
+          </ol>
+        </details>
+      </div>
     </div>
     <div class="modal-footer">
+      <span class="hint" id="connectStatusHint"></span>
       <button id="btnDoConnect" class="btn btn-primary">Kết nối &amp; Tải dữ liệu</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL CÀI ĐẶT MẪU BẢN CAM KẾT ============ -->
+<div id="settingsModal" class="modal-overlay hidden">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2>⚙️ Cài đặt mẫu Bản cam kết</h2>
+      <button class="modal-close" data-close="settingsModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Nội dung bên dưới sẽ được dùng làm mẫu mặc định mỗi khi tạo Bản cam kết mới. Thay đổi sẽ được lưu lại (trình duyệt này, và về Google Sheet nếu đã kết nối Apps Script) để lần sau không phải chỉnh lại.</p>
+
+      <label class="hint-label">Nơi nhận (Kính gửi)</label>
+      <input id="tplKinhGui" type="text" class="tpl-input">
+
+      <label class="hint-label">Địa danh mặc định khi ký (VD: Đà Nẵng)</label>
+      <input id="tplDiaDanh" type="text" class="tpl-input">
+
+      <label class="hint-label">Nội dung Mục I — Phương tiện đã bán/chuyển nhượng không xác định được người mua</label>
+      <textarea id="tplMucI" class="tpl-textarea" rows="5"></textarea>
+
+      <label class="hint-label">Nội dung Mục II — Phương tiện còn đang sử dụng</label>
+      <textarea id="tplMucII" class="tpl-textarea" rows="4"></textarea>
+
+      <label class="hint-label">Lời cam đoan cuối bản cam kết</label>
+      <textarea id="tplCamDoan" class="tpl-textarea" rows="2"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button id="btnResetTemplate" class="btn btn-ghost">Khôi phục mặc định</button>
+      <div class="footer-btns">
+        <button id="btnSaveTemplate" class="btn btn-primary">💾 Lưu mẫu</button>
+      </div>
     </div>
   </div>
 </div>

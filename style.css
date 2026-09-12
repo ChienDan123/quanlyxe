@@ -7,6 +7,8 @@
   --text:#1f2937;
   --text-muted:#6b7280;
   --danger:#d64545;
+  --success:#1a8f5e;
+  --warn:#b8860b;
   --highlight:#e8f0fe;
   --radius:8px;
   font-family:'Segoe UI', Roboto, Arial, sans-serif;
@@ -15,18 +17,21 @@
 body{margin:0;background:var(--bg);color:var(--text);font-size:14px;}
 h1,h2,h3{margin:0;}
 button{font-family:inherit;cursor:pointer;}
-input,select{font-family:inherit;font-size:14px;}
+input,select,textarea{font-family:inherit;font-size:14px;}
 
 /* ---------- HEADER ---------- */
 .app-header{
   display:flex;justify-content:space-between;align-items:center;
   background:var(--surface);padding:12px 20px;border-bottom:1px solid var(--border);
-  position:sticky;top:0;z-index:50;
+  position:sticky;top:0;z-index:50;flex-wrap:wrap;gap:10px;
 }
-.header-left{display:flex;align-items:center;gap:12px;}
+.header-left{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
 .app-header h1{font-size:18px;}
 .badge{background:var(--highlight);color:var(--primary-dark);padding:4px 10px;border-radius:20px;font-weight:600;font-size:12px;}
-.header-right{display:flex;gap:8px;}
+.badge-mode.mode-gas{background:#e6f7ee;color:var(--success);}
+.badge-mode.mode-csv{background:#fff3e0;color:var(--warn);}
+.badge.hidden{display:none;}
+.header-right{display:flex;gap:8px;flex-wrap:wrap;}
 
 .btn{border:none;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:600;transition:.15s;}
 .btn-primary{background:var(--primary);color:#fff;}
@@ -35,6 +40,7 @@ input,select{font-family:inherit;font-size:14px;}
 .btn-secondary:hover{background:#e2e6ec;}
 .btn-ghost{background:transparent;color:var(--primary-dark);}
 .btn-ghost:hover{background:var(--highlight);}
+.btn-sm{padding:4px 10px;font-size:12px;}
 .btn:disabled{opacity:.4;cursor:not-allowed;}
 
 /* ---------- MAIN LAYOUT ---------- */
@@ -147,23 +153,47 @@ tbody tr.selected-row{background:var(--highlight);}
 .error-text{color:var(--danger);font-size:12px;margin-bottom:10px;}
 .error-text.hidden{display:none;}
 
+/* ---------- TABS (modal kết nối) ---------- */
+.tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--border);}
+.tab-btn{background:none;border:none;padding:8px 4px;margin-right:14px;font-size:13px;font-weight:600;
+  color:var(--text-muted);border-bottom:2px solid transparent;}
+.tab-btn.active{color:var(--primary-dark);border-bottom-color:var(--primary);}
+.tab-pane.hidden{display:none;}
+
+/* ---------- SETTINGS (mẫu Bản cam kết) ---------- */
+.tpl-input, .tpl-textarea{
+  width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:6px;
+  margin-bottom:12px;font-size:13px;font-family:inherit;resize:vertical;
+}
+
 /* ---------- DETAIL PANEL ---------- */
 #detailOverlay{justify-content:flex-end;background:rgba(15,23,42,.35);}
 .detail-panel{
-  width:520px;max-width:92vw;height:100%;background:#fff;box-shadow:-6px 0 24px rgba(0,0,0,.12);
+  width:560px;max-width:94vw;height:100%;background:#fff;box-shadow:-6px 0 24px rgba(0,0,0,.12);
   display:flex;flex-direction:column;
 }
 .owner-card{background:var(--highlight);border-radius:8px;padding:14px;margin-bottom:16px;}
 .owner-card .row{display:flex;gap:8px;margin-bottom:4px;font-size:13px;}
 .owner-card .row b{min-width:110px;color:var(--text-muted);font-weight:600;}
-.section-title{font-size:13px;font-weight:700;color:var(--primary-dark);margin:18px 0 8px;text-transform:uppercase;}
+.section-title{
+  font-size:13px;font-weight:700;color:var(--primary-dark);margin:18px 0 8px;
+  text-transform:uppercase;display:flex;align-items:center;gap:6px;
+}
+.section-desc{font-size:11.5px;color:var(--text-muted);margin:-4px 0 8px;font-style:italic;text-transform:none;}
 .mini-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:6px;}
-.mini-table th{background:#f0f3f8;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);}
-.mini-table td{padding:6px 8px;border-bottom:1px solid #eef0f3;}
+.mini-table th{background:#f0f3f8;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;}
+.mini-table td{padding:6px 8px;border-bottom:1px solid #eef0f3;white-space:nowrap;}
+.mini-table tr{cursor:pointer;}
+.mini-table tr:hover{background:#f8fafc;}
 .mini-table tr.diff-cccd{background:#fff7e6;}
+.mini-table tr.fuzzy-name{background:#fdeef0;}
+.mini-table tr.fuzzy-number{background:#eef4ff;}
+.mini-table .col-chk-mini{width:24px;}
 .note-box textarea{width:100%;min-height:70px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;resize:vertical;}
 .note-box select{width:100%;padding:7px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;}
-.tag-count{background:var(--primary);color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;margin-left:6px;}
+.tag-count{background:var(--primary);color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;margin-left:6px;text-transform:none;font-weight:700;}
+.sync-row{display:flex;justify-content:flex-end;gap:8px;margin-top:8px;}
+.sync-note{font-size:11.5px;color:var(--text-muted);margin-top:4px;}
 
 /* ---------- COMMITMENT DOC (mô phỏng file Word) ---------- */
 .commitment-nav{display:flex;align-items:center;gap:8px;font-size:13px;}
@@ -179,8 +209,8 @@ tbody tr.selected-row{background:var(--highlight);}
 .doc-title{font-size:15pt;font-weight:700;margin:14px 0 4px;}
 .doc-field-line{margin:8px 0;}
 .doc-field-line .fill{border-bottom:1px dotted #444;display:inline-block;min-width:160px;padding:0 4px;}
-table.doc-table{width:100%;border-collapse:collapse;margin:14px 0;font-size:11pt;}
-table.doc-table th, table.doc-table td{border:1px solid #333;padding:5px 6px;vertical-align:top;}
+table.doc-table{width:100%;border-collapse:collapse;margin:14px 0;font-size:10.5pt;table-layout:fixed;}
+table.doc-table th, table.doc-table td{border:1px solid #333;padding:5px 6px;vertical-align:top;overflow-wrap:break-word;word-break:break-word;}
 table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
 .doc-signature{display:flex;justify-content:flex-end;margin-top:30px;}
 .doc-signature-block{text-align:center;width:260px;}
@@ -190,7 +220,7 @@ table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
 .toast{
   position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
   background:#1f2937;color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;z-index:300;
-  box-shadow:0 6px 18px rgba(0,0,0,.2);
+  box-shadow:0 6px 18px rgba(0,0,0,.2);max-width:80vw;
 }
 .toast.hidden{display:none;}
 .toast.error{background:var(--danger);}
