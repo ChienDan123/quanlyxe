@@ -662,17 +662,70 @@ function saveNoteFor(ownerKey, data) {
 }
 
 /* ---------------------------- 9. FUZZY MATCHING (4 MỤC) -------------------- */
-const NAME_FUZZY_MAX_DIST = 2;
 const NUMBER_FUZZY_MAX_DIST = 2;
+// Bỏ qua số khung/số máy quá ngắn khi so khớp gần đúng, để tránh việc các
+// chuỗi ngắn (VD "50", "Q12"...) tình cờ giống nhau khắp cả nghìn dòng dữ liệu.
+const NUMBER_FUZZY_MIN_LEN = 5;
 
 function vehicleKey(v) { return v.motoId || v.maId || v._rowId; }
+
+// Tách 1 họ tên (đã chuẩn hoá) thành: họ (từ đầu), tên (từ cuối), chữ lót (ở giữa).
+function splitNameParts(name) {
+  const norm = normalizeName(name);
+  if (!norm) return null;
+  const words = norm.split(' ').filter(Boolean);
+  if (!words.length) return null;
+  return {
+    ho: words[0],
+    ten: words[words.length - 1],
+    dem: words.slice(1, -1).join(' '),
+    words
+  };
+}
+
+// Mục III chỉ chấp nhận ĐÚNG 1 trong 3 trường hợp sau (không match rộng hơn):
+//  a) Chỉ sai dấu trên toàn bộ họ tên (VD: Nguyễn -> Nguyen, Thành -> Thanh).
+//  b) Chỉ sai/khác chữ lót (tên đệm) — họ và tên chính phải giống hệt nhau.
+//  c) Chỉ sai họ — chữ lót và tên chính phải giống hệt nhau.
+function isFuzzyNameMatch(nameA, nameB) {
+  if (!nameA || !nameB) return false;
+  const normA = normalizeName(nameA), normB = normalizeName(nameB);
+  if (!normA || !normB || normA === normB) return false; // trùng hệt -> thuộc Mục II
+
+  // a) Chỉ sai dấu.
+  const stripA = stripDiacritics(nameA), stripB = stripDiacritics(nameB);
+  if (stripA && stripB && stripA === stripB) return true;
+
+  const partsA = splitNameParts(nameA), partsB = splitNameParts(nameB);
+  if (!partsA || !partsB || partsA.words.length < 2 || partsB.words.length < 2) return false;
+
+  // b) Chỉ sai chữ lót: họ giống hệt + tên chính giống hệt, chữ lót khác nhau.
+  if (partsA.ho === partsB.ho && partsA.ten === partsB.ten && partsA.dem !== partsB.dem) return true;
+
+  // c) Chỉ sai họ: chữ lót + tên chính giống hệt nhau, chỉ khác họ.
+  const restA = partsA.words.slice(1).join(' ');
+  const restB = partsB.words.slice(1).join(' ');
+  if (partsA.ho !== partsB.ho && restA === restB) return true;
+
+  return false;
+}
+
+// Mục IV: Số khung/Số máy chỉ được coi là "gần đúng" khi sai hoặc thiếu tối đa
+// 1–2 ký tự (Levenshtein distance <= 2), các ký tự còn lại phải giống hệt, và
+// chuỗi phải đủ dài để so khớp có ý nghĩa (tránh trùng ngẫu nhiên hàng loạt).
+function isFuzzyNumberMatch(numA, numB) {
+  if (!numA || !numB) return false;
+  if (numA.length < NUMBER_FUZZY_MIN_LEN || numB.length < NUMBER_FUZZY_MIN_LEN) return false;
+  if (Math.abs(numA.length - numB.length) > NUMBER_FUZZY_MAX_DIST) return false;
+  const d = levenshtein(numA, numB);
+  return d > 0 && d <= NUMBER_FUZZY_MAX_DIST;
+}
 
 // Tính 4 mục đối chiếu cho một chủ xe, dựa trên xe hiện đang xem (`vehicle`).
 function computeOwnerSections(vehicle) {
   const all = state.rawData;
   const cccd = (vehicle.cccd || '').trim();
   const nameNorm = normalizeName(vehicle.chuXe);
-  const nameStripped = stripDiacritics(vehicle.chuXe);
 
   // Mục I: tất cả xe cùng Số CCCD (xe chính thức của người đó).
   const sectionI = cccd
@@ -684,40 +737,26 @@ function computeOwnerSections(vehicle) {
     ? all.filter(v => normalizeName(v.chuXe) === nameNorm && (v.cccd || '').trim() !== cccd)
     : [];
 
-  // Mục III: xe của người có họ tên gần đúng (fuzzy — sai dấu/chữ lót/chính tả nhẹ),
+  // Mục III: chỉ những trường hợp sai dấu / sai chữ lót / sai họ (xem isFuzzyNameMatch),
   // loại trừ những xe đã thuộc Mục I hoặc Mục II.
   const usedAfterII = new Set([...sectionI, ...sectionII].map(vehicleKey));
-  const sectionIII = nameStripped ? all.filter(v => {
+  const sectionIII = vehicle.chuXe ? all.filter(v => {
     if (usedAfterII.has(vehicleKey(v))) return false;
-    const vStripped = stripDiacritics(v.chuXe);
-    if (!vStripped) return false;
-    if (Math.abs(vStripped.length - nameStripped.length) > NAME_FUZZY_MAX_DIST) return false;
-    const dist = levenshtein(vStripped, nameStripped);
-    return dist > 0 && dist <= NAME_FUZZY_MAX_DIST;
+    return isFuzzyNameMatch(vehicle.chuXe, v.chuXe);
   }) : [];
 
-  // Mục IV: xe có Số khung hoặc Số máy gần đúng (sai 1–2 ký tự) với các xe
-  // trong danh sách (Mục I) của người này, loại trừ Mục I–III.
+  // Mục IV: xe có Số khung hoặc Số máy gần đúng (sai/thiếu tối đa 2 ký tự) với
+  // các xe trong danh sách (Mục I) của người này, loại trừ Mục I–III.
   const usedAfterIII = new Set([...sectionI, ...sectionII, ...sectionIII].map(vehicleKey));
   const ownNumbers = uniq(sectionI.flatMap(v => [
     (v.soKhung || '').trim().toUpperCase(),
     (v.soMay || '').trim().toUpperCase()
-  ]));
+  ])).filter(n => n.length >= NUMBER_FUZZY_MIN_LEN);
   const sectionIV = ownNumbers.length ? all.filter(v => {
     if (usedAfterIII.has(vehicleKey(v))) return false;
     const sk = (v.soKhung || '').trim().toUpperCase();
     const sm = (v.soMay || '').trim().toUpperCase();
-    return ownNumbers.some(own => {
-      if (sk && Math.abs(sk.length - own.length) <= NUMBER_FUZZY_MAX_DIST) {
-        const d = levenshtein(sk, own);
-        if (d > 0 && d <= NUMBER_FUZZY_MAX_DIST) return true;
-      }
-      if (sm && Math.abs(sm.length - own.length) <= NUMBER_FUZZY_MAX_DIST) {
-        const d = levenshtein(sm, own);
-        if (d > 0 && d <= NUMBER_FUZZY_MAX_DIST) return true;
-      }
-      return false;
-    });
+    return ownNumbers.some(own => isFuzzyNumberMatch(sk, own) || isFuzzyNumberMatch(sm, own));
   }) : [];
 
   return { sectionI, sectionII, sectionIII, sectionIV };
@@ -743,8 +782,8 @@ function renderDetailPanelFor(row) {
   const notesStore = loadNotesStore();
   const existingNote = notesStore[ownerKey] || { status: '', text: '' };
 
-  const miniTable = (rows, extraCols, extraCellsFn, cssClass) => rows.length ? `
-    <table class="mini-table">
+  const miniTable = (rows, sectionId, extraCols, extraCellsFn, cssClass) => rows.length ? `
+    <table class="mini-table" data-section="${sectionId}">
       <thead><tr>
         <th class="col-chk-mini"></th>
         <th>Biển số</th><th>Chủ xe</th><th>Số CCCD</th><th>Số khung</th><th>Số máy</th>
@@ -761,6 +800,10 @@ function renderDetailPanelFor(row) {
       </tbody>
     </table>` : `<p class="hint">Không tìm thấy trường hợp phù hợp.</p>`;
 
+  const selectAllBtn = (sectionId, rows) => rows.length
+    ? `<button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;" data-select-all="${sectionId}">☑️ Chọn tất cả (${rows.length})</button>`
+    : '';
+
   const bodyHtml = `
     <div class="owner-card">
       <div class="row"><b>Họ và tên:</b> ${escapeHtml(chuXe) || '—'}</div>
@@ -769,20 +812,20 @@ function renderDetailPanelFor(row) {
       <div class="row"><b>Số điện thoại:</b> ${escapeHtml(phones)}</div>
     </div>
 
-    <div class="section-title">I. Xe cùng Số CCCD (xe chính thức) <span class="tag-count">${sectionI.length}</span></div>
-    ${miniTable(sectionI)}
+    <div class="section-title">I. Xe cùng Số CCCD (xe chính thức) <span class="tag-count">${sectionI.length}</span>${selectAllBtn('I', sectionI)}</div>
+    ${miniTable(sectionI, 'I')}
 
-    <div class="section-title">II. Xe của người trùng họ tên, khác Số CCCD <span class="tag-count">${sectionII.length}</span></div>
+    <div class="section-title">II. Xe của người trùng họ tên, khác Số CCCD <span class="tag-count">${sectionII.length}</span>${selectAllBtn('II', sectionII)}</div>
     <div class="section-desc">Có thể là cùng một người kê khai CCCD khác nhau, hoặc trùng tên ngẫu nhiên — cần đối chiếu thêm.</div>
-    ${miniTable(sectionII, null, null, 'diff-cccd')}
+    ${miniTable(sectionII, 'II', null, null, 'diff-cccd')}
 
-    <div class="section-title">III. Xe của người có họ tên gần đúng (nghi sai dấu/chính tả) <span class="tag-count">${sectionIII.length}</span></div>
-    <div class="section-desc">So khớp gần đúng (bỏ dấu, cho phép lệch tối đa ${NAME_FUZZY_MAX_DIST} ký tự) với "${escapeHtml(chuXe)}".</div>
-    ${miniTable(sectionIII, null, null, 'fuzzy-name')}
+    <div class="section-title">III. Xe của người có họ tên gần đúng <span class="tag-count">${sectionIII.length}</span>${selectAllBtn('III', sectionIII)}</div>
+    <div class="section-desc">Chỉ hiện các trường hợp: sai dấu (VD: Nguyễn → Nguyen), hoặc chỉ sai chữ lót, hoặc chỉ sai họ (còn chữ lót + tên chính giống hệt "${escapeHtml(chuXe)}").</div>
+    ${miniTable(sectionIII, 'III', '<th>Địa chỉ đăng ký</th>', (r) => `<td>${escapeHtml(r.diaChi) || '—'}</td>`, 'fuzzy-name')}
 
-    <div class="section-title">IV. Xe có Số khung/Số máy gần đúng với xe của người này <span class="tag-count">${sectionIV.length}</span></div>
-    <div class="section-desc">Số khung/số máy lệch tối đa ${NUMBER_FUZZY_MAX_DIST} ký tự so với các xe ở Mục I — nghi ngờ nhập liệu sai hoặc trùng khung/máy.</div>
-    ${miniTable(sectionIV, null, null, 'fuzzy-number')}
+    <div class="section-title">IV. Xe có Số khung/Số máy gần đúng với xe của người này <span class="tag-count">${sectionIV.length}</span>${selectAllBtn('IV', sectionIV)}</div>
+    <div class="section-desc">Số khung/số máy sai hoặc thiếu tối đa ${NUMBER_FUZZY_MAX_DIST} ký tự so với các xe ở Mục I (các ký tự còn lại phải giống hệt) — nghi ngờ nhập liệu sai hoặc trùng khung/máy.</div>
+    ${miniTable(sectionIV, 'IV', null, null, 'fuzzy-number')}
 
     <div class="section-title">Cập nhật Trạng thái xe / Ghi chú</div>
     <div class="note-box">
@@ -852,6 +895,20 @@ function renderDetailPanelFor(row) {
       if (chk.checked) state.exportSelected.add(id); else state.exportSelected.delete(id);
       updateSelectedCount();
       renderTable();
+    });
+  });
+
+  // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV.
+  const sectionsById = { I: sectionI, II: sectionII, III: sectionIII, IV: sectionIV };
+  $('#detailBody').querySelectorAll('[data-select-all]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const secId = btn.dataset.selectAll;
+      const rows = sectionsById[secId] || [];
+      rows.forEach(r => state.exportSelected.add(r._rowId));
+      renderDetailPanelFor(row);
+      renderTable();
+      toast(`Đã chọn tất cả ${rows.length} xe ở Mục ${secId} để xuất.`);
     });
   });
 }
