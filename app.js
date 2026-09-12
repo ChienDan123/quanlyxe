@@ -48,6 +48,10 @@ const FILTER_LABELS = {
 const NOTES_KEY = 'vehicleNotesV1';
 const LAST_URL_KEY = 'vehicleLastSheetCsvUrl';
 const GAS_URL_KEY = 'vehicleGasUrl';
+// URL Apps Script Web App mặc định — tự động dùng khi mở trang lần đầu / trên
+// thiết bị chưa từng kết nối, KHÔNG cần bấm "Kết nối Google Sheet".
+// Vẫn có thể đổi URL khác bất cứ lúc nào qua nút "Kết nối Google Sheet".
+const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyRbBYByqGMQoLGrKBK2CMZSrDvBbw2epgMjKzMNmUNAsCYZg58gb-Ia47S31R4vCoBPw/exec';
 const MODE_KEY = 'vehicleConnectMode'; // 'gas' | 'csv'
 const TEMPLATE_KEY = 'vehicleCommitmentTemplateV1';
 
@@ -150,7 +154,7 @@ $('#connectTabs').addEventListener('click', (e) => {
 });
 
 $('#btnConnect').addEventListener('click', () => {
-  $('#gasUrlInput').value = localStorage.getItem(GAS_URL_KEY) || '';
+  $('#gasUrlInput').value = localStorage.getItem(GAS_URL_KEY) || DEFAULT_GAS_URL;
   $('#sheetUrlInput').value = localStorage.getItem(LAST_URL_KEY) || '';
   const preferGas = (localStorage.getItem(MODE_KEY) || 'gas') === 'gas';
   $all('.tab-btn', $('#connectTabs')).forEach(b => b.classList.toggle('active', (b.dataset.tab === 'gas') === preferGas));
@@ -463,8 +467,15 @@ filterBar.addEventListener('focusin', (e) => {
   const input = e.target.closest('[data-role="ms-search"]');
   if (!input) return;
   const field = input.closest('.ms-control').dataset.field;
+  if (state.msUI[field].open) return; // đã mở sẵn -> khỏi render lại, tránh mất focus khi đang gõ
   state.msUI[field].open = true;
   refreshFilterUIs();
+  // BUG CŨ: refreshFilterUIs() thay mới toàn bộ DOM của các ô lọc (innerHTML=...),
+  // nên ô input vừa được click/focus cũng bị thay bằng 1 <input> mới hoàn toàn
+  // và MẤT FOCUS ngay lập tức -> gõ chữ vào không có tác dụng. Phải focus lại
+  // đúng ô input mới được tạo ra cho field này thì mới gõ được.
+  const newInput = $(`.ms-control[data-field="${field}"] [data-role="ms-search"]`);
+  if (newInput) newInput.focus();
 });
 filterBar.addEventListener('input', (e) => {
   const input = e.target.closest('[data-role="ms-search"]');
@@ -1176,7 +1187,9 @@ function refreshAll() {
 (function init() {
   refreshAll();
   const preferGas = (localStorage.getItem(MODE_KEY) || 'gas') === 'gas';
-  const gasUrl = localStorage.getItem(GAS_URL_KEY);
+  // Nếu trình duyệt/thiết bị này chưa từng lưu URL riêng, dùng URL mặc định
+  // đã hardcode ở trên -> luôn tự kết nối, kể cả tab mới / máy khác / điện thoại.
+  const gasUrl = localStorage.getItem(GAS_URL_KEY) || DEFAULT_GAS_URL;
   const csvUrl = localStorage.getItem(LAST_URL_KEY);
   if (preferGas && gasUrl) {
     connectViaAppsScript(gasUrl, { silent: true });
