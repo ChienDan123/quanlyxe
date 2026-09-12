@@ -61,10 +61,15 @@ input,select,textarea{font-family:inherit;font-size:14px;}
 /* multiselect control */
 .ms-control{position:relative;}
 .ms-input-box{
-  display:flex;flex-wrap:wrap;gap:4px;align-items:center;
+  display:flex;flex-wrap:wrap;gap:4px;align-items:flex-start;align-content:flex-start;
   border:1px solid var(--border);border-radius:6px;padding:5px 8px;background:#fff;min-height:36px;
+  max-height:42px;overflow-y:auto;
 }
+.ms-input-box.ms-input-box-expanded{max-height:160px;}
 .ms-input-box:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px rgba(30,95,191,.12);}
+.ms-chip-summary{background:var(--primary);color:#fff;font-weight:600;}
+.ms-chip-summary .x{opacity:.85;}
+.ms-chip-summary .x:hover{opacity:1;}
 .ms-input-box input{border:none;outline:none;flex:1;min-width:60px;font-size:13px;padding:2px;}
 .ms-chip{
   background:var(--highlight);color:var(--primary-dark);border-radius:12px;

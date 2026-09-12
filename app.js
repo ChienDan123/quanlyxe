@@ -417,6 +417,11 @@ function getOptionsFor(field) {
   return Array.from(set).sort((a, b) => a.localeCompare(b, 'vi'));
 }
 
+// Khi đã chọn nhiều hơn số này VÀ ô lọc đang KHÔNG mở, gom các chip lại thành
+// 1 chip tóm tắt "N giá trị đã chọn" cho gọn, thay vì liệt kê hết ra (từng gây
+// vỡ giao diện khi chọn hàng chục/hàng trăm giá trị).
+const MS_COLLAPSE_THRESHOLD = 3;
+
 function renderMultiSelect(field) {
   const container = $(`.ms-control[data-field="${field}"]`);
   if (!container) return;
@@ -428,7 +433,16 @@ function renderMultiSelect(field) {
     ? allOptions.filter(o => o.toLowerCase().includes(searchLower))
     : allOptions;
 
-  const chipsHtml = Array.from(selected).map(v => `
+  // Gọn: khi không đang thao tác (đóng dropdown) và chọn nhiều -> chỉ hiện 1 chip tóm tắt.
+  // Đầy đủ: khi đang mở dropdown để chỉnh sửa -> liệt kê hết (có scroll riêng, không đẩy vỡ trang).
+  const isCollapsed = !ui.open && selected.size > MS_COLLAPSE_THRESHOLD;
+
+  const chipsHtml = isCollapsed
+    ? `<span class="ms-chip ms-chip-summary" data-role="ms-summary" title="Bấm để xem/chỉnh sửa danh sách đã chọn">
+         ✓ Đã chọn ${selected.size} giá trị
+         <span class="x" data-clear-all="1" title="Bỏ chọn tất cả">✕</span>
+       </span>`
+    : Array.from(selected).map(v => `
     <span class="ms-chip" data-value="${escapeHtml(v)}">
       ${escapeHtml(v)}<span class="x" data-remove="${escapeHtml(v)}">✕</span>
     </span>`).join('');
@@ -452,7 +466,7 @@ function renderMultiSelect(field) {
   }
 
   container.innerHTML = `
-    <div class="ms-input-box">
+    <div class="ms-input-box ${ui.open ? 'ms-input-box-expanded' : ''}">
       ${chipsHtml}
       <input type="text" placeholder="Gõ để tìm..." value="${escapeHtml(ui.search)}" data-role="ms-search">
     </div>
@@ -502,12 +516,26 @@ filterBar.addEventListener('keydown', (e) => {
   renderTable();
 });
 filterBar.addEventListener('click', (e) => {
+  const clearAllBtn = e.target.closest('[data-clear-all]');
   const removeBtn = e.target.closest('[data-remove]');
   const option = e.target.closest('.ms-option');
   const control = e.target.closest('.ms-control');
   if (!control) return;
   const field = control.dataset.field;
 
+  if (clearAllBtn) {
+    e.stopPropagation();
+    state.filters[field].clear();
+    state.page = 1;
+    refreshFilterUIs(); renderTable();
+    return;
+  }
+  const summaryChip = e.target.closest('[data-role="ms-summary"]');
+  if (summaryChip) {
+    const input = control.querySelector('[data-role="ms-search"]');
+    if (input) input.focus();
+    return;
+  }
   if (removeBtn) {
     state.filters[field].delete(removeBtn.dataset.remove);
     state.page = 1;
