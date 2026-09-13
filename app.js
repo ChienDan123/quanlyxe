@@ -86,6 +86,11 @@ const state = {
   page: 1,
   pageSize: 50,
   exportSelected: new Set(),
+  // Yêu cầu #2: danh sách xe được tick chọn RIÊNG bên trong panel "Chi tiết chủ
+  // phương tiện" (dùng để cập nhật hàng loạt Trạng thái xe/Ghi chú ngay trong
+  // panel). Cố tình tách biệt HOÀN TOÀN khỏi exportSelected (danh sách chọn để
+  // xuất Bản cam kết ở bảng chính) — 2 việc chọn xe không được ảnh hưởng nhau.
+  detailSelected: new Set(),
   lastCsvUrl: null,
   gasUrl: null,
   mode: null, // 'gas' | 'csv'
@@ -585,7 +590,19 @@ filterBar.addEventListener('click', (e) => {
     refreshFilterUIs(); renderTable();
   }
 });
-document.addEventListener('click', (e) => {
+// FIX BUG #3: trước đây việc "đóng ô lọc khi click ra ngoài" được xử lý ở sự
+// kiện 'click'. Nhưng khi người dùng bấm trực tiếp từ ô lọc A sang ô lọc B,
+// trình tự sự kiện thực tế là: mousedown -> focus (đổi focus sang B, trình
+// focusin ở trên render lại toàn bộ DOM của các ô lọc và tạo input MỚI cho B)
+// -> mouseup -> click. Vì input gốc mà người dùng vừa bấm (ô B) đã bị thay thế
+// bằng input mới ngay trong lúc xử lý focus, nên khi sự kiện 'click' cuối cùng
+// nổ ra, e.target trỏ tới một node ĐÃ BỊ GỠ KHỎI DOM — không control nào (kể cả
+// control B vừa mở) còn chứa nó nữa, khiến đoạn code dưới đây tưởng nhầm là
+// "click ra ngoài tất cả" và đóng luôn ô B vừa mở, buộc người dùng phải bấm
+// lại lần 2 mới chọn được. Chuyển sang lắng nghe 'mousedown' để việc kiểm tra
+// "click có nằm trong control hay không" luôn diễn ra TRƯỚC khi focus đổi và
+// DOM bị render lại, dùng đúng target gốc, ổn định.
+document.addEventListener('mousedown', (e) => {
   FILTER_FIELDS.forEach(field => {
     const control = $(`.ms-control[data-field="${field}"]`);
     if (control && !control.contains(e.target) && state.msUI[field].open) {
@@ -714,19 +731,35 @@ $('#tableBody').addEventListener('click', (e) => {
 });
 
 /* ---------------------------- 7b. CẬP NHẬT HÀNG LOẠT (NHIỀU XE) ------------ */
-// Yêu cầu #3: cho phép chọn nhiều xe (checkbox ở bảng chính / panel chi tiết)
-// rồi cập nhật Trạng thái xe / Ghi chú cùng lúc cho tất cả các xe đã chọn.
-$('#btnBulkUpdate').addEventListener('click', () => {
-  if (!state.exportSelected.size) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) trước.', true); return; }
-  $('#bulkUpdateCount').textContent = state.exportSelected.size;
+// Yêu cầu #2: modal "Cập nhật Trạng thái xe / Ghi chú" dùng CHUNG cho 3 nguồn
+// xe khác nhau, không tách riêng từng bộ code:
+//   (a) các xe tick chọn ở bảng chính            -> state.exportSelected
+//   (b) các xe tick chọn RIÊNG trong panel Chi tiết -> state.detailSelected
+//   (c) cập nhật nhanh cho ĐÚNG 1 xe (nút 🔄 trên từng dòng trong panel Chi tiết)
+// `bulkUpdateOnDone`, nếu có, sẽ được gọi lại sau khi áp dụng xong (ví dụ: để
+// vẽ lại panel Chi tiết đang mở) — độc lập với việc bảng chính có cần vẽ lại
+// hay không (bảng chính luôn được vẽ lại vì Trạng thái/Ghi chú có thể đổi).
+let bulkUpdateTargetRows = [];
+let bulkUpdateOnDone = null;
+
+function openBulkUpdateModalFor(rows, onDone) {
+  if (!rows.length) { toast('Vui lòng chọn ít nhất 1 xe trước.', true); return; }
+  bulkUpdateTargetRows = rows;
+  bulkUpdateOnDone = onDone || null;
+  $('#bulkUpdateCount').textContent = rows.length;
   $('#bulkStatusSelect').value = '';
   $('#bulkNoteText').value = '';
   $('#bulkNoteMode').value = 'append';
   openModal('bulkUpdateModal');
+}
+
+$('#btnBulkUpdate').addEventListener('click', () => {
+  if (!state.exportSelected.size) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) trước.', true); return; }
+  openBulkUpdateModalFor(state.rawData.filter(r => state.exportSelected.has(r._rowId)), null);
 });
 
 $('#btnBulkApply').addEventListener('click', async () => {
-  const rows = state.rawData.filter(r => state.exportSelected.has(r._rowId));
+  const rows = bulkUpdateTargetRows;
   if (!rows.length) { closeModal('bulkUpdateModal'); return; }
 
   const statusVal = $('#bulkStatusSelect').value;
@@ -764,6 +797,9 @@ $('#btnBulkApply').addEventListener('click', async () => {
 
   applyBtn.disabled = false; applyBtn.textContent = '💾 Áp dụng';
   renderTable();
+  if (bulkUpdateOnDone) bulkUpdateOnDone();
+  bulkUpdateTargetRows = [];
+  bulkUpdateOnDone = null;
   closeModal('bulkUpdateModal');
   toast(`Đã cập nhật ${okCount} xe.` + (failCount ? ` (${failCount} xe lỗi khi ghi Sheet)` : ''));
 });
@@ -807,6 +843,40 @@ async function confirmVehicleOwner(vehicleRow, ownerRow) {
   if (isWriteConnected()) {
     const res = await updateRowOnSheet(vehicleRow, { 'Ghi Chú': newNote });
     if (!res || !res.ok) toast('Đã xác nhận trên trình duyệt, nhưng ghi Ghi Chú về Sheet thất bại: ' + ((res && res.error) || ''), true);
+  }
+  renderTable();
+}
+
+// FIX BUG #1: cho phép HỦY một lượt "Xác nhận xe đúng" đã lỡ thao tác nhầm.
+// Chỉ cần xoá đúng key của xe này khỏi confirmedMap — vì computeOwnerSections()
+// luôn tính lại Mục I/II/III/IV MỖI LẦN render dựa trên confirmedMap hiện tại,
+// nên xe sẽ TỰ ĐỘNG rơi về đúng mục phù hợp (II nếu trùng tên chính xác, III
+// nếu tên gần đúng, IV nếu cùng gia đình, hoặc biến mất khỏi mọi mục nếu không
+// còn khớp tiêu chí nào) mà không cần thêm logic phân loại thủ công ở đây.
+async function unconfirmVehicleOwner(vehicleRow) {
+  const map = loadConfirmedOwnerMap();
+  const key = vehicleKey(vehicleRow);
+  const entry = map[key];
+  delete map[key];
+  saveConfirmedOwnerMap(map);
+
+  // Xử lý ghi chú hợp lý: gỡ đúng dòng "Đã xác nhận thuộc về ..." đã được tự
+  // thêm lúc xác nhận trước đó (nếu người dùng chưa sửa tay dòng đó), rồi thêm
+  // một dòng ghi chú ngắn đánh dấu đã hủy để vẫn còn lịch sử tra soát — không
+  // xoá sạch toàn bộ Ghi Chú vốn có của xe.
+  const oldNote = (vehicleRow.ghiChu || '').trim();
+  const noteAddition = entry ? `Đã xác nhận thuộc về ${entry.ownerName}${entry.ownerCccd ? ' - CCCD ' + entry.ownerCccd : ''}` : null;
+  const cancelNote = 'Đã hủy xác nhận chủ xe (xác nhận trước đó không chính xác)';
+  let newNote = oldNote;
+  if (noteAddition) {
+    newNote = oldNote.split(';').map(s => s.trim()).filter(s => s && s !== noteAddition).join('; ');
+  }
+  newNote = newNote ? `${newNote}; ${cancelNote}` : cancelNote;
+  vehicleRow.ghiChu = newNote;
+
+  if (isWriteConnected()) {
+    const res = await updateRowOnSheet(vehicleRow, { 'Ghi Chú': newNote });
+    if (!res || !res.ok) toast('Đã hủy xác nhận trên trình duyệt, nhưng ghi Ghi Chú về Sheet thất bại: ' + ((res && res.error) || ''), true);
   }
   renderTable();
 }
@@ -943,12 +1013,24 @@ function computeOwnerSections(vehicle) {
 function openDetailPanel(rowId) {
   const row = state.rawData.find(r => r._rowId === rowId);
   if (!row) return;
+  // Yêu cầu #2: mỗi lần MỞ MỚI panel Chi tiết từ bảng chính, làm mới lựa chọn
+  // riêng của panel (không kế thừa từ lần xem trước) — hoàn toàn không đụng
+  // tới state.exportSelected (lựa chọn để xuất Bản cam kết ở bảng chính).
+  state.detailSelected = new Set();
   renderDetailPanelFor(row);
   openModal('detailOverlay');
 }
+// Khi đóng panel Chi tiết (nút ✕ hoặc bấm ra ngoài), dọn luôn lựa chọn riêng
+// của panel để lần mở tiếp theo (dù là xe khác) bắt đầu từ trạng thái sạch.
+$('#detailOverlay').addEventListener('click', (e) => {
+  if (e.target === $('#detailOverlay') || e.target.closest('[data-close="detailOverlay"]')) {
+    state.detailSelected = new Set();
+  }
+});
 
 function renderDetailPanelFor(row) {
   const cccd = row.cccd;
+  const cccdTrim = (cccd || '').trim();
   const chuXe = row.chuXe;
   const ownerKey = cccd || ('name:' + normalizeName(chuXe));
 
@@ -959,20 +1041,24 @@ function renderDetailPanelFor(row) {
   const notesStore = loadNotesStore();
   const existingNote = notesStore[ownerKey] || { status: '', text: '' };
 
+  // Yêu cầu #2: checkbox trong panel Chi tiết dùng state.detailSelected (RIÊNG,
+  // độc lập với state.exportSelected của bảng chính). Mỗi dòng cũng có thêm 1
+  // nút "🔄" ở cuối để cập nhật Trạng thái xe/Ghi chú ngay cho riêng xe đó.
   const miniTable = (rows, sectionId, extraCols, extraCellsFn, cssClass) => rows.length ? `
     <table class="mini-table" data-section="${sectionId}">
       <thead><tr>
         <th class="col-chk-mini"></th>
         <th>Biển số</th><th>Chủ xe</th><th>Số CCCD</th><th>Số khung</th><th>Số máy</th>
-        <th>Loại xe</th><th>Trạng thái</th>${extraCols || ''}
+        <th>Loại xe</th><th>Trạng thái</th>${extraCols || ''}<th>Cập nhật</th>
       </tr></thead>
       <tbody>
-        ${rows.map(r => `<tr data-rowid="${r._rowId}" class="${cssClass || ''}">
-          <td class="col-chk-mini"><input type="checkbox" data-role="mini-chk" data-rowid="${r._rowId}" ${state.exportSelected.has(r._rowId) ? 'checked' : ''}></td>
+        ${rows.map(r => `<tr data-rowid="${r._rowId}" class="${cssClass || ''} ${state.detailSelected.has(r._rowId) ? 'selected-row' : ''}">
+          <td class="col-chk-mini"><input type="checkbox" data-role="mini-chk" data-rowid="${r._rowId}" ${state.detailSelected.has(r._rowId) ? 'checked' : ''}></td>
           <td>${escapeHtml(r.bienSo)}</td><td>${escapeHtml(r.chuXe)}</td><td>${escapeHtml(r.cccd) || '—'}</td>
           <td>${escapeHtml(r.soKhung)}</td><td>${escapeHtml(r.soMay)}</td>
           <td>${escapeHtml(r.loaiXe)}</td><td>${escapeHtml(r.trangThaiXe)}</td>
           ${extraCellsFn ? extraCellsFn(r) : ''}
+          <td><button type="button" class="btn btn-ghost btn-sm" data-quick-update="${r._rowId}" title="Cập nhật Trạng thái xe / Ghi chú cho riêng xe này">🔄</button></td>
         </tr>`).join('')}
       </tbody>
     </table>` : `<p class="hint">Không tìm thấy trường hợp phù hợp.</p>`;
@@ -998,6 +1084,18 @@ function renderDetailPanelFor(row) {
     ? (r) => `<td><button type="button" class="btn btn-ghost btn-sm" data-confirm-owner="${r._rowId}" title="Xác nhận xe này thuộc về ${escapeHtml(chuXe)}">✅ Xác nhận đúng</button></td>`
     : (r) => `<td><span class="hint" style="margin:0;">Cần CCCD để xác nhận</span></td>`;
 
+  // FIX BUG #1: Mục I chỉ được chứa xe THỰC SỰ cùng Số CCCD, cộng thêm những xe
+  // đã được người dùng "Xác nhận đúng" thủ công (xem computeOwnerSections()).
+  // Với nhóm xe thứ hai này (Số CCCD gốc KHÁC người đang xem, chỉ có mặt vì đã
+  // được xác nhận), hiện thêm nút "Hủy xác nhận" để xử lý trường hợp lỡ xác
+  // nhận nhầm — bấm vào sẽ đưa xe quay lại đúng Mục II/III/IV theo đối chiếu
+  // tự động (không cần chọn lại thủ công).
+  const sectionIExtraCellsFn = (r) => {
+    const isConfirmedOnly = (r.cccd || '').trim() !== cccdTrim;
+    if (!isConfirmedOnly) return '<td>—</td>';
+    return `<td><button type="button" class="btn btn-ghost btn-sm" data-unconfirm-owner="${r._rowId}" title="Hủy xác nhận xe này thuộc về ${escapeHtml(chuXe)}">↩️ Hủy xác nhận</button></td>`;
+  };
+
   const bodyHtml = `
     <div class="owner-card">
       <div class="row"><b>Họ và tên:</b> ${escapeHtml(chuXe) || '—'}</div>
@@ -1006,7 +1104,20 @@ function renderDetailPanelFor(row) {
       <div class="row"><b>Số điện thoại:</b> ${escapeHtml(phones)}</div>
     </div>
 
-    ${sectionBlock({ id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI, hideIfEmpty: false })}
+    <div class="toolbar" style="margin-bottom:12px;">
+      <div class="toolbar-left">
+        <span class="selected-count" id="detailSelectedCount">${state.detailSelected.size} xe đã chọn trong bảng chi tiết</span>
+      </div>
+      <div class="toolbar-right">
+        <button type="button" id="btnDetailBulkUpdate" class="btn btn-secondary btn-sm" ${state.detailSelected.size ? '' : 'disabled'}>🔄 Cập nhật hàng loạt (xe đã chọn)</button>
+      </div>
+    </div>
+
+    ${sectionBlock({
+      id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI,
+      extraCols: '<th>Xác nhận thủ công</th>', extraCellsFn: sectionIExtraCellsFn,
+      hideIfEmpty: false
+    })}
 
     ${sectionBlock({
       id: 'II', title: 'II. Xe của người trùng họ tên, khác Số CCCD',
@@ -1037,7 +1148,7 @@ function renderDetailPanelFor(row) {
     })}
 
     <div class="section-title">Cập nhật Trạng thái xe / Ghi chú (cho riêng xe này)</div>
-    <div class="section-desc">Muốn cập nhật cùng lúc nhiều xe? Chọn checkbox các xe cần cập nhật ở bảng chính rồi bấm nút "🔄 Cập nhật hàng loạt" trên thanh công cụ.</div>
+    <div class="section-desc">Muốn cập nhật nhiều xe cùng lúc? Tick chọn các xe cần cập nhật ngay trong các bảng Mục I–V ở trên rồi bấm "🔄 Cập nhật hàng loạt (xe đã chọn)" phía trên. Muốn cập nhật riêng 1 xe bất kỳ trong các mục đó, bấm nút 🔄 ở cuối dòng xe đó.</div>
     <div class="note-box">
       <select id="noteStatusSelect">
         <option value="">— Giữ nguyên trạng thái hiện tại —</option>
@@ -1098,27 +1209,34 @@ function renderDetailPanelFor(row) {
       if (targetRow) renderDetailPanelFor(targetRow);
     });
   });
+  // Yêu cầu #2: checkbox trong panel Chi tiết chỉ đổi state.detailSelected —
+  // TUYỆT ĐỐI không đụng tới state.exportSelected / renderTable() của bảng
+  // chính, để 2 việc chọn xe (bảng chính vs panel Chi tiết) độc lập hoàn toàn.
   $('#detailBody').querySelectorAll('[data-role="mini-chk"]').forEach(chk => {
     chk.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = chk.dataset.rowid;
-      if (chk.checked) state.exportSelected.add(id); else state.exportSelected.delete(id);
-      updateSelectedCount();
-      renderTable();
+      if (chk.checked) state.detailSelected.add(id); else state.detailSelected.delete(id);
+      const tr = chk.closest('tr[data-rowid]');
+      if (tr) tr.classList.toggle('selected-row', chk.checked);
+      const countEl = $('#detailSelectedCount');
+      if (countEl) countEl.textContent = `${state.detailSelected.size} xe đã chọn trong bảng chi tiết`;
+      const bulkBtn = $('#btnDetailBulkUpdate');
+      if (bulkBtn) bulkBtn.disabled = state.detailSelected.size === 0;
     });
   });
 
-  // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV/V.
+  // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV/V — dùng detailSelected
+  // (độc lập với lựa chọn "để xuất" ở bảng chính, xem giải thích ở trên).
   const sectionsById = { I: sectionI, II: sectionII, III: sectionIII, IV: sectionIV, V: sectionV };
   $('#detailBody').querySelectorAll('[data-select-all]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const secId = btn.dataset.selectAll;
       const rows = sectionsById[secId] || [];
-      rows.forEach(r => state.exportSelected.add(r._rowId));
+      rows.forEach(r => state.detailSelected.add(r._rowId));
       renderDetailPanelFor(row);
-      renderTable();
-      toast(`Đã chọn tất cả ${rows.length} xe ở Mục ${secId} để xuất.`);
+      toast(`Đã chọn ${rows.length} xe ở Mục ${secId} để cập nhật.`);
     });
   });
 
@@ -1134,6 +1252,41 @@ function renderDetailPanelFor(row) {
       renderDetailPanelFor(row); // render lại: xe vừa xác nhận sẽ chuyển từ Mục II/III lên Mục I
     });
   });
+
+  // FIX BUG #1: nút "Hủy xác nhận" ở Mục I (chỉ hiện với xe được thêm vào do đã
+  // xác nhận thủ công) -> gỡ xác nhận, xe tự rơi về đúng Mục II/III/IV.
+  $('#detailBody').querySelectorAll('[data-unconfirm-owner]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const vehicleRow = state.rawData.find(r => r._rowId === btn.dataset.unconfirmOwner);
+      if (!vehicleRow) return;
+      btn.disabled = true; btn.textContent = 'Đang hủy...';
+      await unconfirmVehicleOwner(vehicleRow);
+      toast(`Đã hủy xác nhận xe ${vehicleRow.bienSo || vehicleRow.soKhung || ''}.`);
+      renderDetailPanelFor(row);
+    });
+  });
+
+  // Yêu cầu #2: nút 🔄 cuối mỗi dòng (Mục I-V) -> cập nhật Trạng thái/Ghi chú
+  // cho riêng đúng 1 xe đó, dùng lại modal Cập nhật hàng loạt với 1 phần tử.
+  $('#detailBody').querySelectorAll('[data-quick-update]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const r = state.rawData.find(x => x._rowId === btn.dataset.quickUpdate);
+      if (!r) return;
+      openBulkUpdateModalFor([r], () => renderDetailPanelFor(row));
+    });
+  });
+
+  // Yêu cầu #2: nút "Cập nhật hàng loạt (xe đã chọn)" ở đầu panel -> áp dụng
+  // cho các xe đang có trong state.detailSelected (độc lập với bảng chính).
+  const btnDetailBulk = $('#btnDetailBulkUpdate');
+  if (btnDetailBulk) {
+    btnDetailBulk.addEventListener('click', () => {
+      const rows = state.rawData.filter(r => state.detailSelected.has(r._rowId));
+      openBulkUpdateModalFor(rows, () => renderDetailPanelFor(row));
+    });
+  }
 }
 
 /* ---------------------------- 11. MẪU BẢN CAM KẾT (CÀI ĐẶT) ---------------- */
