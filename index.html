@@ -151,6 +151,7 @@
     <div class="toolbar-left">
       <label class="chk-all"><input type="checkbox" id="chkSelectAllPage"> Chọn tất cả (trang này)</label>
       <span id="selectedCount" class="selected-count">0 xe đã chọn để xuất</span>
+      <button id="btnBulkUpdate" class="btn btn-secondary btn-sm" disabled title="Chọn ít nhất 1 xe để cập nhật hàng loạt">🔄 Cập nhật hàng loạt</button>
     </div>
     <div class="toolbar-right">
       <label>Số dòng/trang:
@@ -200,12 +201,50 @@
 <!-- ============ DETAIL PANEL (SLIDE-OVER) ============ -->
 <div id="detailOverlay" class="modal-overlay hidden">
   <aside id="detailPanel" class="detail-panel">
+    <div class="detail-resize-handle" id="detailResizeHandle" title="Kéo để thay đổi độ rộng"></div>
     <div class="modal-header">
       <h2>Chi tiết chủ phương tiện</h2>
       <button class="modal-close" data-close="detailOverlay">✕</button>
     </div>
     <div class="modal-body" id="detailBody"><!-- filled by JS --></div>
   </aside>
+</div>
+
+<!-- ============ MODAL CẬP NHẬT HÀNG LOẠT ============ -->
+<div id="bulkUpdateModal" class="modal-overlay hidden">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2>🔄 Cập nhật hàng loạt (<span id="bulkUpdateCount">0</span> xe đã chọn)</h2>
+      <button class="modal-close" data-close="bulkUpdateModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Áp dụng cùng lúc cho tất cả xe đang được chọn (checkbox) ở bảng chính. Để trống trường nào thì giữ nguyên trường đó cho từng xe.</p>
+      <label class="hint-label">Trạng thái xe</label>
+      <select id="bulkStatusSelect" class="tpl-input">
+        <option value="">— Giữ nguyên trạng thái hiện tại —</option>
+        <option value="Còn sử dụng">Còn sử dụng</option>
+        <option value="Đã bán/chuyển nhượng">Đã bán/chuyển nhượng</option>
+        <option value="Đã liên hệ">Đã liên hệ</option>
+        <option value="Đã xác minh">Đã xác minh</option>
+        <option value="Đã ký cam kết">Đã ký cam kết</option>
+        <option value="Chưa liên hệ được">Chưa liên hệ được</option>
+        <option value="Cần xác minh thêm">Cần xác minh thêm</option>
+      </select>
+      <label class="hint-label">Ghi chú thêm</label>
+      <textarea id="bulkNoteText" class="tpl-textarea" rows="3" placeholder="Để trống nếu không muốn đổi ghi chú..."></textarea>
+      <label class="hint-label">Cách áp dụng ghi chú</label>
+      <select id="bulkNoteMode" class="tpl-input">
+        <option value="append">Nối thêm vào ghi chú hiện có của từng xe</option>
+        <option value="replace">Thay thế hoàn toàn ghi chú hiện có</option>
+      </select>
+    </div>
+    <div class="modal-footer">
+      <span class="hint">Sẽ ghi thẳng về Google Sheet nếu đang kết nối chế độ 2 chiều (Apps Script).</span>
+      <div class="footer-btns">
+        <button id="btnBulkApply" class="btn btn-primary">💾 Áp dụng</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ============ COMMITMENT (BẢN CAM KẾT) MODAL ============ -->

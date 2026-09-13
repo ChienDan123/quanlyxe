@@ -175,9 +175,20 @@ tbody tr.selected-row{background:var(--highlight);}
 /* ---------- DETAIL PANEL ---------- */
 #detailOverlay{justify-content:flex-end;background:rgba(15,23,42,.35);}
 .detail-panel{
-  width:560px;max-width:94vw;height:100%;background:#fff;box-shadow:-6px 0 24px rgba(0,0,0,.12);
+  position:relative;
+  width:560px;min-width:360px;max-width:94vw;height:100%;background:#fff;box-shadow:-6px 0 24px rgba(0,0,0,.12);
   display:flex;flex-direction:column;
 }
+/* Tay cầm kéo giãn độ rộng panel — chỉ hoạt động trên desktop (yêu cầu #2).
+   Trên mobile (xem media query bên dưới) bị ẩn đi để giữ nguyên giao diện cũ. */
+.detail-resize-handle{
+  position:absolute;left:-5px;top:0;width:10px;height:100%;cursor:ew-resize;z-index:20;
+}
+.detail-resize-handle::after{
+  content:'';position:absolute;left:4px;top:50%;transform:translateY(-50%);
+  width:3px;height:44px;border-radius:3px;background:var(--border);
+}
+.detail-resize-handle:hover::after{background:var(--primary);}
 .owner-card{background:var(--highlight);border-radius:8px;padding:14px;margin-bottom:16px;}
 .owner-card .row{display:flex;gap:8px;margin-bottom:4px;font-size:13px;}
 .owner-card .row b{min-width:110px;color:var(--text-muted);font-weight:600;}
@@ -242,6 +253,7 @@ table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
 @media (max-width:1000px){
   .filter-bar{flex-direction:column;align-items:stretch;}
   .filter-actions{margin-left:0;}
-  .detail-panel{width:100%;}
+  .detail-panel{width:100% !important;} /* mobile: giữ nguyên giao diện, không cho kéo giãn */
+  .detail-resize-handle{display:none;}
 }
 </style>

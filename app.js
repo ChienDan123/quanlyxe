@@ -38,6 +38,11 @@ const FIELD_MAP = [
 const MATCH_KEY_PRIORITY = ['maId', 'motoId', 'bienSo'];
 // Tên cột trên Sheet dùng để đánh dấu đã xuất bản cam kết (tự tạo nếu Sheet chưa có).
 const EXPORT_FLAG_HEADER = 'Ngày xuất cam kết';
+// Cột "Y" trên Sheet (đếm A=cột 0, B=cột 1... nên Y là cột thứ 25, index 24)
+// chứa thông tin quan hệ gia đình, dạng: "Cùng gia đình với: <CCCD>|<CCCD>...".
+// Không phụ thuộc tên tiêu đề cột: nếu không tìm thấy cột nào có tên chứa
+// "gia đình", hệ thống sẽ tự lấy đúng cột theo VỊ TRÍ (cột Y) làm phương án dự phòng.
+const FAMILY_COLUMN_INDEX = 24;
 
 const FILTER_FIELDS = ['bienSo', 'cccd', 'chuXe', 'diaChi', 'trangThaiXe'];
 const FILTER_LABELS = {
@@ -54,6 +59,10 @@ const GAS_URL_KEY = 'vehicleGasUrl';
 const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyRbBYByqGMQoLGrKBK2CMZSrDvBbw2epgMjKzMNmUNAsCYZg58gb-Ia47S31R4vCoBPw/exec';
 const MODE_KEY = 'vehicleConnectMode'; // 'gas' | 'csv'
 const TEMPLATE_KEY = 'vehicleCommitmentTemplateV1';
+// Lưu các trường hợp đã được người dùng "Xác nhận xe đúng" ở Mục III, để xe đó
+// được coi là thuộc về chủ xe đang xem (chuyển hiển thị lên Mục I) mà KHÔNG
+// làm thay đổi Số CCCD/MST gốc đã lưu của chính xe đó.
+const CONFIRMED_OWNER_KEY = 'vehicleConfirmedOwnerV1';
 
 const DEFAULT_TEMPLATE = {
   kinhGui: 'Kính gửi: Công an xã/phường .....................................',
@@ -131,6 +140,18 @@ function toast(msg, isError = false) {
 
 function openModal(id) { $('#' + id).classList.remove('hidden'); }
 function closeModal(id) { $('#' + id).classList.add('hidden'); }
+
+// true nếu đang ở chế độ đọc + GHI 2 chiều (Apps Script) — dùng chung cho các
+// tính năng ghi ngược mới (xác nhận chủ xe, cập nhật hàng loạt...).
+function isWriteConnected() { return state.mode === 'gas' && !!state.gasUrl; }
+
+// Tách chuỗi cột "gia đình" dạng "Cùng gia đình với: 123|456" thành mảng số CCCD.
+function parseFamilyIds(str) {
+  if (!str) return [];
+  const idx = str.indexOf(':');
+  const listPart = idx >= 0 ? str.slice(idx + 1) : str;
+  return listPart.split('|').map(s => s.trim()).filter(Boolean);
+}
 
 document.addEventListener('click', (e) => {
   const closeBtn = e.target.closest('[data-close]');
@@ -370,6 +391,11 @@ function processRows(rows) {
     if (match) headerToKey[h] = match.key;
   });
 
+  // Xác định cột "gia đình" (cột Y): ưu tiên tìm theo tên cột có chứa "gia đình",
+  // nếu không thấy thì lấy đúng theo VỊ TRÍ cột Y (index 24) làm phương án dự phòng.
+  let familyHeaderKey = sampleHeaders.find(h => stripDiacritics(h).includes('gia dinh'));
+  if (!familyHeaderKey && sampleHeaders[FAMILY_COLUMN_INDEX]) familyHeaderKey = sampleHeaders[FAMILY_COLUMN_INDEX];
+
   state.rawData = rows.map((r, i) => {
     const obj = { _rowId: 'r' + i };
     FIELD_MAP.forEach(f => { obj[f.key] = ''; });
@@ -377,6 +403,7 @@ function processRows(rows) {
       const key = headerToKey[h];
       if (key) obj[key] = (r[h] || '').toString().trim();
     });
+    obj.giaDinh = familyHeaderKey ? (r[familyHeaderKey] || '').toString().trim() : '';
     return obj;
   }).filter(r => r.bienSo || r.soKhung || r.chuXe || r.cccd);
 
@@ -570,6 +597,11 @@ document.addEventListener('click', (e) => {
 $('#btnClearFilters').addEventListener('click', () => {
   FILTER_FIELDS.forEach(f => { state.filters[f].clear(); state.msUI[f].search = ''; });
   state.page = 1;
+  // FIX BUG: trước đây xóa bộ lọc không reset trạng thái đã chọn xe (checkbox),
+  // khiến các dòng đã chọn từ trước vẫn hiện "đã chọn" nhưng không bấm bỏ chọn
+  // được nữa (do state cũ không khớp với dòng dữ liệu hiển thị lại sau khi lọc
+  // thay đổi). Nay chủ động reset hoàn toàn danh sách xe đã chọn để xuất.
+  state.exportSelected.clear();
   refreshFilterUIs(); renderTable();
 });
 
@@ -648,6 +680,8 @@ $('#pagination').addEventListener('click', (e) => {
 
 function updateSelectedCount() {
   $('#selectedCount').textContent = `${state.exportSelected.size} xe đã chọn để xuất`;
+  const bulkBtn = $('#btnBulkUpdate');
+  if (bulkBtn) bulkBtn.disabled = state.exportSelected.size === 0;
 }
 function updateSelectAllPageCheckbox(pageRows) {
   const chk = $('#chkSelectAllPage');
@@ -679,6 +713,61 @@ $('#tableBody').addEventListener('click', (e) => {
   openDetailPanel(rowId);
 });
 
+/* ---------------------------- 7b. CẬP NHẬT HÀNG LOẠT (NHIỀU XE) ------------ */
+// Yêu cầu #3: cho phép chọn nhiều xe (checkbox ở bảng chính / panel chi tiết)
+// rồi cập nhật Trạng thái xe / Ghi chú cùng lúc cho tất cả các xe đã chọn.
+$('#btnBulkUpdate').addEventListener('click', () => {
+  if (!state.exportSelected.size) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) trước.', true); return; }
+  $('#bulkUpdateCount').textContent = state.exportSelected.size;
+  $('#bulkStatusSelect').value = '';
+  $('#bulkNoteText').value = '';
+  $('#bulkNoteMode').value = 'append';
+  openModal('bulkUpdateModal');
+});
+
+$('#btnBulkApply').addEventListener('click', async () => {
+  const rows = state.rawData.filter(r => state.exportSelected.has(r._rowId));
+  if (!rows.length) { closeModal('bulkUpdateModal'); return; }
+
+  const statusVal = $('#bulkStatusSelect').value;
+  const noteVal = $('#bulkNoteText').value.trim();
+  const mode = $('#bulkNoteMode').value; // 'append' | 'replace'
+  if (!statusVal && !noteVal) { toast('Chưa nhập Trạng thái xe hoặc Ghi chú để cập nhật.', true); return; }
+
+  const applyBtn = $('#btnBulkApply');
+  applyBtn.disabled = true; applyBtn.textContent = 'Đang áp dụng...';
+
+  let okCount = 0, failCount = 0;
+  for (const r of rows) {
+    const newGhiChu = noteVal
+      ? (mode === 'append' && r.ghiChu ? `${r.ghiChu}; ${noteVal}` : noteVal)
+      : r.ghiChu;
+    const updates = {};
+    if (statusVal) updates['Trạng thái xe'] = statusVal;
+    if (noteVal) updates['Ghi Chú'] = newGhiChu;
+
+    if (isWriteConnected()) {
+      const res = await updateRowOnSheet(r, updates);
+      if (res && res.ok) {
+        if (statusVal) r.trangThaiXe = statusVal;
+        if (noteVal) r.ghiChu = newGhiChu;
+        okCount++;
+      } else failCount++;
+    } else {
+      // Chưa kết nối 2 chiều -> vẫn cập nhật tạm trong bộ nhớ + lưu ghi chú cục bộ.
+      if (statusVal) r.trangThaiXe = statusVal;
+      if (noteVal) r.ghiChu = newGhiChu;
+      saveNoteFor(r.cccd || ('name:' + normalizeName(r.chuXe)), { status: statusVal || r.trangThaiXe, text: newGhiChu || '' });
+      okCount++;
+    }
+  }
+
+  applyBtn.disabled = false; applyBtn.textContent = '💾 Áp dụng';
+  renderTable();
+  closeModal('bulkUpdateModal');
+  toast(`Đã cập nhật ${okCount} xe.` + (failCount ? ` (${failCount} xe lỗi khi ghi Sheet)` : ''));
+});
+
 /* ---------------------------- 8. GHI CHÚ / TRẠNG THÁI CỤC BỘ ---------------- */
 function loadNotesStore() {
   try { return JSON.parse(localStorage.getItem(NOTES_KEY) || '{}'); } catch (e) { return {}; }
@@ -687,6 +776,39 @@ function saveNoteFor(ownerKey, data) {
   const store = loadNotesStore();
   store[ownerKey] = { ...data, updatedAt: new Date().toISOString() };
   localStorage.setItem(NOTES_KEY, JSON.stringify(store));
+}
+
+/* ---- 8b. "Xác nhận xe đúng" (Mục III -> Mục I) --------------------------- */
+// map: { [vehicleKey]: { ownerCccd, ownerName, confirmedAt } }
+function loadConfirmedOwnerMap() {
+  try { return JSON.parse(localStorage.getItem(CONFIRMED_OWNER_KEY) || '{}'); } catch (e) { return {}; }
+}
+function saveConfirmedOwnerMap(map) {
+  localStorage.setItem(CONFIRMED_OWNER_KEY, JSON.stringify(map));
+}
+
+// Đánh dấu `vehicleRow` là thuộc về `ownerRow` (theo Số CCCD), tự thêm ghi chú
+// (giữ nguyên ghi chú cũ nếu có) và ghi ngược về Sheet nếu đang kết nối 2 chiều.
+// KHÔNG đổi Số CCCD/MST gốc của vehicleRow — chỉ đánh dấu qua bảng ánh xạ riêng,
+// nên khi xem chi tiết trực tiếp xe này hoặc in Bản cam kết, xe vẫn hiển thị
+// đúng thông tin gốc như trước.
+async function confirmVehicleOwner(vehicleRow, ownerRow) {
+  const map = loadConfirmedOwnerMap();
+  map[vehicleKey(vehicleRow)] = {
+    ownerCccd: ownerRow.cccd, ownerName: ownerRow.chuXe, confirmedAt: new Date().toISOString()
+  };
+  saveConfirmedOwnerMap(map);
+
+  const noteAddition = `Đã xác nhận thuộc về ${ownerRow.chuXe}${ownerRow.cccd ? ' - CCCD ' + ownerRow.cccd : ''}`;
+  const oldNote = (vehicleRow.ghiChu || '').trim();
+  const newNote = (!oldNote || !oldNote.includes(noteAddition)) ? (oldNote ? `${oldNote}; ${noteAddition}` : noteAddition) : oldNote;
+  vehicleRow.ghiChu = newNote;
+
+  if (isWriteConnected()) {
+    const res = await updateRowOnSheet(vehicleRow, { 'Ghi Chú': newNote });
+    if (!res || !res.ok) toast('Đã xác nhận trên trình duyệt, nhưng ghi Ghi Chú về Sheet thất bại: ' + ((res && res.error) || ''), true);
+  }
+  renderTable();
 }
 
 /* ---------------------------- 9. FUZZY MATCHING (4 MỤC) -------------------- */
@@ -749,15 +871,22 @@ function isFuzzyNumberMatch(numA, numB) {
   return d > 0 && d <= NUMBER_FUZZY_MAX_DIST;
 }
 
-// Tính 4 mục đối chiếu cho một chủ xe, dựa trên xe hiện đang xem (`vehicle`).
+// Tính 5 mục đối chiếu cho một chủ xe, dựa trên xe hiện đang xem (`vehicle`).
+//  I   - Xe cùng Số CCCD (+ xe đã được "Xác nhận xe đúng" thuộc về người này).
+//  II  - Xe của người trùng họ tên, khác Số CCCD.
+//  III - Xe của người có họ tên gần đúng (chưa xác nhận).
+//  IV  - Xe của người cùng gia đình (theo cột Y).
+//  V   - Xe có Số khung/Số máy gần đúng (trước đây là Mục IV).
 function computeOwnerSections(vehicle) {
   const all = state.rawData;
   const cccd = (vehicle.cccd || '').trim();
   const nameNorm = normalizeName(vehicle.chuXe);
+  const confirmedMap = loadConfirmedOwnerMap();
 
-  // Mục I: tất cả xe cùng Số CCCD (xe chính thức của người đó).
+  // Mục I: tất cả xe cùng Số CCCD, CỘNG THÊM các xe đã được xác nhận (Mục III)
+  // là thuộc về đúng người có Số CCCD này — dù Số CCCD gốc trên dòng đó khác.
   const sectionI = cccd
-    ? all.filter(v => (v.cccd || '').trim() === cccd)
+    ? all.filter(v => (v.cccd || '').trim() === cccd || (confirmedMap[vehicleKey(v)] || {}).ownerCccd === cccd)
     : [vehicle];
 
   // Mục II: xe của người trùng họ tên chính xác nhưng khác Số CCCD.
@@ -766,28 +895,40 @@ function computeOwnerSections(vehicle) {
     : [];
 
   // Mục III: chỉ những trường hợp sai dấu / sai chữ lót / sai họ (xem isFuzzyNameMatch),
-  // loại trừ những xe đã thuộc Mục I hoặc Mục II.
+  // loại trừ những xe đã thuộc Mục I hoặc Mục II, và loại trừ xe ĐÃ được xác nhận
+  // (dù xác nhận cho chính người này hay cho người khác) vì đã có kết luận rồi.
   const usedAfterII = new Set([...sectionI, ...sectionII].map(vehicleKey));
   const sectionIII = vehicle.chuXe ? all.filter(v => {
     if (usedAfterII.has(vehicleKey(v))) return false;
+    if (confirmedMap[vehicleKey(v)]) return false;
     return isFuzzyNameMatch(vehicle.chuXe, v.chuXe);
   }) : [];
 
-  // Mục IV: xe có Số khung hoặc Số máy gần đúng (sai/thiếu tối đa 2 ký tự) với
-  // các xe trong danh sách (Mục I) của người này, loại trừ Mục I–III.
+  // Mục IV: xe của người CÙNG GIA ĐÌNH — lấy từ cột Y, dạng
+  // "Cùng gia đình với: <CCCD>|<CCCD>...". Liệt kê mọi dòng mà cột Y của
+  // CHÍNH dòng đó có chứa đúng Số CCCD của người đang xem.
   const usedAfterIII = new Set([...sectionI, ...sectionII, ...sectionIII].map(vehicleKey));
+  const sectionIV = cccd ? all.filter(v => {
+    if (usedAfterIII.has(vehicleKey(v))) return false;
+    return parseFamilyIds(v.giaDinh).includes(cccd);
+  }) : [];
+
+  // Mục V (trước đây là Mục IV): xe có Số khung hoặc Số máy gần đúng (sai/thiếu
+  // tối đa 2 ký tự) với các xe trong danh sách (Mục I) của người này, loại trừ
+  // Mục I–IV.
+  const usedAfterIV = new Set([...sectionI, ...sectionII, ...sectionIII, ...sectionIV].map(vehicleKey));
   const ownNumbers = uniq(sectionI.flatMap(v => [
     (v.soKhung || '').trim().toUpperCase(),
     (v.soMay || '').trim().toUpperCase()
   ])).filter(n => n.length >= NUMBER_FUZZY_MIN_LEN);
-  const sectionIV = ownNumbers.length ? all.filter(v => {
-    if (usedAfterIII.has(vehicleKey(v))) return false;
+  const sectionV = ownNumbers.length ? all.filter(v => {
+    if (usedAfterIV.has(vehicleKey(v))) return false;
     const sk = (v.soKhung || '').trim().toUpperCase();
     const sm = (v.soMay || '').trim().toUpperCase();
     return ownNumbers.some(own => isFuzzyNumberMatch(sk, own) || isFuzzyNumberMatch(sm, own));
   }) : [];
 
-  return { sectionI, sectionII, sectionIII, sectionIV };
+  return { sectionI, sectionII, sectionIII, sectionIV, sectionV };
 }
 
 /* ---------------------------- 10. PANEL CHI TIẾT CHỦ XE --------------------- */
@@ -803,7 +944,7 @@ function renderDetailPanelFor(row) {
   const chuXe = row.chuXe;
   const ownerKey = cccd || ('name:' + normalizeName(chuXe));
 
-  const { sectionI, sectionII, sectionIII, sectionIV } = computeOwnerSections(row);
+  const { sectionI, sectionII, sectionIII, sectionIV, sectionV } = computeOwnerSections(row);
   const phones = uniq(sectionI.map(r => r.soDienThoai)).join(' | ') || '—';
   const addr = uniq(sectionI.map(r => r.diaChi)).join(' | ') || '—';
 
@@ -832,6 +973,23 @@ function renderDetailPanelFor(row) {
     ? `<button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;" data-select-all="${sectionId}">☑️ Chọn tất cả (${rows.length})</button>`
     : '';
 
+  // Yêu cầu #5: ẩn hoàn toàn các mục II, III, IV, V khi không có dữ liệu (không
+  // tiêu đề, không khoảng trống thừa). Mục I luôn hiển thị (ít nhất là chính xe
+  // đang xem), nên không cần ẩn.
+  const sectionBlock = ({ id, title, desc, rows, extraCols, extraCellsFn, cssClass, hideIfEmpty }) => {
+    if (hideIfEmpty && !rows.length) return '';
+    return `
+    <div class="section-title">${title} <span class="tag-count">${rows.length}</span>${selectAllBtn(id, rows)}</div>
+    ${desc ? `<div class="section-desc">${desc}</div>` : ''}
+    ${miniTable(rows, id, extraCols, extraCellsFn, cssClass)}`;
+  };
+
+  // Mục III: mỗi dòng có thêm nút "Xác nhận xe đúng" để chuyển xe đó lên Mục I
+  // của người đang xem. Chỉ khả dụng khi người đang xem đã có Số CCCD.
+  const confirmCol = cccd
+    ? (r) => `<td><button type="button" class="btn btn-ghost btn-sm" data-confirm-owner="${r._rowId}" title="Xác nhận xe này thuộc về ${escapeHtml(chuXe)}">✅ Xác nhận đúng</button></td>`
+    : (r) => `<td><span class="hint" style="margin:0;">Cần CCCD để xác nhận</span></td>`;
+
   const bodyHtml = `
     <div class="owner-card">
       <div class="row"><b>Họ và tên:</b> ${escapeHtml(chuXe) || '—'}</div>
@@ -840,22 +998,36 @@ function renderDetailPanelFor(row) {
       <div class="row"><b>Số điện thoại:</b> ${escapeHtml(phones)}</div>
     </div>
 
-    <div class="section-title">I. Xe cùng Số CCCD (xe chính thức) <span class="tag-count">${sectionI.length}</span>${selectAllBtn('I', sectionI)}</div>
-    ${miniTable(sectionI, 'I')}
+    ${sectionBlock({ id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI, hideIfEmpty: false })}
 
-    <div class="section-title">II. Xe của người trùng họ tên, khác Số CCCD <span class="tag-count">${sectionII.length}</span>${selectAllBtn('II', sectionII)}</div>
-    <div class="section-desc">Có thể là cùng một người kê khai CCCD khác nhau, hoặc trùng tên ngẫu nhiên — cần đối chiếu thêm.</div>
-    ${miniTable(sectionII, 'II', null, null, 'diff-cccd')}
+    ${sectionBlock({
+      id: 'II', title: 'II. Xe của người trùng họ tên, khác Số CCCD',
+      desc: 'Có thể là cùng một người kê khai CCCD khác nhau, hoặc trùng tên ngẫu nhiên — cần đối chiếu thêm.',
+      rows: sectionII, cssClass: 'diff-cccd', hideIfEmpty: true
+    })}
 
-    <div class="section-title">III. Xe của người có họ tên gần đúng <span class="tag-count">${sectionIII.length}</span>${selectAllBtn('III', sectionIII)}</div>
-    <div class="section-desc">Chỉ hiện các trường hợp: sai dấu (VD: Nguyễn → Nguyen), hoặc chỉ sai chữ lót, hoặc chỉ sai họ (còn chữ lót + tên chính giống hệt "${escapeHtml(chuXe)}").</div>
-    ${miniTable(sectionIII, 'III', '<th>Địa chỉ đăng ký</th>', (r) => `<td>${escapeHtml(r.diaChi) || '—'}</td>`, 'fuzzy-name')}
+    ${sectionBlock({
+      id: 'III', title: 'III. Xe của người có họ tên gần đúng',
+      desc: `Chỉ hiện các trường hợp: sai dấu (VD: Nguyễn → Nguyen), hoặc chỉ sai chữ lót, hoặc chỉ sai họ (còn chữ lót + tên chính giống hệt "${escapeHtml(chuXe)}"). Bấm "Xác nhận đúng" nếu chắc chắn đây là cùng một người — xe sẽ được chuyển lên Mục I.`,
+      rows: sectionIII, extraCols: '<th>Địa chỉ đăng ký</th><th>Xác nhận</th>',
+      extraCellsFn: (r) => `<td>${escapeHtml(r.diaChi) || '—'}</td>${confirmCol(r)}`,
+      cssClass: 'fuzzy-name', hideIfEmpty: true
+    })}
 
-    <div class="section-title">IV. Xe có Số khung/Số máy gần đúng với xe của người này <span class="tag-count">${sectionIV.length}</span>${selectAllBtn('IV', sectionIV)}</div>
-    <div class="section-desc">Số khung/số máy sai hoặc thiếu tối đa ${NUMBER_FUZZY_MAX_DIST} ký tự so với các xe ở Mục I (các ký tự còn lại phải giống hệt) — nghi ngờ nhập liệu sai hoặc trùng khung/máy.</div>
-    ${miniTable(sectionIV, 'IV', null, null, 'fuzzy-number')}
+    ${sectionBlock({
+      id: 'IV', title: 'IV. Xe của người cùng gia đình',
+      desc: 'Lấy từ cột quan hệ gia đình (cột Y): liệt kê các xe có ghi "Cùng gia đình với" chứa đúng Số CCCD của người đang xem.',
+      rows: sectionIV, cssClass: 'fuzzy-name', hideIfEmpty: true
+    })}
 
-    <div class="section-title">Cập nhật Trạng thái xe / Ghi chú</div>
+    ${sectionBlock({
+      id: 'V', title: 'V. Xe có Số khung/Số máy gần đúng với xe của người này',
+      desc: `Số khung/số máy sai hoặc thiếu tối đa ${NUMBER_FUZZY_MAX_DIST} ký tự so với các xe ở Mục I (các ký tự còn lại phải giống hệt) — nghi ngờ nhập liệu sai hoặc trùng khung/máy.`,
+      rows: sectionV, cssClass: 'fuzzy-number', hideIfEmpty: true
+    })}
+
+    <div class="section-title">Cập nhật Trạng thái xe / Ghi chú (cho riêng xe này)</div>
+    <div class="section-desc">Muốn cập nhật cùng lúc nhiều xe? Chọn checkbox các xe cần cập nhật ở bảng chính rồi bấm nút "🔄 Cập nhật hàng loạt" trên thanh công cụ.</div>
     <div class="note-box">
       <select id="noteStatusSelect">
         <option value="">— Giữ nguyên trạng thái hiện tại —</option>
@@ -926,8 +1098,8 @@ function renderDetailPanelFor(row) {
     });
   });
 
-  // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV.
-  const sectionsById = { I: sectionI, II: sectionII, III: sectionIII, IV: sectionIV };
+  // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV/V.
+  const sectionsById = { I: sectionI, II: sectionII, III: sectionIII, IV: sectionIV, V: sectionV };
   $('#detailBody').querySelectorAll('[data-select-all]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -937,6 +1109,19 @@ function renderDetailPanelFor(row) {
       renderDetailPanelFor(row);
       renderTable();
       toast(`Đã chọn tất cả ${rows.length} xe ở Mục ${secId} để xuất.`);
+    });
+  });
+
+  // Yêu cầu #4: nút "Xác nhận xe đúng" ở Mục III -> chuyển xe đó lên Mục I.
+  $('#detailBody').querySelectorAll('[data-confirm-owner]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const vehicleRow = state.rawData.find(r => r._rowId === btn.dataset.confirmOwner);
+      if (!vehicleRow) return;
+      btn.disabled = true; btn.textContent = 'Đang lưu...';
+      await confirmVehicleOwner(vehicleRow, row);
+      toast(`Đã xác nhận xe ${vehicleRow.bienSo || vehicleRow.soKhung || ''} thuộc về ${chuXe}.`);
+      renderDetailPanelFor(row); // render lại: xe vừa xác nhận sẽ chuyển từ Mục III lên Mục I
     });
   });
 }
@@ -1260,6 +1445,41 @@ function buildDocxTable(tableEl, docxLib) {
 
   return new Table({ columnWidths: colWidths, width: { size: totalWidth, type: WidthType.DXA }, rows: docxRows });
 }
+
+/* ---------------------------- 13b. KÉO GIÃN PANEL CHI TIẾT (DESKTOP) ------- */
+// Yêu cầu #2: cho phép kéo rộng/thu hẹp panel "Chi tiết chủ phương tiện" trên
+// desktop; trên điện thoại (màn hình <=1000px, trùng breakpoint responsive có
+// sẵn) giữ nguyên giao diện cũ — không gắn thao tác kéo.
+(function setupDetailPanelResize() {
+  const handle = document.getElementById('detailResizeHandle');
+  const panel = document.getElementById('detailPanel');
+  if (!handle || !panel) return;
+  const WIDTH_KEY = 'vehicleDetailPanelWidthV1';
+  const MIN_W = 360, MAX_W = 1100;
+
+  const savedWidth = parseInt(localStorage.getItem(WIDTH_KEY), 10);
+  if (savedWidth && savedWidth >= MIN_W && savedWidth <= MAX_W) panel.style.width = savedWidth + 'px';
+
+  let dragging = false;
+  handle.addEventListener('mousedown', (e) => {
+    if (window.innerWidth <= 1000) return; // mobile: không cho kéo, giữ nguyên giao diện
+    dragging = true;
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const newWidth = Math.min(MAX_W, Math.max(MIN_W, window.innerWidth - e.clientX));
+    panel.style.width = newWidth + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.userSelect = '';
+    const w = parseInt(panel.style.width, 10);
+    if (w) localStorage.setItem(WIDTH_KEY, w);
+  });
+})();
 
 /* ---------------------------- 14. KHỞI ĐỘNG ------------------------------- */
 function refreshAll() {
