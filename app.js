@@ -873,7 +873,7 @@ function isFuzzyNumberMatch(numA, numB) {
 
 // Tính 5 mục đối chiếu cho một chủ xe, dựa trên xe hiện đang xem (`vehicle`).
 //  I   - Xe cùng Số CCCD (+ xe đã được "Xác nhận xe đúng" thuộc về người này).
-//  II  - Xe của người trùng họ tên, khác Số CCCD.
+//  II  - Xe của người trùng họ tên, khác Số CCCD (có thể "Xác nhận đúng").
 //  III - Xe của người có họ tên gần đúng (chưa xác nhận).
 //  IV  - Xe của người cùng gia đình (theo cột Y).
 //  V   - Xe có Số khung/Số máy gần đúng (trước đây là Mục IV).
@@ -883,15 +883,23 @@ function computeOwnerSections(vehicle) {
   const nameNorm = normalizeName(vehicle.chuXe);
   const confirmedMap = loadConfirmedOwnerMap();
 
-  // Mục I: tất cả xe cùng Số CCCD, CỘNG THÊM các xe đã được xác nhận (Mục III)
-  // là thuộc về đúng người có Số CCCD này — dù Số CCCD gốc trên dòng đó khác.
+  // Mục I: tất cả xe cùng Số CCCD, CỘNG THÊM các xe đã được xác nhận (từ Mục II
+  // hoặc Mục III) là thuộc về đúng người có Số CCCD này — dù Số CCCD gốc trên
+  // dòng đó khác.
   const sectionI = cccd
     ? all.filter(v => (v.cccd || '').trim() === cccd || (confirmedMap[vehicleKey(v)] || {}).ownerCccd === cccd)
     : [vehicle];
 
-  // Mục II: xe của người trùng họ tên chính xác nhưng khác Số CCCD.
+  // Mục II: xe của người trùng họ tên chính xác nhưng khác Số CCCD — loại trừ
+  // xe đã thuộc Mục I (kể cả xe vừa được "Xác nhận đúng" chuyển lên đó), và
+  // loại trừ xe ĐÃ được xác nhận thuộc về người khác (đã có kết luận rồi).
+  const sectionIKeys = new Set(sectionI.map(vehicleKey));
   const sectionII = nameNorm
-    ? all.filter(v => normalizeName(v.chuXe) === nameNorm && (v.cccd || '').trim() !== cccd)
+    ? all.filter(v => {
+        if (sectionIKeys.has(vehicleKey(v))) return false;
+        if (confirmedMap[vehicleKey(v)]) return false;
+        return normalizeName(v.chuXe) === nameNorm && (v.cccd || '').trim() !== cccd;
+      })
     : [];
 
   // Mục III: chỉ những trường hợp sai dấu / sai chữ lót / sai họ (xem isFuzzyNameMatch),
@@ -984,8 +992,8 @@ function renderDetailPanelFor(row) {
     ${miniTable(rows, id, extraCols, extraCellsFn, cssClass)}`;
   };
 
-  // Mục III: mỗi dòng có thêm nút "Xác nhận xe đúng" để chuyển xe đó lên Mục I
-  // của người đang xem. Chỉ khả dụng khi người đang xem đã có Số CCCD.
+  // Mục II và III: mỗi dòng có thêm nút "Xác nhận xe đúng" để chuyển xe đó lên
+  // Mục I của người đang xem. Chỉ khả dụng khi người đang xem đã có Số CCCD.
   const confirmCol = cccd
     ? (r) => `<td><button type="button" class="btn btn-ghost btn-sm" data-confirm-owner="${r._rowId}" title="Xác nhận xe này thuộc về ${escapeHtml(chuXe)}">✅ Xác nhận đúng</button></td>`
     : (r) => `<td><span class="hint" style="margin:0;">Cần CCCD để xác nhận</span></td>`;
@@ -1002,8 +1010,10 @@ function renderDetailPanelFor(row) {
 
     ${sectionBlock({
       id: 'II', title: 'II. Xe của người trùng họ tên, khác Số CCCD',
-      desc: 'Có thể là cùng một người kê khai CCCD khác nhau, hoặc trùng tên ngẫu nhiên — cần đối chiếu thêm.',
-      rows: sectionII, cssClass: 'diff-cccd', hideIfEmpty: true
+      desc: `Có thể là cùng một người kê khai CCCD khác nhau, hoặc trùng tên ngẫu nhiên — cần đối chiếu thêm. Bấm "Xác nhận đúng" nếu chắc chắn đây là cùng một người với "${escapeHtml(chuXe)}" — xe sẽ được chuyển lên Mục I.`,
+      rows: sectionII, extraCols: '<th>Địa chỉ đăng ký</th><th>Xác nhận</th>',
+      extraCellsFn: (r) => `<td>${escapeHtml(r.diaChi) || '—'}</td>${confirmCol(r)}`,
+      cssClass: 'diff-cccd', hideIfEmpty: true
     })}
 
     ${sectionBlock({
@@ -1112,7 +1122,7 @@ function renderDetailPanelFor(row) {
     });
   });
 
-  // Yêu cầu #4: nút "Xác nhận xe đúng" ở Mục III -> chuyển xe đó lên Mục I.
+  // Yêu cầu: nút "Xác nhận xe đúng" ở Mục II và Mục III -> chuyển xe đó lên Mục I.
   $('#detailBody').querySelectorAll('[data-confirm-owner]').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -1121,7 +1131,7 @@ function renderDetailPanelFor(row) {
       btn.disabled = true; btn.textContent = 'Đang lưu...';
       await confirmVehicleOwner(vehicleRow, row);
       toast(`Đã xác nhận xe ${vehicleRow.bienSo || vehicleRow.soKhung || ''} thuộc về ${chuXe}.`);
-      renderDetailPanelFor(row); // render lại: xe vừa xác nhận sẽ chuyển từ Mục III lên Mục I
+      renderDetailPanelFor(row); // render lại: xe vừa xác nhận sẽ chuyển từ Mục II/III lên Mục I
     });
   });
 }
