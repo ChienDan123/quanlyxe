@@ -83,17 +83,21 @@ const TEMPLATE_KEY = 'vehicleCommitmentTemplateV1';
 const CONFIRMED_OWNER_KEY = 'vehicleConfirmedOwnerV1';
 
 const DEFAULT_TEMPLATE = {
-  kinhGui: 'Kính gửi: Công an xã/phường .....................................',
+  kinhGui: 'Kính gửi: Công an xã Chiên Đàn',
   diaDanh: '.......',
   mucI:
 `Tôi đã bán/chuyển nhượng/cho/tặng (chuyển quyền sở hữu) các phương tiện có biển số nêu trên cho người khác.
 Hiện nay tôi không xác định được thông tin (họ tên, địa chỉ, số điện thoại) của người đã mua hoặc người đang quản lý, sử dụng phương tiện nêu trên.
-Tôi xin cam kết kể từ thời điểm chuyển quyền sở hữu phương tiện nêu trên, tôi không còn quyền liên quan đến việc quản lý, sử dụng phương tiện; mọi trách nhiệm phát sinh liên quan đến phương tiện sau thời điểm chuyển quyền sở hữu không thuộc trách nhiệm của tôi.`,
+Tôi xin cam kết kể từ thời điểm chuyển quyền sở hữu phương tiện nêu trên, tôi không còn quyền liên quan đến việc quản lý, sử dụng phương tiện; Đề nghị cơ quan Công an cập nhật trạng thái xe trên hệ thống đăng ký, quản lý phương tiện theo quy định.`,
   mucII:
+`Tôi xin xác nhận các các xe có biển số:.....................đã bị hư hỏng không còn hoạt động/bị mất.
+Tôi đã được Công an xã hướng dẫn và cam kết sẽ làm thủ tục thu hồi biển số, đăng ký xe theo quy định.`,
+  mucIII:
 `Tôi xin xác nhận phương tiện nêu trên hiện vẫn thuộc quyền sở hữu và do tôi trực tiếp quản lý, sử dụng; chưa thực hiện việc bán, chuyển nhượng, cho, tặng phương tiện cho bất kỳ tổ chức, cá nhân nào khác.
 Tôi cam kết tiếp tục quản lý, sử dụng phương tiện đúng quy định của pháp luật về giao thông đường bộ và các quy định có liên quan.
 Trường hợp sau này có thay đổi về tình trạng sở hữu, sử dụng phương tiện (bán, chuyển nhượng, cho, tặng, hư hỏng không còn sử dụng, bị mất...), tôi cam kết sẽ chủ động thông báo và thực hiện đầy đủ thủ tục đăng ký sang tên hoặc thu hồi đăng ký, biển số xe theo đúng quy định của pháp luật.`,
-  camDoan: 'Tôi cam đoan những nội dung kê khai, cam kết nêu trên là hoàn toàn đúng sự thật. Nếu có nội dung nào không đúng sự thật, tôi xin hoàn toàn chịu trách nhiệm trước pháp luật.'
+ 
+   camDoan: 'Tôi cam đoan những nội dung kê khai, cam kết nêu trên là hoàn toàn đúng sự thật. Nếu có nội dung nào không đúng sự thật, tôi xin hoàn toàn chịu trách nhiệm trước pháp luật.'
 };
 
 /* ---------------------------- 2. STATE TOÀN CỤC --------------------------- */
