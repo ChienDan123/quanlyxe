@@ -1572,7 +1572,7 @@ function buildDocPageElement(doc, index) {
     <div class="doc-field-line doc-bold">II. Đối với phương tiện hư hỏng, không còn hoạt động hoặc bị mất:</div>
     ${multilineToFieldLines(tpl.mucII)}
     
-    <div class="doc-field-line doc-bold">III. Đối với phương tiện còn đang sử dụng (ngoài những phương tiện ở mục I):</div>
+    <div class="doc-field-line doc-bold">III. Đối với phương tiện còn đang sử dụng (ngoài những phương tiện ở mục I và mục II):</div>
     ${multilineToFieldLines(tpl.mucIII)}
 
     <div class="doc-field-line">${escapeHtml(tpl.camDoan)}</div>
