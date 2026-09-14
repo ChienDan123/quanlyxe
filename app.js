@@ -1565,8 +1565,11 @@ function buildDocPageElement(doc, index) {
     ${soldPlates ? `<div class="doc-field-line">Các phương tiện liên quan có biển số: <span class="fill" contenteditable="true">${escapeHtml(soldPlates)}</span>.</div>` : ''}
     ${multilineToFieldLines(tpl.mucI)}
 
-    <div class="doc-field-line doc-bold">II. Đối với phương tiện còn đang sử dụng (ngoài những phương tiện ở mục I):</div>
+    <div class="doc-field-line doc-bold">II. Đối với phương tiện hư hỏng, không còn hoạt động hoặc bị mất:</div>
     ${multilineToFieldLines(tpl.mucII)}
+    
+    <div class="doc-field-line doc-bold">III. Đối với phương tiện còn đang sử dụng (ngoài những phương tiện ở mục I):</div>
+    ${multilineToFieldLines(tpl.mucIII)}
 
     <div class="doc-field-line">${escapeHtml(tpl.camDoan)}</div>
 
