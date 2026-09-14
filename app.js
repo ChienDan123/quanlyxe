@@ -50,6 +50,24 @@ const FILTER_LABELS = {
   diaChi: 'Địa chỉ / Phường-Xã', trangThaiXe: 'Trạng thái xe'
 };
 
+// Yêu cầu 2A: danh sách cột cho phép chọn làm tiêu chí sắp xếp (kết hợp nhiều
+// tiêu chí cùng lúc). "type: name" -> chỉ so sánh theo TÊN (từ cuối), bỏ qua
+// họ và chữ lót. "type: number" -> so sánh dạng số (VD số lượng xe cùng chủ).
+const SORT_FIELDS = [
+  { key: 'chuXe',       label: 'Tên (chủ phương tiện)', type: 'name' },
+  { key: 'bienSo',      label: 'Biển số',               type: 'text' },
+  { key: 'soKhung',     label: 'Số khung',               type: 'text' },
+  { key: 'soMay',       label: 'Số máy',                 type: 'text' },
+  { key: 'nhanHieu',    label: 'Nhãn hiệu',              type: 'text' },
+  { key: 'loaiXe',      label: 'Loại xe',                type: 'text' },
+  { key: 'diaChi',      label: 'Địa chỉ đăng ký',        type: 'text' },
+  { key: 'phuongXaMoi', label: 'Phường/Xã mới',          type: 'text' },
+  { key: 'trangThaiXe', label: 'Trạng thái xe',          type: 'text' },
+  { key: 'ngayDangKy',  label: 'Ngày đăng ký',           type: 'text' },
+  { key: 'soDienThoai', label: 'Số điện thoại',          type: 'text' },
+  { key: 'soLuongXe',   label: 'Số lượng xe cùng chủ',   type: 'number' },
+];
+
 const NOTES_KEY = 'vehicleNotesV1';
 const LAST_URL_KEY = 'vehicleLastSheetCsvUrl';
 const GAS_URL_KEY = 'vehicleGasUrl';
@@ -86,16 +104,19 @@ const state = {
   page: 1,
   pageSize: 50,
   exportSelected: new Set(),
-  // Yêu cầu #2: danh sách xe được tick chọn RIÊNG bên trong panel "Chi tiết chủ
-  // phương tiện" (dùng để cập nhật hàng loạt Trạng thái xe/Ghi chú ngay trong
-  // panel). Cố tình tách biệt HOÀN TOÀN khỏi exportSelected (danh sách chọn để
-  // xuất Bản cam kết ở bảng chính) — 2 việc chọn xe không được ảnh hưởng nhau.
-  detailSelected: new Set(),
   lastCsvUrl: null,
   gasUrl: null,
   mode: null, // 'gas' | 'csv'
   commitmentDocs: [],
   template: loadTemplate(),
+  // Yêu cầu 2A: danh sách tiêu chí sắp xếp kết hợp, thứ tự = độ ưu tiên.
+  // Mỗi phần tử: { field: 'chuXe', dir: 'asc' | 'desc' }.
+  sortCriteria: [],
+  // Yêu cầu 2B: các bộ lọc bổ sung (tích chọn).
+  extraFilters: { hasPhone: false, multiVehicle: false },
+  // Cache số lượng xe theo từng chủ xe (tính theo CCCD hiệu lực, có tính cả
+  // các xe đã được "Xác nhận xe đúng"). Được tính lại mỗi khi dữ liệu thay đổi.
+  ownerVehicleCounts: new Map(),
 };
 
 /* ---------------------------- 3. TIỆN ÍCH CHUNG ---------------------------- */
@@ -415,6 +436,7 @@ function processRows(rows) {
   state.filters = Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()]));
   state.exportSelected = new Set();
   state.page = 1;
+  computeOwnerVehicleCounts();
   refreshAll();
 }
 
@@ -430,6 +452,12 @@ function getFiltered(excludeField) {
       } else {
         if (!set.has(row[key])) return false;
       }
+    }
+    // Yêu cầu 2B: bộ lọc bổ sung — chỉ giữ người có SĐT / người có nhiều xe.
+    if (state.extraFilters.hasPhone && !(row.soDienThoai || '').trim()) return false;
+    if (state.extraFilters.multiVehicle) {
+      const count = state.ownerVehicleCounts.get(getEffectiveOwnerKey(row)) || 0;
+      if (count < 2) return false;
     }
     return true;
   });
@@ -447,6 +475,47 @@ function getOptionsFor(field) {
     }
   });
   return Array.from(set).sort((a, b) => a.localeCompare(b, 'vi'));
+}
+
+/* ---------------------------- 6b. SẮP XẾP KẾT HỢP NHIỀU TIÊU CHÍ ------------ */
+// Lấy giá trị dùng để so sánh khi sắp xếp cho 1 dòng theo 1 trường cụ thể.
+// Yêu cầu 2A: cột "Tên" (chủ phương tiện) CHỈ so sánh theo TÊN (từ cuối cùng
+// trong họ tên), bỏ qua họ và chữ lót — dùng lại splitNameParts() đã có sẵn
+// để tách tên (phục vụ đối chiếu Mục III).
+function getSortValue(row, field) {
+  if (field === 'soLuongXe') {
+    return state.ownerVehicleCounts.get(getEffectiveOwnerKey(row)) || 0;
+  }
+  const raw = (row[field] || '').toString().trim();
+  if (field === 'chuXe') {
+    const parts = splitNameParts(raw);
+    return parts ? parts.ten : normalizeName(raw);
+  }
+  return raw;
+}
+
+// So sánh 2 dòng dữ liệu theo TOÀN BỘ danh sách tiêu chí đã chọn (state.sortCriteria),
+// theo đúng thứ tự ưu tiên (tiêu chí đầu tiên quyết định trước, các tiêu chí sau
+// chỉ dùng để "phân giải" khi tiêu chí trước bằng nhau).
+// Nếu người dùng chưa chọn tiêu chí nào nhưng đang bật lọc "nhiều xe", mặc định
+// sắp xếp theo số lượng xe giảm dần (nhiều -> ít) như yêu cầu 2B.
+function compareBySortCriteria(a, b) {
+  const criteria = state.sortCriteria.length
+    ? state.sortCriteria
+    : (state.extraFilters.multiVehicle ? [{ field: 'soLuongXe', dir: 'desc' }] : []);
+  for (const { field, dir } of criteria) {
+    const fieldDef = SORT_FIELDS.find(f => f.key === field);
+    const va = getSortValue(a, field);
+    const vb = getSortValue(b, field);
+    let cmp;
+    if (fieldDef && fieldDef.type === 'number') {
+      cmp = (Number(va) || 0) - (Number(vb) || 0);
+    } else {
+      cmp = va.toString().localeCompare(vb.toString(), 'vi', { sensitivity: 'base' });
+    }
+    if (cmp !== 0) return dir === 'desc' ? -cmp : cmp;
+  }
+  return 0;
 }
 
 // Khi đã chọn nhiều hơn số này VÀ ô lọc đang KHÔNG mở, gom các chip lại thành
@@ -590,19 +659,7 @@ filterBar.addEventListener('click', (e) => {
     refreshFilterUIs(); renderTable();
   }
 });
-// FIX BUG #3: trước đây việc "đóng ô lọc khi click ra ngoài" được xử lý ở sự
-// kiện 'click'. Nhưng khi người dùng bấm trực tiếp từ ô lọc A sang ô lọc B,
-// trình tự sự kiện thực tế là: mousedown -> focus (đổi focus sang B, trình
-// focusin ở trên render lại toàn bộ DOM của các ô lọc và tạo input MỚI cho B)
-// -> mouseup -> click. Vì input gốc mà người dùng vừa bấm (ô B) đã bị thay thế
-// bằng input mới ngay trong lúc xử lý focus, nên khi sự kiện 'click' cuối cùng
-// nổ ra, e.target trỏ tới một node ĐÃ BỊ GỠ KHỎI DOM — không control nào (kể cả
-// control B vừa mở) còn chứa nó nữa, khiến đoạn code dưới đây tưởng nhầm là
-// "click ra ngoài tất cả" và đóng luôn ô B vừa mở, buộc người dùng phải bấm
-// lại lần 2 mới chọn được. Chuyển sang lắng nghe 'mousedown' để việc kiểm tra
-// "click có nằm trong control hay không" luôn diễn ra TRƯỚC khi focus đổi và
-// DOM bị render lại, dùng đúng target gốc, ổn định.
-document.addEventListener('mousedown', (e) => {
+document.addEventListener('click', (e) => {
   FILTER_FIELDS.forEach(field => {
     const control = $(`.ms-control[data-field="${field}"]`);
     if (control && !control.contains(e.target) && state.msUI[field].open) {
@@ -613,6 +670,10 @@ document.addEventListener('mousedown', (e) => {
 });
 $('#btnClearFilters').addEventListener('click', () => {
   FILTER_FIELDS.forEach(f => { state.filters[f].clear(); state.msUI[f].search = ''; });
+  // Yêu cầu 2B: "Xóa bộ lọc" cũng bỏ tích 2 bộ lọc bổ sung (SĐT / nhiều xe).
+  state.extraFilters.hasPhone = false;
+  state.extraFilters.multiVehicle = false;
+  renderSortBar();
   state.page = 1;
   // FIX BUG: trước đây xóa bộ lọc không reset trạng thái đã chọn xe (checkbox),
   // khiến các dòng đã chọn từ trước vẫn hiện "đã chọn" nhưng không bấm bỏ chọn
@@ -621,6 +682,134 @@ $('#btnClearFilters').addEventListener('click', () => {
   state.exportSelected.clear();
   refreshFilterUIs(); renderTable();
 });
+
+/* ------------------- 6c. THANH SẮP XẾP + LỌC BỔ SUNG + XUẤT EXCEL --------- */
+// Yêu cầu 2A: vẽ danh sách tiêu chí sắp xếp đang chọn (kéo thêm được nhiều
+// tiêu chí, mỗi tiêu chí có thể chọn cột + hướng tăng/giảm dần).
+function renderSortBar() {
+  const list = $('#sortCriteriaList');
+  if (!list) return; // phòng trường hợp HTML chưa có (an toàn khi tái sử dụng script)
+  if (!state.sortCriteria.length) {
+    list.innerHTML = `<p class="hint" style="margin:2px 0 6px;">Chưa chọn tiêu chí nào — bấm "+ Thêm tiêu chí" bên dưới. Có thể thêm nhiều tiêu chí, tiêu chí phía trên được ưu tiên trước.</p>`;
+  } else {
+    list.innerHTML = state.sortCriteria.map((c, idx) => `
+      <div class="sort-criteria-row" data-idx="${idx}">
+        <span class="sort-order-badge">${idx + 1}</span>
+        <select class="sort-field-select" data-idx="${idx}">
+          ${SORT_FIELDS.map(f => `<option value="${f.key}" ${f.key === c.field ? 'selected' : ''}>${escapeHtml(f.label)}</option>`).join('')}
+        </select>
+        <select class="sort-dir-select" data-idx="${idx}">
+          <option value="asc" ${c.dir !== 'desc' ? 'selected' : ''}>Tăng dần (A→Z)</option>
+          <option value="desc" ${c.dir === 'desc' ? 'selected' : ''}>Giảm dần (Z→A)</option>
+        </select>
+        <button type="button" class="btn btn-ghost btn-sm sort-remove-btn" data-idx="${idx}" title="Xóa tiêu chí này">✕</button>
+      </div>`).join('');
+  }
+  const chkPhone = $('#chkHasPhone');
+  const chkMulti = $('#chkMultiVehicle');
+  if (chkPhone) chkPhone.checked = state.extraFilters.hasPhone;
+  if (chkMulti) chkMulti.checked = state.extraFilters.multiVehicle;
+}
+
+const sortBarEl = $('#sortBar');
+if (sortBarEl) {
+  $('#btnAddSortCriteria').addEventListener('click', () => {
+    // Ưu tiên gợi ý cột chưa được dùng làm tiêu chí, để khuyến khích kết hợp
+    // nhiều tiêu chí khác nhau (VD: tên + địa chỉ + số lượng xe cùng gia đình).
+    const usedFields = new Set(state.sortCriteria.map(c => c.field));
+    const nextField = SORT_FIELDS.find(f => !usedFields.has(f.key)) || SORT_FIELDS[0];
+    state.sortCriteria.push({ field: nextField.key, dir: 'asc' });
+    renderSortBar();
+    renderTable();
+  });
+
+  $('#sortCriteriaList').addEventListener('change', (e) => {
+    const idx = parseInt(e.target.dataset.idx, 10);
+    if (Number.isNaN(idx) || !state.sortCriteria[idx]) return;
+    if (e.target.classList.contains('sort-field-select')) state.sortCriteria[idx].field = e.target.value;
+    if (e.target.classList.contains('sort-dir-select')) state.sortCriteria[idx].dir = e.target.value;
+    renderTable();
+  });
+
+  $('#sortCriteriaList').addEventListener('click', (e) => {
+    const btn = e.target.closest('.sort-remove-btn');
+    if (!btn) return;
+    state.sortCriteria.splice(parseInt(btn.dataset.idx, 10), 1);
+    renderSortBar();
+    renderTable();
+  });
+
+  $('#btnClearSort').addEventListener('click', () => {
+    state.sortCriteria = [];
+    renderSortBar();
+    renderTable();
+  });
+
+  $('#chkHasPhone').addEventListener('change', (e) => {
+    state.extraFilters.hasPhone = e.target.checked;
+    state.page = 1;
+    renderTable();
+  });
+  $('#chkMultiVehicle').addEventListener('change', (e) => {
+    state.extraFilters.multiVehicle = e.target.checked;
+    state.page = 1;
+    renderTable();
+  });
+
+  /* ---- Xuất file .xlsx theo đúng dữ liệu đã lọc + đã sắp xếp (để in) ---- */
+  // Thư viện SheetJS (xlsx) được tải "lười" (chỉ khi bấm xuất) qua CDN, tránh
+  // phải sửa index.html và giữ trang tải nhanh khi không dùng tới tính năng này.
+  let xlsxLibPromise = null;
+  function loadXlsxLib() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (xlsxLibPromise) return xlsxLibPromise;
+    xlsxLibPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      script.onload = () => resolve(window.XLSX);
+      script.onerror = () => reject(new Error('Không tải được thư viện xuất Excel (kiểm tra kết nối mạng).'));
+      document.head.appendChild(script);
+    });
+    return xlsxLibPromise;
+  }
+
+  const EXPORT_COLUMNS = [
+    { header: 'STT', key: 'stt' }, { header: 'Biển số', key: 'bienSo' },
+    { header: 'Số khung', key: 'soKhung' }, { header: 'Số máy', key: 'soMay' },
+    { header: 'Nhãn hiệu', key: 'nhanHieu' }, { header: 'Loại xe', key: 'loaiXe' },
+    { header: 'Chủ phương tiện', key: 'chuXe' }, { header: 'Số CCCD/MST', key: 'cccd' },
+    { header: 'Địa chỉ đăng ký', key: 'diaChi' }, { header: 'Phường/Xã mới', key: 'phuongXaMoi' },
+    { header: 'Trạng thái xe', key: 'trangThaiXe' }, { header: 'Ngày đăng ký', key: 'ngayDangKy' },
+    { header: 'Số điện thoại', key: 'soDienThoai' },
+  ];
+
+  $('#btnExportXlsx').addEventListener('click', async () => {
+    // Xuất đúng những gì đang thấy trên bảng: đã lọc (kể cả lọc bổ sung) VÀ
+    // đã sắp xếp theo đúng thứ tự tiêu chí hiện tại — để in ra là dùng được ngay.
+    const rows = getFiltered(null).slice().sort(compareBySortCriteria);
+    if (!rows.length) { toast('Không có dòng nào để xuất theo bộ lọc hiện tại.', true); return; }
+
+    const btn = $('#btnExportXlsx');
+    const oldText = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Đang xuất...';
+    try {
+      const XLSX = await loadXlsxLib();
+      const aoa = [EXPORT_COLUMNS.map(c => c.header)]
+        .concat(rows.map(r => EXPORT_COLUMNS.map(c => r[c.key] || '')));
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = EXPORT_COLUMNS.map(() => ({ wch: 20 }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Danh sách');
+      const stamp = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(wb, `DanhSachPhuongTien_${stamp}.xlsx`);
+      toast(`Đã xuất ${rows.length} dòng ra file Excel.`);
+    } catch (err) {
+      toast('Lỗi khi xuất Excel: ' + (err && err.message ? err.message : String(err)), true);
+    } finally {
+      btn.disabled = false; btn.textContent = oldText;
+    }
+  });
+}
 
 /* ---------------------------- 7. BẢNG DỮ LIỆU ------------------------------ */
 $('#pageSizeSelect').addEventListener('change', (e) => {
@@ -635,6 +824,9 @@ function updateRecordCount() {
 
 function renderTable() {
   const filtered = getFiltered(null);
+  // Yêu cầu 2A/2B: áp dụng sắp xếp (kết hợp nhiều tiêu chí) sau khi đã lọc,
+  // trước khi phân trang, để thứ tự hiển thị và thứ tự xuất Excel khớp nhau.
+  filtered.sort(compareBySortCriteria);
   $('#filteredCount').textContent = `${filtered.length} / ${state.rawData.length} dòng`;
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
@@ -731,35 +923,19 @@ $('#tableBody').addEventListener('click', (e) => {
 });
 
 /* ---------------------------- 7b. CẬP NHẬT HÀNG LOẠT (NHIỀU XE) ------------ */
-// Yêu cầu #2: modal "Cập nhật Trạng thái xe / Ghi chú" dùng CHUNG cho 3 nguồn
-// xe khác nhau, không tách riêng từng bộ code:
-//   (a) các xe tick chọn ở bảng chính            -> state.exportSelected
-//   (b) các xe tick chọn RIÊNG trong panel Chi tiết -> state.detailSelected
-//   (c) cập nhật nhanh cho ĐÚNG 1 xe (nút 🔄 trên từng dòng trong panel Chi tiết)
-// `bulkUpdateOnDone`, nếu có, sẽ được gọi lại sau khi áp dụng xong (ví dụ: để
-// vẽ lại panel Chi tiết đang mở) — độc lập với việc bảng chính có cần vẽ lại
-// hay không (bảng chính luôn được vẽ lại vì Trạng thái/Ghi chú có thể đổi).
-let bulkUpdateTargetRows = [];
-let bulkUpdateOnDone = null;
-
-function openBulkUpdateModalFor(rows, onDone) {
-  if (!rows.length) { toast('Vui lòng chọn ít nhất 1 xe trước.', true); return; }
-  bulkUpdateTargetRows = rows;
-  bulkUpdateOnDone = onDone || null;
-  $('#bulkUpdateCount').textContent = rows.length;
+// Yêu cầu #3: cho phép chọn nhiều xe (checkbox ở bảng chính / panel chi tiết)
+// rồi cập nhật Trạng thái xe / Ghi chú cùng lúc cho tất cả các xe đã chọn.
+$('#btnBulkUpdate').addEventListener('click', () => {
+  if (!state.exportSelected.size) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) trước.', true); return; }
+  $('#bulkUpdateCount').textContent = state.exportSelected.size;
   $('#bulkStatusSelect').value = '';
   $('#bulkNoteText').value = '';
   $('#bulkNoteMode').value = 'append';
   openModal('bulkUpdateModal');
-}
-
-$('#btnBulkUpdate').addEventListener('click', () => {
-  if (!state.exportSelected.size) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) trước.', true); return; }
-  openBulkUpdateModalFor(state.rawData.filter(r => state.exportSelected.has(r._rowId)), null);
 });
 
 $('#btnBulkApply').addEventListener('click', async () => {
-  const rows = bulkUpdateTargetRows;
+  const rows = state.rawData.filter(r => state.exportSelected.has(r._rowId));
   if (!rows.length) { closeModal('bulkUpdateModal'); return; }
 
   const statusVal = $('#bulkStatusSelect').value;
@@ -797,9 +973,6 @@ $('#btnBulkApply').addEventListener('click', async () => {
 
   applyBtn.disabled = false; applyBtn.textContent = '💾 Áp dụng';
   renderTable();
-  if (bulkUpdateOnDone) bulkUpdateOnDone();
-  bulkUpdateTargetRows = [];
-  bulkUpdateOnDone = null;
   closeModal('bulkUpdateModal');
   toast(`Đã cập nhật ${okCount} xe.` + (failCount ? ` (${failCount} xe lỗi khi ghi Sheet)` : ''));
 });
@@ -844,40 +1017,9 @@ async function confirmVehicleOwner(vehicleRow, ownerRow) {
     const res = await updateRowOnSheet(vehicleRow, { 'Ghi Chú': newNote });
     if (!res || !res.ok) toast('Đã xác nhận trên trình duyệt, nhưng ghi Ghi Chú về Sheet thất bại: ' + ((res && res.error) || ''), true);
   }
-  renderTable();
-}
-
-// FIX BUG #1: cho phép HỦY một lượt "Xác nhận xe đúng" đã lỡ thao tác nhầm.
-// Chỉ cần xoá đúng key của xe này khỏi confirmedMap — vì computeOwnerSections()
-// luôn tính lại Mục I/II/III/IV MỖI LẦN render dựa trên confirmedMap hiện tại,
-// nên xe sẽ TỰ ĐỘNG rơi về đúng mục phù hợp (II nếu trùng tên chính xác, III
-// nếu tên gần đúng, IV nếu cùng gia đình, hoặc biến mất khỏi mọi mục nếu không
-// còn khớp tiêu chí nào) mà không cần thêm logic phân loại thủ công ở đây.
-async function unconfirmVehicleOwner(vehicleRow) {
-  const map = loadConfirmedOwnerMap();
-  const key = vehicleKey(vehicleRow);
-  const entry = map[key];
-  delete map[key];
-  saveConfirmedOwnerMap(map);
-
-  // Xử lý ghi chú hợp lý: gỡ đúng dòng "Đã xác nhận thuộc về ..." đã được tự
-  // thêm lúc xác nhận trước đó (nếu người dùng chưa sửa tay dòng đó), rồi thêm
-  // một dòng ghi chú ngắn đánh dấu đã hủy để vẫn còn lịch sử tra soát — không
-  // xoá sạch toàn bộ Ghi Chú vốn có của xe.
-  const oldNote = (vehicleRow.ghiChu || '').trim();
-  const noteAddition = entry ? `Đã xác nhận thuộc về ${entry.ownerName}${entry.ownerCccd ? ' - CCCD ' + entry.ownerCccd : ''}` : null;
-  const cancelNote = 'Đã hủy xác nhận chủ xe (xác nhận trước đó không chính xác)';
-  let newNote = oldNote;
-  if (noteAddition) {
-    newNote = oldNote.split(';').map(s => s.trim()).filter(s => s && s !== noteAddition).join('; ');
-  }
-  newNote = newNote ? `${newNote}; ${cancelNote}` : cancelNote;
-  vehicleRow.ghiChu = newNote;
-
-  if (isWriteConnected()) {
-    const res = await updateRowOnSheet(vehicleRow, { 'Ghi Chú': newNote });
-    if (!res || !res.ok) toast('Đã hủy xác nhận trên trình duyệt, nhưng ghi Ghi Chú về Sheet thất bại: ' + ((res && res.error) || ''), true);
-  }
+  // Xe vừa được xác nhận sẽ được tính vào đúng nhóm chủ xe mới -> tính lại số
+  // lượng xe/chủ xe để bộ lọc "nhiều xe" và cột sắp xếp "Số lượng xe" cập nhật đúng.
+  computeOwnerVehicleCounts();
   renderTable();
 }
 
@@ -888,6 +1030,29 @@ const NUMBER_FUZZY_MAX_DIST = 2;
 const NUMBER_FUZZY_MIN_LEN = 5;
 
 function vehicleKey(v) { return v.motoId || v.maId || v._rowId; }
+
+// "CCCD hiệu lực" của 1 xe dùng để GOM NHÓM theo đúng chủ xe thật sự: nếu xe
+// đã được người dùng bấm "Xác nhận xe đúng" (ở Mục II/III) để gán về một chủ
+// xe khác, dùng đúng Số CCCD của chủ xe đó; ngược lại dùng Số CCCD/tên gốc ghi
+// trên chính dòng dữ liệu. Dùng chung cho: gộp Bản cam kết, đếm số xe/chủ xe,
+// và lọc "gia đình có nhiều xe".
+function getEffectiveOwnerKey(row) {
+  const confirmedMap = loadConfirmedOwnerMap();
+  const confirmed = confirmedMap[vehicleKey(row)];
+  if (confirmed && confirmed.ownerCccd) return confirmed.ownerCccd;
+  return row.cccd || ('name:' + normalizeName(row.chuXe));
+}
+
+// Tính lại số lượng xe theo từng chủ xe (dùng getEffectiveOwnerKey) — gọi lại
+// mỗi khi dữ liệu được tải mới hoặc có xe vừa được "Xác nhận xe đúng".
+function computeOwnerVehicleCounts() {
+  const map = new Map();
+  state.rawData.forEach(row => {
+    const key = getEffectiveOwnerKey(row);
+    map.set(key, (map.get(key) || 0) + 1);
+  });
+  state.ownerVehicleCounts = map;
+}
 
 // Tách 1 họ tên (đã chuẩn hoá) thành: họ (từ đầu), tên (từ cuối), chữ lót (ở giữa).
 function splitNameParts(name) {
@@ -1013,24 +1178,12 @@ function computeOwnerSections(vehicle) {
 function openDetailPanel(rowId) {
   const row = state.rawData.find(r => r._rowId === rowId);
   if (!row) return;
-  // Yêu cầu #2: mỗi lần MỞ MỚI panel Chi tiết từ bảng chính, làm mới lựa chọn
-  // riêng của panel (không kế thừa từ lần xem trước) — hoàn toàn không đụng
-  // tới state.exportSelected (lựa chọn để xuất Bản cam kết ở bảng chính).
-  state.detailSelected = new Set();
   renderDetailPanelFor(row);
   openModal('detailOverlay');
 }
-// Khi đóng panel Chi tiết (nút ✕ hoặc bấm ra ngoài), dọn luôn lựa chọn riêng
-// của panel để lần mở tiếp theo (dù là xe khác) bắt đầu từ trạng thái sạch.
-$('#detailOverlay').addEventListener('click', (e) => {
-  if (e.target === $('#detailOverlay') || e.target.closest('[data-close="detailOverlay"]')) {
-    state.detailSelected = new Set();
-  }
-});
 
 function renderDetailPanelFor(row) {
   const cccd = row.cccd;
-  const cccdTrim = (cccd || '').trim();
   const chuXe = row.chuXe;
   const ownerKey = cccd || ('name:' + normalizeName(chuXe));
 
@@ -1041,24 +1194,20 @@ function renderDetailPanelFor(row) {
   const notesStore = loadNotesStore();
   const existingNote = notesStore[ownerKey] || { status: '', text: '' };
 
-  // Yêu cầu #2: checkbox trong panel Chi tiết dùng state.detailSelected (RIÊNG,
-  // độc lập với state.exportSelected của bảng chính). Mỗi dòng cũng có thêm 1
-  // nút "🔄" ở cuối để cập nhật Trạng thái xe/Ghi chú ngay cho riêng xe đó.
   const miniTable = (rows, sectionId, extraCols, extraCellsFn, cssClass) => rows.length ? `
     <table class="mini-table" data-section="${sectionId}">
       <thead><tr>
         <th class="col-chk-mini"></th>
         <th>Biển số</th><th>Chủ xe</th><th>Số CCCD</th><th>Số khung</th><th>Số máy</th>
-        <th>Loại xe</th><th>Trạng thái</th>${extraCols || ''}<th>Cập nhật</th>
+        <th>Loại xe</th><th>Trạng thái</th>${extraCols || ''}
       </tr></thead>
       <tbody>
-        ${rows.map(r => `<tr data-rowid="${r._rowId}" class="${cssClass || ''} ${state.detailSelected.has(r._rowId) ? 'selected-row' : ''}">
-          <td class="col-chk-mini"><input type="checkbox" data-role="mini-chk" data-rowid="${r._rowId}" ${state.detailSelected.has(r._rowId) ? 'checked' : ''}></td>
+        ${rows.map(r => `<tr data-rowid="${r._rowId}" class="${cssClass || ''}">
+          <td class="col-chk-mini"><input type="checkbox" data-role="mini-chk" data-rowid="${r._rowId}" ${state.exportSelected.has(r._rowId) ? 'checked' : ''}></td>
           <td>${escapeHtml(r.bienSo)}</td><td>${escapeHtml(r.chuXe)}</td><td>${escapeHtml(r.cccd) || '—'}</td>
           <td>${escapeHtml(r.soKhung)}</td><td>${escapeHtml(r.soMay)}</td>
           <td>${escapeHtml(r.loaiXe)}</td><td>${escapeHtml(r.trangThaiXe)}</td>
           ${extraCellsFn ? extraCellsFn(r) : ''}
-          <td><button type="button" class="btn btn-ghost btn-sm" data-quick-update="${r._rowId}" title="Cập nhật Trạng thái xe / Ghi chú cho riêng xe này">🔄</button></td>
         </tr>`).join('')}
       </tbody>
     </table>` : `<p class="hint">Không tìm thấy trường hợp phù hợp.</p>`;
@@ -1084,40 +1233,20 @@ function renderDetailPanelFor(row) {
     ? (r) => `<td><button type="button" class="btn btn-ghost btn-sm" data-confirm-owner="${r._rowId}" title="Xác nhận xe này thuộc về ${escapeHtml(chuXe)}">✅ Xác nhận đúng</button></td>`
     : (r) => `<td><span class="hint" style="margin:0;">Cần CCCD để xác nhận</span></td>`;
 
-  // FIX BUG #1: Mục I chỉ được chứa xe THỰC SỰ cùng Số CCCD, cộng thêm những xe
-  // đã được người dùng "Xác nhận đúng" thủ công (xem computeOwnerSections()).
-  // Với nhóm xe thứ hai này (Số CCCD gốc KHÁC người đang xem, chỉ có mặt vì đã
-  // được xác nhận), hiện thêm nút "Hủy xác nhận" để xử lý trường hợp lỡ xác
-  // nhận nhầm — bấm vào sẽ đưa xe quay lại đúng Mục II/III/IV theo đối chiếu
-  // tự động (không cần chọn lại thủ công).
-  const sectionIExtraCellsFn = (r) => {
-    const isConfirmedOnly = (r.cccd || '').trim() !== cccdTrim;
-    if (!isConfirmedOnly) return '<td>—</td>';
-    return `<td><button type="button" class="btn btn-ghost btn-sm" data-unconfirm-owner="${r._rowId}" title="Hủy xác nhận xe này thuộc về ${escapeHtml(chuXe)}">↩️ Hủy xác nhận</button></td>`;
-  };
-
   const bodyHtml = `
     <div class="owner-card">
       <div class="row"><b>Họ và tên:</b> ${escapeHtml(chuXe) || '—'}</div>
       <div class="row"><b>Số CCCD/MST:</b> ${escapeHtml(cccd) || '—'}</div>
       <div class="row"><b>Địa chỉ:</b> ${escapeHtml(addr)}</div>
       <div class="row"><b>Số điện thoại:</b> ${escapeHtml(phones)}</div>
-    </div>
-
-    <div class="toolbar" style="margin-bottom:12px;">
-      <div class="toolbar-left">
-        <span class="selected-count" id="detailSelectedCount">${state.detailSelected.size} xe đã chọn trong bảng chi tiết</span>
-      </div>
-      <div class="toolbar-right">
-        <button type="button" id="btnDetailBulkUpdate" class="btn btn-secondary btn-sm" ${state.detailSelected.size ? '' : 'disabled'}>🔄 Cập nhật hàng loạt (xe đã chọn)</button>
+      <div class="owner-card-actions">
+        <button type="button" id="btnCreateCommitmentPanel" class="btn btn-primary btn-sm">
+          📄 Tạo Bản cam kết (${state.exportSelected.size} xe đã chọn)
+        </button>
       </div>
     </div>
 
-    ${sectionBlock({
-      id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI,
-      extraCols: '<th>Xác nhận thủ công</th>', extraCellsFn: sectionIExtraCellsFn,
-      hideIfEmpty: false
-    })}
+    ${sectionBlock({ id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI, hideIfEmpty: false })}
 
     ${sectionBlock({
       id: 'II', title: 'II. Xe của người trùng họ tên, khác Số CCCD',
@@ -1148,7 +1277,7 @@ function renderDetailPanelFor(row) {
     })}
 
     <div class="section-title">Cập nhật Trạng thái xe / Ghi chú (cho riêng xe này)</div>
-    <div class="section-desc">Muốn cập nhật nhiều xe cùng lúc? Tick chọn các xe cần cập nhật ngay trong các bảng Mục I–V ở trên rồi bấm "🔄 Cập nhật hàng loạt (xe đã chọn)" phía trên. Muốn cập nhật riêng 1 xe bất kỳ trong các mục đó, bấm nút 🔄 ở cuối dòng xe đó.</div>
+    <div class="section-desc">Muốn cập nhật cùng lúc nhiều xe? Chọn checkbox các xe cần cập nhật ở bảng chính rồi bấm nút "🔄 Cập nhật hàng loạt" trên thanh công cụ.</div>
     <div class="note-box">
       <select id="noteStatusSelect">
         <option value="">— Giữ nguyên trạng thái hiện tại —</option>
@@ -1209,34 +1338,36 @@ function renderDetailPanelFor(row) {
       if (targetRow) renderDetailPanelFor(targetRow);
     });
   });
-  // Yêu cầu #2: checkbox trong panel Chi tiết chỉ đổi state.detailSelected —
-  // TUYỆT ĐỐI không đụng tới state.exportSelected / renderTable() của bảng
-  // chính, để 2 việc chọn xe (bảng chính vs panel Chi tiết) độc lập hoàn toàn.
   $('#detailBody').querySelectorAll('[data-role="mini-chk"]').forEach(chk => {
     chk.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = chk.dataset.rowid;
-      if (chk.checked) state.detailSelected.add(id); else state.detailSelected.delete(id);
-      const tr = chk.closest('tr[data-rowid]');
-      if (tr) tr.classList.toggle('selected-row', chk.checked);
-      const countEl = $('#detailSelectedCount');
-      if (countEl) countEl.textContent = `${state.detailSelected.size} xe đã chọn trong bảng chi tiết`;
-      const bulkBtn = $('#btnDetailBulkUpdate');
-      if (bulkBtn) bulkBtn.disabled = state.detailSelected.size === 0;
+      if (chk.checked) state.exportSelected.add(id); else state.exportSelected.delete(id);
+      updateSelectedCount();
+      // Cập nhật lại số đếm hiển thị trên nút "Tạo Bản cam kết" trong panel.
+      const btnPanel = $('#btnCreateCommitmentPanel');
+      if (btnPanel) btnPanel.textContent = `📄 Tạo Bản cam kết (${state.exportSelected.size} xe đã chọn)`;
+      renderTable();
     });
   });
 
-  // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV/V — dùng detailSelected
-  // (độc lập với lựa chọn "để xuất" ở bảng chính, xem giải thích ở trên).
+  // Yêu cầu #1: nút "Tạo Bản cam kết" ngay trong panel Chi tiết chủ xe — dùng
+  // đúng danh sách xe đang được chọn (checkbox) ở panel này (và/hoặc ở bảng
+  // chính), gộp theo đúng chủ xe thực sự (xem createCommitmentFromSelection()).
+  const btnCommitPanel = $('#btnCreateCommitmentPanel');
+  if (btnCommitPanel) btnCommitPanel.addEventListener('click', createCommitmentFromSelection);
+
+  // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV/V.
   const sectionsById = { I: sectionI, II: sectionII, III: sectionIII, IV: sectionIV, V: sectionV };
   $('#detailBody').querySelectorAll('[data-select-all]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const secId = btn.dataset.selectAll;
       const rows = sectionsById[secId] || [];
-      rows.forEach(r => state.detailSelected.add(r._rowId));
+      rows.forEach(r => state.exportSelected.add(r._rowId));
       renderDetailPanelFor(row);
-      toast(`Đã chọn ${rows.length} xe ở Mục ${secId} để cập nhật.`);
+      renderTable();
+      toast(`Đã chọn tất cả ${rows.length} xe ở Mục ${secId} để xuất.`);
     });
   });
 
@@ -1252,41 +1383,6 @@ function renderDetailPanelFor(row) {
       renderDetailPanelFor(row); // render lại: xe vừa xác nhận sẽ chuyển từ Mục II/III lên Mục I
     });
   });
-
-  // FIX BUG #1: nút "Hủy xác nhận" ở Mục I (chỉ hiện với xe được thêm vào do đã
-  // xác nhận thủ công) -> gỡ xác nhận, xe tự rơi về đúng Mục II/III/IV.
-  $('#detailBody').querySelectorAll('[data-unconfirm-owner]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const vehicleRow = state.rawData.find(r => r._rowId === btn.dataset.unconfirmOwner);
-      if (!vehicleRow) return;
-      btn.disabled = true; btn.textContent = 'Đang hủy...';
-      await unconfirmVehicleOwner(vehicleRow);
-      toast(`Đã hủy xác nhận xe ${vehicleRow.bienSo || vehicleRow.soKhung || ''}.`);
-      renderDetailPanelFor(row);
-    });
-  });
-
-  // Yêu cầu #2: nút 🔄 cuối mỗi dòng (Mục I-V) -> cập nhật Trạng thái/Ghi chú
-  // cho riêng đúng 1 xe đó, dùng lại modal Cập nhật hàng loạt với 1 phần tử.
-  $('#detailBody').querySelectorAll('[data-quick-update]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const r = state.rawData.find(x => x._rowId === btn.dataset.quickUpdate);
-      if (!r) return;
-      openBulkUpdateModalFor([r], () => renderDetailPanelFor(row));
-    });
-  });
-
-  // Yêu cầu #2: nút "Cập nhật hàng loạt (xe đã chọn)" ở đầu panel -> áp dụng
-  // cho các xe đang có trong state.detailSelected (độc lập với bảng chính).
-  const btnDetailBulk = $('#btnDetailBulkUpdate');
-  if (btnDetailBulk) {
-    btnDetailBulk.addEventListener('click', () => {
-      const rows = state.rawData.filter(r => state.detailSelected.has(r._rowId));
-      openBulkUpdateModalFor(rows, () => renderDetailPanelFor(row));
-    });
-  }
 }
 
 /* ---------------------------- 11. MẪU BẢN CAM KẾT (CÀI ĐẶT) ---------------- */
@@ -1353,28 +1449,40 @@ async function trySyncTemplateFromSheet(url) {
 }
 
 /* ---------------------------- 12. TẠO BẢN CAM KẾT --------------------------- */
-$('#btnCreateCommitment').addEventListener('click', () => {
+// Yêu cầu #1: gộp các xe của CÙNG MỘT chủ xe vào CHUNG một bản cam kết, kể cả
+// những xe ở Mục I chỉ được xác định là "cùng chủ" nhờ đã bấm "Xác nhận xe
+// đúng" (nên Số CCCD/tên gốc ghi trên chính dòng đó có thể khác) — dùng
+// getEffectiveOwnerKey() thay vì chỉ dựa vào row.cccd để nhóm cho đúng.
+// Được gọi từ cả nút trên thanh công cụ và nút trong panel Chi tiết chủ xe.
+function createCommitmentFromSelection() {
   const selectedRows = state.rawData.filter(r => state.exportSelected.has(r._rowId));
   if (!selectedRows.length) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) để xuất Bản cam kết.', true); return; }
 
   const groups = new Map();
   selectedRows.forEach(row => {
-    const ownerKey = row.cccd || ('name:' + normalizeName(row.chuXe));
-    if (!groups.has(ownerKey)) {
-      groups.set(ownerKey, {
-        chuXe: row.chuXe, cccd: row.cccd,
-        diaChi: uniq(selectedRows.filter(r => (r.cccd || ('name:' + normalizeName(r.chuXe))) === ownerKey).map(r => r.diaChi)).join(' | '),
-        phones: uniq(selectedRows.filter(r => (r.cccd || ('name:' + normalizeName(r.chuXe))) === ownerKey).map(r => r.soDienThoai)).join(' | '),
-        vehicles: []
-      });
-    }
+    const ownerKey = getEffectiveOwnerKey(row);
+    if (!groups.has(ownerKey)) groups.set(ownerKey, { vehicles: [] });
     groups.get(ownerKey).vehicles.push(row);
+  });
+
+  groups.forEach((g, ownerKey) => {
+    // Lấy tên/CCCD hiển thị từ đúng dòng "chính chủ" (Số CCCD trùng ownerKey)
+    // trong toàn bộ dữ liệu — không lấy từ dòng xe đã xác nhận (vì dòng đó vẫn
+    // giữ nguyên tên/CCCD gốc của chính xe). Nếu nhóm theo tên (không có CCCD)
+    // thì không có "chính chủ" riêng biệt, dùng luôn xe đầu tiên trong nhóm.
+    const canonicalRow = state.rawData.find(r => (r.cccd || '').trim() === ownerKey) || g.vehicles[0];
+    g.chuXe = canonicalRow.chuXe;
+    g.cccd = canonicalRow.cccd;
+    g.diaChi = uniq(g.vehicles.map(r => r.diaChi)).join(' | ');
+    g.phones = uniq(g.vehicles.map(r => r.soDienThoai)).join(' | ');
   });
 
   state.commitmentDocs = Array.from(groups.values());
   renderAllCommitmentDocs();
   openModal('commitmentOverlay');
-});
+}
+
+$('#btnCreateCommitment').addEventListener('click', createCommitmentFromSelection);
 
 function renderAllCommitmentDocs() {
   const container = $('#commitmentContainer');
@@ -1648,6 +1756,7 @@ function buildDocxTable(tableEl, docxLib) {
 function refreshAll() {
   updateRecordCount();
   refreshFilterUIs();
+  renderSortBar();
   renderTable();
   updateModeBadge();
 }
