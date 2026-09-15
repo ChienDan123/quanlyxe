@@ -160,6 +160,9 @@
       <label>Lọc bổ sung</label>
       <label class="chk-inline"><input type="checkbox" id="chkHasPhone"> Người có số điện thoại</label>
       <label class="chk-inline"><input type="checkbox" id="chkMultiVehicle"> Người/gia đình có nhiều xe (nhiều → ít)</label>
+      <!-- Yêu cầu #6: mặc định BẬT (checked) - tự động loại khỏi danh sách khi mở trang -->
+      <label class="chk-inline"><input type="checkbox" id="chkExcludeDone" checked> Loại bỏ đã thực hiện</label>
+      <label class="chk-inline"><input type="checkbox" id="chkExcludeRecontact" checked> Cần liên hệ lại (ẩn khỏi danh sách)</label>
     </div>
     <div class="filter-actions">
       <button id="btnClearSort" class="btn btn-ghost">Xóa sắp xếp</button>
@@ -194,22 +197,24 @@
         <tr>
           <th class="col-chk"></th>
           <th>STT</th>
-          <th>Biển số</th>
+          <th class="sticky-col col-sticky-bienso">Biển số</th>
           <th>Số khung</th>
           <th>Số máy</th>
           <th>Nhãn hiệu</th>
           <th>Loại xe</th>
-          <th>Chủ phương tiện</th>
+          <th class="sticky-col col-sticky-chuxe">Chủ phương tiện</th>
           <th>Số CCCD/MST</th>
           <th>Địa chỉ đăng ký</th>
           <th>Phường/Xã mới</th>
           <th>Trạng thái xe</th>
           <th>Ngày đăng ký</th>
           <th>SĐT</th>
+          <th>Ghi chú</th>
+          <th>Người thực hiện</th>
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr><td colspan="14" class="empty-state">Chưa có dữ liệu. Vào "Cài đặt" để kết nối Google Sheet.</td></tr>
+        <tr><td colspan="16" class="empty-state">Chưa có dữ liệu. Vào "Cài đặt" để kết nối Google Sheet.</td></tr>
       </tbody>
     </table>
   </section>
@@ -257,6 +262,10 @@
       <select id="bulkNoteMode" class="tpl-input">
         <option value="append">Nối thêm vào ghi chú hiện có của từng xe</option>
         <option value="replace">Thay thế hoàn toàn ghi chú hiện có</option>
+      </select>
+      <label class="hint-label">Người thực hiện</label>
+      <select id="bulkAssigneeSelect" class="tpl-input">
+        <option value="">— Giữ nguyên Người thực hiện —</option>
       </select>
     </div>
     <div class="modal-footer">

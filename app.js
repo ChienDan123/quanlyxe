@@ -33,6 +33,10 @@ const FIELD_MAP = [
   { key: 'donViQuanLy',  header: 'Đơn vị quản lý' },
   { key: 'soDienThoai',  header: 'Số điện thoại' },
   { key: 'ghiChu',       header: 'Ghi Chú' },
+  // Yêu cầu #5: cột "Người thực hiện" — ai đang phụ trách/đã xử lý hồ sơ này.
+  // Nếu cột này chưa có trên Sheet, updateRow_() trong AppsScript.gs sẽ TỰ ĐỘNG
+  // tạo cột mới (giống hệt cơ chế đã có sẵn cho "Ghi Chú"), không cần sửa Apps Script.
+  { key: 'nguoiThucHien', header: 'Người thực hiện' },
 ];
 // Cột dùng để khớp dòng khi ghi ngược về Sheet, theo thứ tự ưu tiên.
 const MATCH_KEY_PRIORITY = ['maId', 'motoId', 'bienSo'];
@@ -65,8 +69,20 @@ const SORT_FIELDS = [
   { key: 'trangThaiXe', label: 'Trạng thái xe',          type: 'text' },
   { key: 'ngayDangKy',  label: 'Ngày đăng ký',           type: 'text' },
   { key: 'soDienThoai', label: 'Số điện thoại',          type: 'text' },
+  { key: 'nguoiThucHien', label: 'Người thực hiện',      type: 'text' },
   { key: 'soLuongXe',   label: 'Số lượng xe cùng chủ',   type: 'number' },
 ];
+
+// Yêu cầu #2: danh sách Trạng thái dùng chung cho MỌI nơi cho phép sửa trạng
+// thái (ô chọn trên từng dòng ở bảng chính, bảng mini trong panel chi tiết...).
+// Mục "Cập nhật hàng loạt" và "Cập nhật cho riêng xe này" (đã có sẵn trong
+// index.html) giữ nguyên danh sách tĩnh của chúng để không phá vỡ giao diện cũ.
+const STATUS_OPTIONS = [
+  'Còn sử dụng', 'Đã bán/chuyển nhượng', 'Đã liên hệ', 'Đã xác minh',
+  'Đã ký cam kết', 'Chưa liên hệ được', 'Cần xác minh thêm',
+];
+// Trạng thái được coi là "cần liên hệ lại" cho bộ lọc ở Yêu cầu #6.
+const RECONTACT_STATUS = 'Chưa liên hệ được';
 
 const NOTES_KEY = 'vehicleNotesV1';
 const LAST_URL_KEY = 'vehicleLastSheetCsvUrl';
@@ -81,6 +97,12 @@ const TEMPLATE_KEY = 'vehicleCommitmentTemplateV1';
 // được coi là thuộc về chủ xe đang xem (chuyển hiển thị lên Mục I) mà KHÔNG
 // làm thay đổi Số CCCD/MST gốc đã lưu của chính xe đó.
 const CONFIRMED_OWNER_KEY = 'vehicleConfirmedOwnerV1';
+// Yêu cầu #5: danh sách "Người thực hiện" — lưu cục bộ trên trình duyệt, cho
+// phép thêm người mới và người mới sẽ xuất hiện lại ở các lần mở sau.
+const ASSIGNEE_LIST_KEY = 'vehicleAssigneeListV1';
+const DEFAULT_ASSIGNEES = ['Nhơn', 'Tiến', 'Tuấn', 'Thuận', 'Thi'];
+// Giá trị đặc biệt trong <select> Người thực hiện dùng để mở hộp thoại thêm mới.
+const ASSIGNEE_ADD_NEW_VALUE = '__add_new__';
 
 const DEFAULT_TEMPLATE = {
   kinhGui: 'Kính gửi: Công an xã Chiên Đàn',
@@ -116,8 +138,10 @@ const state = {
   // Yêu cầu 2A: danh sách tiêu chí sắp xếp kết hợp, thứ tự = độ ưu tiên.
   // Mỗi phần tử: { field: 'chuXe', dir: 'asc' | 'desc' }.
   sortCriteria: [],
-  // Yêu cầu 2B: các bộ lọc bổ sung (tích chọn).
-  extraFilters: { hasPhone: false, multiVehicle: false },
+  // Yêu cầu 2B + Yêu cầu #6: các bộ lọc bổ sung (tích chọn).
+  // excludeDone / excludeRecontact MẶC ĐỊNH BẬT (true) theo đúng yêu cầu: khi
+  // mở trang, tự động loại người "đã thực hiện" và người "cần liên hệ lại".
+  extraFilters: { hasPhone: false, multiVehicle: false, excludeDone: true, excludeRecontact: true },
   // Cache số lượng xe theo từng chủ xe (tính theo CCCD hiệu lực, có tính cả
   // các xe đã được "Xác nhận xe đúng"). Được tính lại mỗi khi dữ liệu thay đổi.
   ownerVehicleCounts: new Map(),
@@ -138,6 +162,19 @@ function stripDiacritics(s) {
     .replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().trim().replace(/\s+/g, ' ');
 }
 function uniq(arr) { return Array.from(new Set(arr.filter(v => v && v.trim() !== ''))); }
+
+/* ---- Yêu cầu #6: "đã thực hiện" / "cần liên hệ lại" ------------------------
+   Quy ước (có thể điều chỉnh nếu nghiệp vụ thực tế khác):
+   - "Đã thực hiện": hồ sơ ĐÃ được gán một "Người thực hiện" cụ thể (đã có
+     người phụ trách xử lý xong/đang xử lý), dùng để ẩn bớt các hồ sơ không
+     cần theo dõi lại nữa.
+   - "Cần liên hệ lại": Trạng thái xe đang là "Chưa liên hệ được".            */
+function isRowDone(row) {
+  return !!((row.nguoiThucHien || '').trim());
+}
+function isRowNeedRecontact(row) {
+  return normalizeName(row.trangThaiXe) === normalizeName(RECONTACT_STATUS);
+}
 
 // Khoảng cách Levenshtein — dùng cho fuzzy match tên / số khung / số máy.
 function levenshtein(a, b) {
@@ -463,6 +500,10 @@ function getFiltered(excludeField) {
       const count = state.ownerVehicleCounts.get(getEffectiveOwnerKey(row)) || 0;
       if (count < 2) return false;
     }
+    // Yêu cầu #6: mặc định (và khi tích chọn) loại bỏ người "đã thực hiện" /
+    // người "cần liên hệ lại" khỏi danh sách.
+    if (state.extraFilters.excludeDone && isRowDone(row)) return false;
+    if (state.extraFilters.excludeRecontact && isRowNeedRecontact(row)) return false;
     return true;
   });
 }
@@ -677,6 +718,10 @@ $('#btnClearFilters').addEventListener('click', () => {
   // Yêu cầu 2B: "Xóa bộ lọc" cũng bỏ tích 2 bộ lọc bổ sung (SĐT / nhiều xe).
   state.extraFilters.hasPhone = false;
   state.extraFilters.multiVehicle = false;
+  // Yêu cầu #6: đưa 2 bộ lọc "đã thực hiện" / "cần liên hệ lại" về đúng trạng
+  // thái mặc định của trang (BẬT — tự động loại khỏi danh sách), thay vì tắt hẳn.
+  state.extraFilters.excludeDone = true;
+  state.extraFilters.excludeRecontact = true;
   renderSortBar();
   state.page = 1;
   // FIX BUG: trước đây xóa bộ lọc không reset trạng thái đã chọn xe (checkbox),
@@ -711,8 +756,12 @@ function renderSortBar() {
   }
   const chkPhone = $('#chkHasPhone');
   const chkMulti = $('#chkMultiVehicle');
+  const chkDone = $('#chkExcludeDone');
+  const chkRecontact = $('#chkExcludeRecontact');
   if (chkPhone) chkPhone.checked = state.extraFilters.hasPhone;
   if (chkMulti) chkMulti.checked = state.extraFilters.multiVehicle;
+  if (chkDone) chkDone.checked = state.extraFilters.excludeDone;
+  if (chkRecontact) chkRecontact.checked = state.extraFilters.excludeRecontact;
 }
 
 const sortBarEl = $('#sortBar');
@@ -759,6 +808,19 @@ if (sortBarEl) {
     state.page = 1;
     renderTable();
   });
+  // Yêu cầu #6: 2 bộ lọc bổ sung mới — loại bỏ "đã thực hiện" / "cần liên hệ lại".
+  const chkExcludeDoneEl = $('#chkExcludeDone');
+  if (chkExcludeDoneEl) chkExcludeDoneEl.addEventListener('change', (e) => {
+    state.extraFilters.excludeDone = e.target.checked;
+    state.page = 1;
+    renderTable();
+  });
+  const chkExcludeRecontactEl = $('#chkExcludeRecontact');
+  if (chkExcludeRecontactEl) chkExcludeRecontactEl.addEventListener('change', (e) => {
+    state.extraFilters.excludeRecontact = e.target.checked;
+    state.page = 1;
+    renderTable();
+  });
 
   /* ---- Xuất file .xlsx theo đúng dữ liệu đã lọc + đã sắp xếp (để in) ---- */
   // Thư viện SheetJS (xlsx) được tải "lười" (chỉ khi bấm xuất) qua CDN, tránh
@@ -784,7 +846,8 @@ if (sortBarEl) {
     { header: 'Chủ phương tiện', key: 'chuXe' }, { header: 'Số CCCD/MST', key: 'cccd' },
     { header: 'Địa chỉ đăng ký', key: 'diaChi' }, { header: 'Phường/Xã mới', key: 'phuongXaMoi' },
     { header: 'Trạng thái xe', key: 'trangThaiXe' }, { header: 'Ngày đăng ký', key: 'ngayDangKy' },
-    { header: 'Số điện thoại', key: 'soDienThoai' },
+    { header: 'Số điện thoại', key: 'soDienThoai' }, { header: 'Ghi Chú', key: 'ghiChu' },
+    { header: 'Người thực hiện', key: 'nguoiThucHien' },
   ];
 
   $('#btnExportXlsx').addEventListener('click', async () => {
@@ -840,24 +903,26 @@ function renderTable() {
 
   const tbody = $('#tableBody');
   if (!pageRows.length) {
-    tbody.innerHTML = `<tr><td colspan="14" class="empty-state">Không có dòng nào khớp bộ lọc.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="16" class="empty-state">Không có dòng nào khớp bộ lọc.</td></tr>`;
   } else {
     tbody.innerHTML = pageRows.map(row => `
       <tr data-rowid="${row._rowId}" class="${state.exportSelected.has(row._rowId) ? 'selected-row' : ''}">
         <td class="col-chk"><input type="checkbox" data-role="row-chk" ${state.exportSelected.has(row._rowId) ? 'checked' : ''}></td>
         <td>${escapeHtml(row.stt)}</td>
-        <td>${escapeHtml(row.bienSo)}</td>
+        <td class="sticky-col col-sticky-bienso">${escapeHtml(row.bienSo)}</td>
         <td>${escapeHtml(row.soKhung)}</td>
         <td>${escapeHtml(row.soMay)}</td>
         <td>${escapeHtml(row.nhanHieu)}</td>
         <td>${escapeHtml(row.loaiXe)}</td>
-        <td>${escapeHtml(row.chuXe)}</td>
+        <td class="sticky-col col-sticky-chuxe">${escapeHtml(row.chuXe)}</td>
         <td>${escapeHtml(row.cccd)}</td>
         <td>${escapeHtml(row.diaChi)}</td>
         <td>${escapeHtml(row.phuongXaMoi)}</td>
-        <td>${escapeHtml(row.trangThaiXe)}</td>
+        <td>${buildRowStatusSelectHtml(row)}</td>
         <td>${escapeHtml(row.ngayDangKy)}</td>
         <td>${escapeHtml(row.soDienThoai)}</td>
+        <td>${buildRowNoteInputHtml(row)}</td>
+        <td>${buildRowAssigneeSelectHtml(row)}</td>
       </tr>
     `).join('');
   }
@@ -923,7 +988,44 @@ $('#tableBody').addEventListener('click', (e) => {
     renderTable();
     return;
   }
+  // Yêu cầu #2: bấm vào ô Ghi chú / chọn Trạng thái / chọn Người thực hiện
+  // ngay trên dòng KHÔNG được mở panel Chi tiết (chỉ để nhập liệu tại chỗ).
+  if (e.target.closest('[data-role="row-status-select"], [data-role="row-note-input"], [data-role="row-assignee-select"]')) {
+    return;
+  }
   openDetailPanel(rowId);
+});
+
+// Yêu cầu #2: xử lý thay đổi Trạng thái / Ghi chú / Người thực hiện nhập trực
+// tiếp trên từng dòng ở bảng chính. Dùng "change" (không phải "input") để chỉ
+// lưu khi người dùng đã gõ xong (rời khỏi ô / bấm Enter), tránh ghi liên tục.
+$('#tableBody').addEventListener('change', async (e) => {
+  const statusSelect = e.target.closest('[data-role="row-status-select"]');
+  const noteInput = e.target.closest('[data-role="row-note-input"]');
+  const assigneeSelect = e.target.closest('[data-role="row-assignee-select"]');
+  if (!statusSelect && !noteInput && !assigneeSelect) return;
+
+  const rowId = (statusSelect || noteInput || assigneeSelect).dataset.rowid;
+  const row = state.rawData.find(r => r._rowId === rowId);
+  if (!row) return;
+
+  if (statusSelect) {
+    await updateSingleRowFields(row, { trangThaiXe: statusSelect.value });
+  } else if (noteInput) {
+    await updateSingleRowFields(row, { ghiChu: noteInput.value });
+  } else if (assigneeSelect) {
+    let value = assigneeSelect.value;
+    if (value === ASSIGNEE_ADD_NEW_VALUE) {
+      const name = window.prompt('Nhập tên Người thực hiện mới:');
+      const added = addAssigneeToList(name);
+      if (!added) { renderTable(); return; } // người dùng hủy / để trống -> không đổi gì
+      value = added;
+    }
+    await updateSingleRowFields(row, { nguoiThucHien: value });
+  }
+  // Vẽ lại bảng: cần thiết vì Trạng thái / Người thực hiện có thể ảnh hưởng
+  // tới các bộ lọc "Cần liên hệ lại" / "Loại bỏ đã thực hiện" đang bật.
+  renderTable();
 });
 
 /* ---------------------------- 7b. CẬP NHẬT HÀNG LOẠT (NHIỀU XE) ------------ */
@@ -935,8 +1037,36 @@ $('#btnBulkUpdate').addEventListener('click', () => {
   $('#bulkStatusSelect').value = '';
   $('#bulkNoteText').value = '';
   $('#bulkNoteMode').value = 'append';
+  // Yêu cầu #5: dựng lại danh sách "Người thực hiện" mỗi lần mở modal (để
+  // thấy được cả những người vừa được thêm mới), để trống = giữ nguyên.
+  const bulkAssignee = $('#bulkAssigneeSelect');
+  if (bulkAssignee) {
+    bulkAssignee.innerHTML = [`<option value="">— Giữ nguyên Người thực hiện —</option>`]
+      .concat(loadAssigneeList().map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`))
+      .concat([`<option value="${ASSIGNEE_ADD_NEW_VALUE}">+ Thêm người mới...</option>`])
+      .join('');
+    bulkAssignee.value = '';
+  }
   openModal('bulkUpdateModal');
 });
+
+// Yêu cầu #5: chọn "+ Thêm người mới..." ngay trong modal cập nhật hàng loạt.
+const bulkAssigneeSelectEl = $('#bulkAssigneeSelect');
+if (bulkAssigneeSelectEl) {
+  bulkAssigneeSelectEl.addEventListener('change', () => {
+    if (bulkAssigneeSelectEl.value !== ASSIGNEE_ADD_NEW_VALUE) return;
+    const name = window.prompt('Nhập tên Người thực hiện mới:');
+    const added = addAssigneeToList(name);
+    if (added) {
+      const opt = document.createElement('option');
+      opt.value = added; opt.textContent = added;
+      bulkAssigneeSelectEl.insertBefore(opt, bulkAssigneeSelectEl.lastElementChild);
+      bulkAssigneeSelectEl.value = added;
+    } else {
+      bulkAssigneeSelectEl.value = '';
+    }
+  });
+}
 
 $('#btnBulkApply').addEventListener('click', async () => {
   const rows = state.rawData.filter(r => state.exportSelected.has(r._rowId));
@@ -945,7 +1075,10 @@ $('#btnBulkApply').addEventListener('click', async () => {
   const statusVal = $('#bulkStatusSelect').value;
   const noteVal = $('#bulkNoteText').value.trim();
   const mode = $('#bulkNoteMode').value; // 'append' | 'replace'
-  if (!statusVal && !noteVal) { toast('Chưa nhập Trạng thái xe hoặc Ghi chú để cập nhật.', true); return; }
+  // Yêu cầu #5: cho phép gán "Người thực hiện" hàng loạt (bỏ trống = giữ nguyên).
+  const bulkAssigneeEl = $('#bulkAssigneeSelect');
+  const assigneeVal = (bulkAssigneeEl && bulkAssigneeEl.value !== ASSIGNEE_ADD_NEW_VALUE) ? bulkAssigneeEl.value : '';
+  if (!statusVal && !noteVal && !assigneeVal) { toast('Chưa nhập Trạng thái xe, Ghi chú hoặc Người thực hiện để cập nhật.', true); return; }
 
   const applyBtn = $('#btnBulkApply');
   applyBtn.disabled = true; applyBtn.textContent = 'Đang áp dụng...';
@@ -958,19 +1091,22 @@ $('#btnBulkApply').addEventListener('click', async () => {
     const updates = {};
     if (statusVal) updates['Trạng thái xe'] = statusVal;
     if (noteVal) updates['Ghi Chú'] = newGhiChu;
+    if (assigneeVal) updates['Người thực hiện'] = assigneeVal;
 
     if (isWriteConnected()) {
       const res = await updateRowOnSheet(r, updates);
       if (res && res.ok) {
         if (statusVal) r.trangThaiXe = statusVal;
         if (noteVal) r.ghiChu = newGhiChu;
+        if (assigneeVal) r.nguoiThucHien = assigneeVal;
         okCount++;
       } else failCount++;
     } else {
       // Chưa kết nối 2 chiều -> vẫn cập nhật tạm trong bộ nhớ + lưu ghi chú cục bộ.
       if (statusVal) r.trangThaiXe = statusVal;
       if (noteVal) r.ghiChu = newGhiChu;
-      saveNoteFor(r.cccd || ('name:' + normalizeName(r.chuXe)), { status: statusVal || r.trangThaiXe, text: newGhiChu || '' });
+      if (assigneeVal) r.nguoiThucHien = assigneeVal;
+      saveNoteFor(getEffectiveOwnerKey(r), { status: statusVal || r.trangThaiXe, text: newGhiChu || '' });
       okCount++;
     }
   }
@@ -989,6 +1125,80 @@ function saveNoteFor(ownerKey, data) {
   const store = loadNotesStore();
   store[ownerKey] = { ...data, updatedAt: new Date().toISOString() };
   localStorage.setItem(NOTES_KEY, JSON.stringify(store));
+}
+
+/* ---- 8a-2. Danh sách "Người thực hiện" (Yêu cầu #5) ----------------------- */
+function loadAssigneeList() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ASSIGNEE_LIST_KEY) || 'null');
+    if (Array.isArray(raw)) return uniq([...DEFAULT_ASSIGNEES, ...raw]);
+  } catch (e) { /* dữ liệu hỏng -> dùng danh sách mặc định */ }
+  return [...DEFAULT_ASSIGNEES];
+}
+function saveAssigneeList(list) {
+  localStorage.setItem(ASSIGNEE_LIST_KEY, JSON.stringify(uniq(list)));
+}
+// Thêm 1 người thực hiện mới vào danh sách (nếu chưa có) và lưu lại — để lần
+// mở trang sau vẫn thấy người này trong danh sách chọn.
+function addAssigneeToList(name) {
+  const clean = (name || '').trim();
+  if (!clean) return null;
+  const list = loadAssigneeList();
+  if (!list.includes(clean)) { list.push(clean); saveAssigneeList(list); }
+  return clean;
+}
+
+/* ---- 8a-3. Sinh HTML cho các ô nhập liệu TRÊN TỪNG DÒNG XE (Yêu cầu #2) ---
+   Dùng chung cho cả bảng chính (trang chủ) và bảng mini trong panel Chi tiết
+   chủ phương tiện. Mọi thay đổi được xử lý qua sự kiện "change" (không phải
+   "input") để tránh vẽ lại bảng liên tục khi người dùng đang gõ dở.          */
+function buildRowStatusSelectHtml(row) {
+  const current = (row.trangThaiXe || '').trim();
+  // Nếu giá trị hiện tại không nằm trong danh sách chuẩn (VD do nhập tay khác
+  // trên Sheet), vẫn thêm nó vào option đầu để không làm mất dữ liệu hiện có.
+  const options = STATUS_OPTIONS.includes(current) || !current ? STATUS_OPTIONS : [current, ...STATUS_OPTIONS];
+  const optsHtml = [`<option value="">— Chưa cập nhật —</option>`]
+    .concat(options.map(o => `<option value="${escapeHtml(o)}" ${o === current ? 'selected' : ''}>${escapeHtml(o)}</option>`))
+    .join('');
+  return `<select class="row-inline-select" data-role="row-status-select" data-rowid="${row._rowId}">${optsHtml}</select>`;
+}
+function buildRowNoteInputHtml(row) {
+  return `<input type="text" class="row-inline-input" data-role="row-note-input" data-rowid="${row._rowId}" value="${escapeHtml(row.ghiChu)}" placeholder="Ghi chú...">`;
+}
+function buildRowAssigneeSelectHtml(row) {
+  const current = (row.nguoiThucHien || '').trim();
+  const list = loadAssigneeList();
+  const optsHtml = [`<option value="">— Chưa gán —</option>`]
+    .concat((list.includes(current) || !current ? list : [current, ...list])
+      .map(a => `<option value="${escapeHtml(a)}" ${a === current ? 'selected' : ''}>${escapeHtml(a)}</option>`))
+    .concat([`<option value="${ASSIGNEE_ADD_NEW_VALUE}">+ Thêm người mới...</option>`])
+    .join('');
+  return `<select class="row-inline-select" data-role="row-assignee-select" data-rowid="${row._rowId}">${optsHtml}</select>`;
+}
+
+// Ghi 1 hoặc nhiều trường của MỘT dòng xe cụ thể (Trạng thái xe / Ghi Chú /
+// Người thực hiện...) — dùng chung cho ô nhập trên từng dòng (bảng chính +
+// bảng mini trong panel chi tiết) và mục "Cập nhật... cho riêng xe này".
+// `fieldUpdates` dạng { trangThaiXe: '...', ghiChu: '...', nguoiThucHien: '...' }.
+async function updateSingleRowFields(row, fieldUpdates) {
+  const updatesByHeader = {};
+  Object.keys(fieldUpdates).forEach(key => {
+    const f = FIELD_MAP.find(f => f.key === key);
+    if (f) updatesByHeader[f.header] = fieldUpdates[key];
+  });
+
+  if (isWriteConnected()) {
+    const res = await updateRowOnSheet(row, updatesByHeader);
+    if (!res || !res.ok) {
+      toast('Lỗi ghi về Google Sheet: ' + ((res && res.error) || 'không xác định'), true);
+      return false;
+    }
+  }
+  // Cập nhật ngay trong bộ nhớ (áp dụng cả khi đang ở chế độ chỉ đọc CSV) +
+  // lưu tạm trên trình duyệt để không mất dữ liệu khi chưa kết nối 2 chiều.
+  Object.assign(row, fieldUpdates);
+  saveNoteFor(getEffectiveOwnerKey(row), { status: row.trangThaiXe, text: row.ghiChu });
+  return true;
 }
 
 /* ---- 8b. "Xác nhận xe đúng" (Mục III -> Mục I) --------------------------- */
@@ -1189,7 +1399,12 @@ function openDetailPanel(rowId) {
 function renderDetailPanelFor(row) {
   const cccd = row.cccd;
   const chuXe = row.chuXe;
-  const ownerKey = cccd || ('name:' + normalizeName(chuXe));
+  // Yêu cầu #3: dùng đúng "CCCD hiệu lực" (getEffectiveOwnerKey) của xe ĐANG
+  // ĐƯỢC XEM trong panel này làm khóa lưu ghi chú/trạng thái — để khi xe đã
+  // được "Xác nhận xe đúng" thuộc về một chủ khác, việc "cập nhật cho riêng xe
+  // này" vẫn gắn đúng vào chủ xe (theo số định danh) đang hiển thị, không bị
+  // lưu nhầm theo Số CCCD/tên gốc còn ghi trên chính dòng dữ liệu đó.
+  const ownerKey = getEffectiveOwnerKey(row);
 
   const { sectionI, sectionII, sectionIII, sectionIV, sectionV } = computeOwnerSections(row);
   const phones = uniq(sectionI.map(r => r.soDienThoai)).join(' | ') || '—';
@@ -1198,23 +1413,35 @@ function renderDetailPanelFor(row) {
   const notesStore = loadNotesStore();
   const existingNote = notesStore[ownerKey] || { status: '', text: '' };
 
+  // Yêu cầu #1 + #2: bảng mini cũng cần cố định cột Biển số/Chủ xe khi kéo
+  // ngang, và có ô Ghi chú / chọn Trạng thái / chọn Người thực hiện ngay trên
+  // từng dòng — bọc trong .mini-table-wrap để có thanh trượt ngang riêng.
   const miniTable = (rows, sectionId, extraCols, extraCellsFn, cssClass) => rows.length ? `
+    <div class="mini-table-wrap">
     <table class="mini-table" data-section="${sectionId}">
       <thead><tr>
         <th class="col-chk-mini"></th>
-        <th>Biển số</th><th>Chủ xe</th><th>Số CCCD</th><th>Số khung</th><th>Số máy</th>
-        <th>Loại xe</th><th>Trạng thái</th>${extraCols || ''}
+        <th class="mini-sticky-col mini-sticky-bienso">Biển số</th>
+        <th class="mini-sticky-col mini-sticky-chuxe">Chủ xe</th>
+        <th>Số CCCD</th><th>Số khung</th><th>Số máy</th>
+        <th>Loại xe</th><th>Trạng thái</th><th>Ghi chú</th><th>Người thực hiện</th>${extraCols || ''}
       </tr></thead>
       <tbody>
         ${rows.map(r => `<tr data-rowid="${r._rowId}" class="${cssClass || ''}">
           <td class="col-chk-mini"><input type="checkbox" data-role="mini-chk" data-rowid="${r._rowId}" ${state.exportSelected.has(r._rowId) ? 'checked' : ''}></td>
-          <td>${escapeHtml(r.bienSo)}</td><td>${escapeHtml(r.chuXe)}</td><td>${escapeHtml(r.cccd) || '—'}</td>
+          <td class="mini-sticky-col mini-sticky-bienso">${escapeHtml(r.bienSo)}</td>
+          <td class="mini-sticky-col mini-sticky-chuxe">${escapeHtml(r.chuXe)}</td>
+          <td>${escapeHtml(r.cccd) || '—'}</td>
           <td>${escapeHtml(r.soKhung)}</td><td>${escapeHtml(r.soMay)}</td>
-          <td>${escapeHtml(r.loaiXe)}</td><td>${escapeHtml(r.trangThaiXe)}</td>
+          <td>${escapeHtml(r.loaiXe)}</td>
+          <td>${buildRowStatusSelectHtml(r)}</td>
+          <td>${buildRowNoteInputHtml(r)}</td>
+          <td>${buildRowAssigneeSelectHtml(r)}</td>
           ${extraCellsFn ? extraCellsFn(r) : ''}
         </tr>`).join('')}
       </tbody>
-    </table>` : `<p class="hint">Không tìm thấy trường hợp phù hợp.</p>`;
+    </table>
+    </div>` : `<p class="hint">Không tìm thấy trường hợp phù hợp.</p>`;
 
   const selectAllBtn = (sectionId, rows) => rows.length
     ? `<button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;" data-select-all="${sectionId}">☑️ Chọn tất cả (${rows.length})</button>`
@@ -1242,7 +1469,11 @@ function renderDetailPanelFor(row) {
       <div class="row"><b>Họ và tên:</b> ${escapeHtml(chuXe) || '—'}</div>
       <div class="row"><b>Số CCCD/MST:</b> ${escapeHtml(cccd) || '—'}</div>
       <div class="row"><b>Địa chỉ:</b> ${escapeHtml(addr)}</div>
-      <div class="row"><b>Số điện thoại:</b> ${escapeHtml(phones)}</div>
+      <div class="row phone-edit-row">
+        <b>Số điện thoại:</b>
+        <input type="text" id="ownerPhoneInput" class="tpl-input" value="${escapeHtml(phones === '—' ? '' : phones)}" placeholder="Nhập SĐT, phân cách bằng dấu phẩy nếu có nhiều số">
+        <button type="button" id="btnSavePhone" class="btn btn-ghost btn-sm">💾 Lưu SĐT</button>
+      </div>
       <div class="owner-card-actions">
         <button type="button" id="btnCreateCommitmentPanel" class="btn btn-primary btn-sm">
           📄 Tạo Bản cam kết (${state.exportSelected.size} xe đã chọn)
@@ -1294,6 +1525,8 @@ function renderDetailPanelFor(row) {
         <option value="Cần xác minh thêm">Cần xác minh thêm</option>
       </select>
       <textarea id="noteTextArea" placeholder="Ghi chú thêm...">${escapeHtml(row.ghiChu || existingNote.text || '')}</textarea>
+      <label class="hint-label">Người thực hiện</label>
+      ${buildRowAssigneeSelectHtml(row).replace('class="row-inline-select"', 'class="row-inline-select" id="noteAssigneeSelect"')}
       <div class="sync-row">
         <button id="btnSaveNoteLocal" class="btn btn-ghost btn-sm">💾 Lưu tạm (trình duyệt)</button>
         <button id="btnSaveNoteSheet" class="btn btn-primary btn-sm" ${state.mode !== 'gas' ? 'disabled title="Cần kết nối chế độ Apps Script (2 chiều)"' : ''}>⬆️ Lưu về Google Sheet</button>
@@ -1304,6 +1537,41 @@ function renderDetailPanelFor(row) {
   $('#detailBody').innerHTML = bodyHtml;
   $('#noteStatusSelect').value = '';
 
+  // Yêu cầu #4: cho phép sửa số điện thoại hiện có / thêm số điện thoại mới.
+  // Áp dụng cho đúng xe đang xem (`row`) — nếu chủ xe có nhiều xe với SĐT khác
+  // nhau, mở panel đúng xe cần sửa rồi lưu ở đây.
+  const btnSavePhone = $('#btnSavePhone');
+  if (btnSavePhone) {
+    btnSavePhone.addEventListener('click', async () => {
+      const val = $('#ownerPhoneInput').value.trim();
+      btnSavePhone.disabled = true; btnSavePhone.textContent = 'Đang lưu...';
+      await updateSingleRowFields(row, { soDienThoai: val });
+      btnSavePhone.disabled = false; btnSavePhone.textContent = '💾 Lưu SĐT';
+      renderTable();
+      renderDetailPanelFor(row);
+      toast('Đã lưu số điện thoại.');
+    });
+  }
+
+  // Yêu cầu #5: chọn "+ Thêm người mới..." trong select Người thực hiện của
+  // mục "Cập nhật cho riêng xe này" -> hỏi tên, thêm vào danh sách, chọn luôn.
+  const noteAssigneeSelect = $('#noteAssigneeSelect');
+  if (noteAssigneeSelect) {
+    noteAssigneeSelect.addEventListener('change', () => {
+      if (noteAssigneeSelect.value !== ASSIGNEE_ADD_NEW_VALUE) return;
+      const name = window.prompt('Nhập tên Người thực hiện mới:');
+      const added = addAssigneeToList(name);
+      if (added) {
+        renderDetailPanelFor(row);
+        // renderDetailPanelFor vẽ lại toàn bộ panel -> chọn sẵn người vừa thêm.
+        const sel = $('#noteAssigneeSelect');
+        if (sel) sel.value = added;
+      } else {
+        noteAssigneeSelect.value = '';
+      }
+    });
+  }
+
   const doSaveLocal = () => {
     saveNoteFor(ownerKey, {
       status: $('#noteStatusSelect').value || row.trangThaiXe,
@@ -1311,20 +1579,31 @@ function renderDetailPanelFor(row) {
     });
     toast('Đã lưu ghi chú tạm trên trình duyệt.');
   };
-  $('#btnSaveNoteLocal').addEventListener('click', doSaveLocal);
+  $('#btnSaveNoteLocal').addEventListener('click', () => {
+    const assigneeVal = $('#noteAssigneeSelect') ? $('#noteAssigneeSelect').value : '';
+    row.ghiChu = $('#noteTextArea').value;
+    const statusVal = $('#noteStatusSelect').value;
+    if (statusVal) row.trangThaiXe = statusVal;
+    if (assigneeVal && assigneeVal !== ASSIGNEE_ADD_NEW_VALUE) row.nguoiThucHien = assigneeVal;
+    doSaveLocal();
+    renderTable();
+  });
 
   const btnSheet = $('#btnSaveNoteSheet');
   if (btnSheet) {
     btnSheet.addEventListener('click', async () => {
       const updates = { 'Ghi Chú': $('#noteTextArea').value };
       const statusVal = $('#noteStatusSelect').value;
+      const assigneeVal = $('#noteAssigneeSelect') ? $('#noteAssigneeSelect').value : '';
       if (statusVal) updates['Trạng thái xe'] = statusVal;
+      if (assigneeVal && assigneeVal !== ASSIGNEE_ADD_NEW_VALUE) updates['Người thực hiện'] = assigneeVal;
       btnSheet.disabled = true; btnSheet.textContent = 'Đang lưu...';
       const res = await updateRowOnSheet(row, updates);
       btnSheet.disabled = false; btnSheet.textContent = '⬆️ Lưu về Google Sheet';
       if (res && res.ok) {
         row.ghiChu = updates['Ghi Chú'];
         if (statusVal) row.trangThaiXe = statusVal;
+        if (updates['Người thực hiện']) row.nguoiThucHien = updates['Người thực hiện'];
         doSaveLocal();
         renderTable();
         toast('Đã ghi về Google Sheet.');
@@ -1338,8 +1617,43 @@ function renderDetailPanelFor(row) {
   $('#detailBody').querySelectorAll('.mini-table tbody tr').forEach(tr => {
     tr.addEventListener('click', (e) => {
       if (e.target.closest('[data-role="mini-chk"]')) return;
+      // Yêu cầu #2: không chuyển panel khi bấm vào ô nhập Ghi chú / chọn
+      // Trạng thái / chọn Người thực hiện ngay trên dòng của bảng mini.
+      if (e.target.closest('[data-role="row-status-select"], [data-role="row-note-input"], [data-role="row-assignee-select"], [data-confirm-owner]')) return;
       const targetRow = state.rawData.find(r => r._rowId === tr.dataset.rowid);
       if (targetRow) renderDetailPanelFor(targetRow);
+    });
+  });
+  // Yêu cầu #2: xử lý thay đổi Trạng thái / Ghi chú / Người thực hiện nhập
+  // trực tiếp trên từng dòng trong các bảng mini (Mục I-V) của panel chi tiết.
+  // LƯU Ý: chỉ chọn phần tử NẰM TRONG .mini-table — tránh khớp nhầm vào ô
+  // "Người thực hiện" của khối "Cập nhật cho riêng xe này" bên dưới (khối đó
+  // dùng chung hàm buildRowAssigneeSelectHtml() nên có cùng data-role, nhưng
+  // được lưu qua nút "Lưu tạm/Lưu Google Sheet" riêng, không nên lưu ngay khi
+  // vừa chọn).
+  $('#detailBody').querySelectorAll('.mini-table [data-role="row-status-select"], .mini-table [data-role="row-note-input"], .mini-table [data-role="row-assignee-select"]').forEach(el => {
+    el.addEventListener('change', async (e) => {
+      e.stopPropagation();
+      const target = e.target;
+      const targetRow = state.rawData.find(r => r._rowId === target.dataset.rowid);
+      if (!targetRow) return;
+      const role = target.dataset.role;
+      if (role === 'row-status-select') {
+        await updateSingleRowFields(targetRow, { trangThaiXe: target.value });
+      } else if (role === 'row-note-input') {
+        await updateSingleRowFields(targetRow, { ghiChu: target.value });
+      } else if (role === 'row-assignee-select') {
+        let value = target.value;
+        if (value === ASSIGNEE_ADD_NEW_VALUE) {
+          const name = window.prompt('Nhập tên Người thực hiện mới:');
+          const added = addAssigneeToList(name);
+          if (!added) { renderDetailPanelFor(row); return; }
+          value = added;
+        }
+        await updateSingleRowFields(targetRow, { nguoiThucHien: value });
+      }
+      renderTable();
+      renderDetailPanelFor(row); // vẽ lại panel: có thể ảnh hưởng số đếm/nhóm ở các mục
     });
   });
   $('#detailBody').querySelectorAll('[data-role="mini-chk"]').forEach(chk => {

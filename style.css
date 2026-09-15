@@ -136,6 +136,27 @@ tbody tr.selected-row{background:var(--highlight);}
 .col-chk{width:36px;}
 .empty-state{text-align:center;color:var(--text-muted);padding:40px !important;cursor:default;}
 
+/* ---------- CỘT CỐ ĐỊNH (STICKY) KHI KÉO NGANG — Yêu cầu #1 ----------------
+   Giữ cố định 2 cột "Biển số" và "Chủ phương tiện" khi kéo thanh trượt ngang ở
+   bảng chính. Kỹ thuật: mỗi cột sticky có "left" = tổng chiều rộng các cột
+   sticky đứng TRƯỚC nó (không cần các cột phải nằm liền kề nhau trong DOM),
+   nên vẫn giữ nguyên đúng thứ tự cột hiện có mà không cần sắp xếp lại bảng. */
+.sticky-col{position:sticky;background:#fff;z-index:5;}
+thead th.sticky-col{z-index:15;background:#f0f3f8;}
+.col-sticky-bienso{left:0;width:112px;min-width:112px;max-width:112px;}
+.col-sticky-chuxe{left:112px;width:170px;min-width:170px;max-width:170px;white-space:normal;}
+tbody tr:hover td.sticky-col{background:#f8fafc;}
+tbody tr.selected-row td.sticky-col{background:var(--highlight);}
+
+/* ---------- Ô NHẬP LIỆU TRÊN TỪNG DÒNG (Ghi chú / Trạng thái / Người thực
+   hiện) — Yêu cầu #2 + #5. Thu gọn kích thước để vừa trong 1 dòng của bảng. */
+.row-inline-select, .row-inline-input{
+  width:100%;min-width:120px;padding:5px 6px;border:1px solid var(--border);
+  border-radius:6px;font-size:12.5px;background:#fff;white-space:normal;
+}
+.row-inline-input{min-width:140px;}
+.row-inline-select:focus, .row-inline-input:focus{border-color:var(--primary);outline:none;}
+
 /* ---------- PAGINATION ---------- */
 .pagination{display:flex;justify-content:center;gap:6px;padding:14px 0;flex-wrap:wrap;}
 .pagination button{
@@ -213,7 +234,11 @@ tbody tr.selected-row{background:var(--highlight);}
   text-transform:uppercase;display:flex;align-items:center;gap:6px;
 }
 .section-desc{font-size:11.5px;color:var(--text-muted);margin:-4px 0 8px;font-style:italic;text-transform:none;}
-.mini-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:6px;}
+/* Bọc bảng mini để có thanh trượt ngang RIÊNG cho từng mục (I-V) trong panel
+   Chi tiết chủ phương tiện — cần thiết để tính năng cột cố định (sticky) bên
+   dưới có tác dụng. Yêu cầu #1. */
+.mini-table-wrap{overflow-x:auto;margin-bottom:6px;}
+.mini-table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:760px;}
 .mini-table th{background:#f0f3f8;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;}
 .mini-table td{padding:6px 8px;border-bottom:1px solid #eef0f3;white-space:nowrap;}
 .mini-table tr{cursor:pointer;}
@@ -222,6 +247,21 @@ tbody tr.selected-row{background:var(--highlight);}
 .mini-table tr.fuzzy-name{background:#fdeef0;}
 .mini-table tr.fuzzy-number{background:#eef4ff;}
 .mini-table .col-chk-mini{width:24px;}
+
+/* Cột cố định (sticky) cho bảng mini — Yêu cầu #1, cùng kỹ thuật như bảng
+   chính: Biển số và Chủ xe vốn đã liền kề nhau trong bảng này. */
+.mini-sticky-col{position:sticky;background:#fff;z-index:5;}
+thead .mini-sticky-col{z-index:15;background:#f0f3f8;}
+.mini-sticky-bienso{left:0;width:90px;min-width:90px;max-width:90px;}
+.mini-sticky-chuxe{left:90px;width:130px;min-width:130px;max-width:130px;white-space:normal;}
+.mini-table tbody tr:hover td.mini-sticky-col{background:#f8fafc;}
+.mini-table tbody tr.diff-cccd td.mini-sticky-col{background:#fff7e6;}
+.mini-table tbody tr.fuzzy-name td.mini-sticky-col{background:#fdeef0;}
+.mini-table tbody tr.fuzzy-number td.mini-sticky-col{background:#eef4ff;}
+
+/* Ô sửa/thêm số điện thoại trong owner-card — Yêu cầu #4. */
+.phone-edit-row{align-items:center;flex-wrap:wrap;gap:8px;}
+.phone-edit-row input{flex:1;min-width:160px;margin:0;}
 .note-box textarea{width:100%;min-height:70px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;resize:vertical;}
 .note-box select{width:100%;padding:7px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;}
 .tag-count{background:var(--primary);color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;margin-left:6px;text-transform:none;font-weight:700;}
@@ -271,4 +311,10 @@ table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
   .filter-actions{margin-left:0;}
   .detail-panel{width:100% !important;} /* mobile: giữ nguyên giao diện, không cho kéo giãn */
   .detail-resize-handle{display:none;}
+
+  /* Yêu cầu #1: trên điện thoại chỉ giữ cố định cột Biển số, KHÔNG giữ cố
+     định cột Chủ phương tiện/Chủ xe nữa (bỏ "left" để hủy hiệu ứng sticky
+     ngang, riêng bảng chính vẫn giữ sticky dọc top:0 sẵn có của <thead th>). */
+  .col-sticky-chuxe{left:auto;width:auto;min-width:0;max-width:none;white-space:nowrap;}
+  .mini-sticky-chuxe{left:auto;width:auto;min-width:0;max-width:none;white-space:nowrap;}
 }
