@@ -143,6 +143,10 @@
       <label>Trạng thái xe</label>
       <div class="ms-control" data-field="trangThaiXe"></div>
     </div>
+    <div class="filter-field" data-field="nguoiThucHien">
+      <label>Người thực hiện</label>
+      <div class="ms-control" data-field="nguoiThucHien"></div>
+    </div>
     <div class="filter-actions">
       <span id="filteredCount" class="filtered-count">0 / 0 dòng</span>
       <button id="btnClearFilters" class="btn btn-ghost">Xóa bộ lọc</button>
@@ -219,6 +223,15 @@
     </table>
   </section>
 
+  <!-- ---- THANH TRƯỢT NGANG DÍNH CỐ ĐỊNH DƯỚI CHÂN TRANG (sticky bottom) ----
+       Luôn hiện rõ để kéo xem các cột bị che khuất bên phải, kể cả khi danh
+       sách xe rất dài (không cần kéo hết trang xuống mới thấy). Chỉ hiện khi
+       bảng thực sự tràn ngang (xem setupMainHScrollSync() trong app.js). -->
+  <div class="hscroll-track hscroll-track-sticky hidden" id="mainHScrollTrack">
+    <span class="hscroll-icon">↔️</span>
+    <input type="range" id="mainHScrollRange" min="0" max="0" value="0" aria-label="Kéo để xem các cột bị che bên phải">
+  </div>
+
   <!-- ---- PAGINATION ---- -->
   <section class="pagination" id="pagination"></section>
 
@@ -233,6 +246,22 @@
       <button class="modal-close" data-close="detailOverlay">✕</button>
     </div>
     <div class="modal-body" id="detailBody"><!-- filled by JS --></div>
+
+    <!-- ---- CHÂN TRANG DÍNH CỐ ĐỊNH (sticky bottom) CỦA PANEL ----
+         Nằm NGOÀI vùng cuộn (#detailBody) nên luôn hiện rõ ở đáy panel: thanh
+         trượt ngang dùng chung cho mọi bảng xe (Mục I-V) + 2 nút Lưu, không
+         bao giờ bị khuất dù danh sách xe của chủ phương tiện rất dài. -->
+    <div class="detail-sticky-footer" id="detailStickyFooter">
+      <div class="hscroll-track hidden" id="detailHScrollTrack">
+        <span class="hscroll-icon">↔️</span>
+        <input type="range" id="detailHScrollRange" min="0" max="0" value="0" aria-label="Kéo để xem các cột bị che của bảng xe">
+      </div>
+      <div class="sync-row" id="detailSyncRow">
+        <button id="btnSaveNoteLocal" class="btn btn-ghost btn-sm">💾 Lưu tạm (trình duyệt)</button>
+        <button id="btnSaveNoteSheet" class="btn btn-primary btn-sm">⬆️ Lưu về Google Sheet</button>
+      </div>
+      <div class="sync-note" id="detailSyncNote"></div>
+    </div>
   </aside>
 </div>
 

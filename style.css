@@ -157,6 +157,39 @@ tbody tr.selected-row td.sticky-col{background:var(--highlight);}
 .row-inline-input{min-width:140px;}
 .row-inline-select:focus, .row-inline-input:focus{border-color:var(--primary);outline:none;}
 
+/* ---------- THANH TRƯỢT NGANG DÍNH CỐ ĐỊNH (sticky bottom) ----------------
+   Dùng chung cho cả bảng chính (trang chủ) và panel Chi tiết chủ phương
+   tiện: 1 thanh mỏng chứa <input type="range"> đóng vai trò "thanh trượt
+   ngang" thay cho thanh cuộn ngang gốc của trình duyệt (vốn hay bị khuất khi
+   danh sách dài) — luôn hiện rõ, kéo là các bảng cuộn ngang theo ngay. */
+.hscroll-track{
+  display:flex;align-items:center;gap:10px;background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--radius);
+  padding:6px 14px;
+}
+.hscroll-track.hidden{display:none;}
+.hscroll-icon{font-size:13px;flex:none;opacity:.7;}
+.hscroll-track input[type="range"]{
+  flex:1;width:100%;cursor:pointer;accent-color:var(--primary);height:16px;
+}
+/* Trang chủ: thanh này nằm ngay dưới bảng dữ liệu, dính cố định ở chân
+   VIEWPORT (không phải chân trang) trong lúc bảng còn nằm trong tầm nhìn,
+   nhờ position:sticky bên trong luồng cuộn của cả trang. */
+.hscroll-track-sticky{
+  position:sticky;bottom:10px;z-index:40;margin-bottom:12px;
+  box-shadow:0 4px 16px rgba(0,0,0,.1);
+}
+
+/* ---------- CHÂN TRANG DÍNH CỐ ĐỊNH CỦA PANEL CHI TIẾT --------------------
+   Nằm ngoài vùng cuộn của .modal-body (#detailBody) nên KHÔNG cuộn theo danh
+   sách xe: luôn hiện rõ thanh trượt ngang dùng chung cho các bảng mini +
+   2 nút Lưu, dù chủ xe có rất nhiều xe / nhiều mục đối chiếu (I-V). */
+.detail-sticky-footer{
+  flex:none;border-top:1px solid var(--border);background:#fff;
+  padding:10px 20px 14px;display:flex;flex-direction:column;gap:8px;
+}
+.detail-sticky-footer .sync-row{margin-top:0;}
+
 /* ---------- PAGINATION ---------- */
 .pagination{display:flex;justify-content:center;gap:6px;padding:14px 0;flex-wrap:wrap;}
 .pagination button{
