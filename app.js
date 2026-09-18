@@ -172,6 +172,26 @@ function stripDiacritics(s) {
 }
 function uniq(arr) { return Array.from(new Set(arr.filter(v => v && v.trim() !== ''))); }
 
+// TỐI ƯU HIỆU NĂNG (cập nhật hàng loạt nhiều xe): chạy các tác vụ bất đồng bộ
+// (VD: ghi từng dòng về Google Sheet) với SỐ LƯỢNG ĐỒNG THỜI GIỚI HẠN thay vì
+// hoàn toàn tuần tự (await từng cái một, rất chậm khi có nhiều request mạng)
+// hoặc hoàn toàn song song không giới hạn (dễ làm quá tải Apps Script Web App
+// vốn xử lý từng request một cách khá chậm). `limit` ~ 6 là mức cân bằng tốt.
+async function runWithConcurrencyLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function runner() {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, runner);
+  await Promise.all(workers);
+  return results;
+}
+
 /* ---- Yêu cầu #6: "đã thực hiện" / "cần liên hệ lại" ------------------------
    Quy ước (có thể điều chỉnh nếu nghiệp vụ thực tế khác):
    - "Đã thực hiện": hồ sơ ĐÃ được gán một "Người thực hiện" cụ thể (đã có
@@ -925,11 +945,32 @@ function updateRecordCount() {
   $('#recordCount').textContent = `${state.rawData.length} bản ghi`;
 }
 
+// SỬA LỖI (Yêu cầu #2): khi bộ lọc thay đổi, các xe ĐÃ CHỌN trước đó nhưng
+// không còn nằm trong kết quả lọc hiện tại phải được TỰ ĐỘNG BỎ CHỌN — nếu
+// không, chúng vẫn bị tính là "đã chọn" (ảnh hưởng số đếm, xuất Excel, tạo
+// Bản cam kết, cập nhật hàng loạt...) dù người dùng không còn thấy chúng đâu
+// trên danh sách để bỏ chọn thủ công. Hàm này chỉ giữ lại trong exportSelected
+// những rowId thực sự có trong `visibleRows` (kết quả lọc hiện tại, CHƯA phân
+// trang — tức là "còn thấy được nếu chuyển trang", chỉ loại bỏ khi bộ lọc thực
+// sự đã thay đổi). Trả về true nếu có thay đổi (để nơi gọi biết mà vẽ lại nơi
+// khác nếu cần, ví dụ panel chi tiết).
+function pruneSelectionToRows(visibleRows) {
+  const visibleIds = new Set(visibleRows.map(r => r._rowId));
+  let changed = false;
+  state.exportSelected.forEach(id => {
+    if (!visibleIds.has(id)) { state.exportSelected.delete(id); changed = true; }
+  });
+  return changed;
+}
+
 function renderTable() {
   const filtered = getFiltered(null);
   // Yêu cầu 2A/2B: áp dụng sắp xếp (kết hợp nhiều tiêu chí) sau khi đã lọc,
   // trước khi phân trang, để thứ tự hiển thị và thứ tự xuất Excel khớp nhau.
   filtered.sort(compareBySortCriteria);
+  // Yêu cầu #2: tự động bỏ chọn các xe không còn nằm trong bộ lọc hiện tại
+  // (xem giải thích ở pruneSelectionToRows() phía trên).
+  pruneSelectionToRows(filtered);
   $('#filteredCount').textContent = `${filtered.length} / ${state.rawData.length} dòng`;
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
@@ -1029,7 +1070,24 @@ function updateSelectedCount() {
   $('#selectedCount').textContent = `${state.exportSelected.size} xe đã chọn để xuất`;
   const bulkBtn = $('#btnBulkUpdate');
   if (bulkBtn) bulkBtn.disabled = state.exportSelected.size === 0;
+  // Yêu cầu #2: nút "Bỏ chọn tất cả" chỉ bật khi đang có ít nhất 1 xe được chọn.
+  const deselectBtn = $('#btnDeselectAll');
+  if (deselectBtn) deselectBtn.disabled = state.exportSelected.size === 0;
 }
+
+// Yêu cầu #2: "Bỏ chọn tất cả" ở trang chủ — xoá TOÀN BỘ lựa chọn hiện tại
+// (trên mọi trang / không chỉ trang đang xem), vì selectedCount vốn cũng đang
+// đếm theo toàn bộ state.exportSelected (không giới hạn theo trang).
+$('#btnDeselectAll').addEventListener('click', () => {
+  if (!state.exportSelected.size) return;
+  state.exportSelected.clear();
+  renderTable();
+  // Nếu panel chi tiết đang mở, vẽ lại để đồng bộ checkbox trong các bảng mini.
+  if (currentDetailRow && !$('#detailOverlay').classList.contains('hidden')) {
+    renderDetailPanelFor(currentDetailRow);
+  }
+  toast('Đã bỏ chọn tất cả.');
+});
 function updateSelectAllPageCheckbox(pageRows) {
   const chk = $('#chkSelectAllPage');
   if (!pageRows.length) { chk.checked = false; chk.indeterminate = false; return; }
@@ -1099,10 +1157,22 @@ $('#tableBody').addEventListener('change', async (e) => {
 
 /* ---------------------------- 7b. CẬP NHẬT HÀNG LOẠT (NHIỀU XE) ------------ */
 // Yêu cầu #3: cho phép chọn nhiều xe (checkbox ở bảng chính / panel chi tiết)
-// rồi cập nhật Trạng thái xe / Ghi chú cùng lúc cho tất cả các xe đã chọn.
-$('#btnBulkUpdate').addEventListener('click', () => {
-  if (!state.exportSelected.size) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) trước.', true); return; }
-  $('#bulkUpdateCount').textContent = state.exportSelected.size;
+// rồi cập nhật Trạng thái xe / Ghi chú / Người thực hiện cùng lúc cho tất cả
+// các xe đã chọn.
+//
+// `bulkUpdateRows` lưu ĐÚNG danh sách xe sẽ bị áp dụng khi bấm "Áp dụng" trong
+// modal — mặc định là toàn bộ state.exportSelected (nút "Cập nhật hàng loạt"
+// trên thanh công cụ chính), nhưng cũng có thể là một TẬP CON đã chọn, ví dụ
+// riêng các xe đã tích trong Mục I của panel chi tiết chủ phương tiện (Yêu cầu
+// mới: "Cập nhật hàng loạt trong Mục I"). Dùng chung 1 modal + 1 luồng ghi dữ
+// liệu duy nhất để tránh trùng lặp code và giảm rủi ro phát sinh lỗi mới.
+let bulkUpdateRows = [];
+
+// Mở modal cập nhật hàng loạt cho đúng danh sách `rows` được truyền vào.
+function openBulkUpdateModal(rows) {
+  if (!rows.length) { toast('Vui lòng chọn ít nhất 1 xe (checkbox) trước.', true); return; }
+  bulkUpdateRows = rows;
+  $('#bulkUpdateCount').textContent = rows.length;
   $('#bulkStatusSelect').value = '';
   $('#bulkNoteText').value = '';
   $('#bulkNoteMode').value = 'append';
@@ -1117,6 +1187,10 @@ $('#btnBulkUpdate').addEventListener('click', () => {
     bulkAssignee.value = '';
   }
   openModal('bulkUpdateModal');
+}
+
+$('#btnBulkUpdate').addEventListener('click', () => {
+  openBulkUpdateModal(state.rawData.filter(r => state.exportSelected.has(r._rowId)));
 });
 
 // Yêu cầu #5: chọn "+ Thêm người mới..." ngay trong modal cập nhật hàng loạt.
@@ -1137,8 +1211,18 @@ if (bulkAssigneeSelectEl) {
   });
 }
 
+// TỐI ƯU HIỆU NĂNG (mục "Cải thiện hiệu năng lưu"): trước đây vòng lặp này
+// dùng `for...await` để ghi TUẦN TỰ từng xe một về Google Sheet — với N xe,
+// tổng thời gian chờ = N lần độ trễ mạng cộng lại, nên chọn càng nhiều xe càng
+// chậm rõ rệt. Nay dùng runWithConcurrencyLimit() để gửi TỐI ĐA 6 request cùng
+// lúc (đủ nhanh, không làm quá tải Apps Script Web App vốn xử lý khá chậm mỗi
+// request). Với ghi chú cục bộ (chế độ CSV / chưa kết nối), dùng persist=false
+// để KHÔNG ghi xuống localStorage cho từng xe, mà gộp lại ghi 1 LẦN DUY NHẤT ở
+// cuối (persistNotesStore()) — giảm hẳn số lần thao tác I/O đồng bộ.
+const BULK_UPDATE_CONCURRENCY = 6;
+
 $('#btnBulkApply').addEventListener('click', async () => {
-  const rows = state.rawData.filter(r => state.exportSelected.has(r._rowId));
+  const rows = bulkUpdateRows;
   if (!rows.length) { closeModal('bulkUpdateModal'); return; }
 
   const statusVal = $('#bulkStatusSelect').value;
@@ -1150,10 +1234,12 @@ $('#btnBulkApply').addEventListener('click', async () => {
   if (!statusVal && !noteVal && !assigneeVal) { toast('Chưa nhập Trạng thái xe, Ghi chú hoặc Người thực hiện để cập nhật.', true); return; }
 
   const applyBtn = $('#btnBulkApply');
-  applyBtn.disabled = true; applyBtn.textContent = 'Đang áp dụng...';
+  applyBtn.disabled = true; applyBtn.textContent = `Đang áp dụng (0/${rows.length})...`;
 
-  let okCount = 0, failCount = 0;
-  for (const r of rows) {
+  let okCount = 0, failCount = 0, doneCount = 0;
+  const writeConnected = isWriteConnected();
+
+  await runWithConcurrencyLimit(rows, BULK_UPDATE_CONCURRENCY, async (r) => {
     const newGhiChu = noteVal
       ? (mode === 'append' && r.ghiChu ? `${r.ghiChu}; ${noteVal}` : noteVal)
       : r.ghiChu;
@@ -1162,7 +1248,7 @@ $('#btnBulkApply').addEventListener('click', async () => {
     if (noteVal) updates['Ghi Chú'] = newGhiChu;
     if (assigneeVal) updates['Người thực hiện'] = assigneeVal;
 
-    if (isWriteConnected()) {
+    if (writeConnected) {
       const res = await updateRowOnSheet(r, updates);
       if (res && res.ok) {
         if (statusVal) r.trangThaiXe = statusVal;
@@ -1171,41 +1257,77 @@ $('#btnBulkApply').addEventListener('click', async () => {
         okCount++;
       } else failCount++;
     } else {
-      // Chưa kết nối 2 chiều -> vẫn cập nhật tạm trong bộ nhớ + lưu ghi chú cục bộ.
+      // Chưa kết nối 2 chiều -> vẫn cập nhật tạm trong bộ nhớ + lưu ghi chú cục
+      // bộ, nhưng KHÔNG ghi xuống localStorage ngay (persist=false) — sẽ gộp
+      // ghi 1 lần duy nhất sau khi toàn bộ vòng lặp hoàn tất.
       if (statusVal) r.trangThaiXe = statusVal;
       if (noteVal) r.ghiChu = newGhiChu;
       if (assigneeVal) r.nguoiThucHien = assigneeVal;
-      saveNoteFor(getEffectiveOwnerKey(r), { status: statusVal || r.trangThaiXe, text: newGhiChu || '' });
+      saveNoteFor(getEffectiveOwnerKey(r), { status: statusVal || r.trangThaiXe, text: newGhiChu || '' }, false);
       okCount++;
     }
-  }
+    doneCount++;
+    applyBtn.textContent = `Đang áp dụng (${doneCount}/${rows.length})...`;
+  });
+
+  if (!writeConnected) persistNotesStore(); // ghi 1 lần duy nhất cho toàn bộ lô
 
   applyBtn.disabled = false; applyBtn.textContent = '💾 Áp dụng';
+  bulkUpdateRows = [];
   renderTable();
+  // Nếu panel chi tiết đang mở, vẽ lại để phản ánh đúng thay đổi (VD: cập nhật
+  // hàng loạt vừa thực hiện từ Mục I của panel).
+  if (currentDetailRow && !$('#detailOverlay').classList.contains('hidden')) {
+    renderDetailPanelFor(currentDetailRow);
+  }
   closeModal('bulkUpdateModal');
   toast(`Đã cập nhật ${okCount} xe.` + (failCount ? ` (${failCount} xe lỗi khi ghi Sheet)` : ''));
 });
 
 /* ---------------------------- 8. GHI CHÚ / TRẠNG THÁI CỤC BỘ ---------------- */
+// TỐI ƯU HIỆU NĂNG (mục "Cải thiện hiệu năng tải/lưu"): loadNotesStore() trước
+// đây gọi JSON.parse() từ localStorage MỖI LẦN được gọi — hàm này được gọi rất
+// nhiều lần trong 1 thao tác (mỗi dòng xe khi lưu ghi chú, mỗi lần mở panel chi
+// tiết...), nên với dữ liệu lớn hoặc cập nhật hàng loạt nhiều xe, việc đọc lại +
+// parse JSON liên tục gây chậm rõ rệt. Nay CACHE kết quả trong bộ nhớ (module-
+// level), chỉ đọc từ localStorage 1 lần, và cập nhật cache mỗi khi lưu.
+let _notesStoreCache = null;
 function loadNotesStore() {
-  try { return JSON.parse(localStorage.getItem(NOTES_KEY) || '{}'); } catch (e) { return {}; }
+  if (_notesStoreCache) return _notesStoreCache;
+  try { _notesStoreCache = JSON.parse(localStorage.getItem(NOTES_KEY) || '{}'); }
+  catch (e) { _notesStoreCache = {}; }
+  return _notesStoreCache;
 }
-function saveNoteFor(ownerKey, data) {
+// `persist = false` cho phép gộp nhiều lần sửa (VD: cập nhật hàng loạt nhiều
+// xe cùng lúc) thành ĐÚNG 1 LẦN ghi xuống localStorage ở cuối (persistNotesStore()),
+// thay vì ghi ổ đĩa lặp lại cho từng xe một — giảm đáng kể thời gian xử lý khi
+// cập nhật hàng loạt lúc chưa kết nối Apps Script (chế độ chỉ đọc / CSV).
+function saveNoteFor(ownerKey, data, persist = true) {
   const store = loadNotesStore();
   store[ownerKey] = { ...data, updatedAt: new Date().toISOString() };
-  localStorage.setItem(NOTES_KEY, JSON.stringify(store));
+  if (persist) persistNotesStore();
+}
+function persistNotesStore() {
+  localStorage.setItem(NOTES_KEY, JSON.stringify(_notesStoreCache || {}));
 }
 
 /* ---- 8a-2. Danh sách "Người thực hiện" (Yêu cầu #5) ----------------------- */
+// Cùng lý do tối ưu như loadNotesStore(): hàm này được gọi cho MỖI DÒNG XE khi
+// vẽ bảng (buildRowAssigneeSelectHtml) — với hàng trăm dòng/trang, đọc lại
+// localStorage + JSON.parse cho từng dòng là lãng phí CPU không cần thiết.
+// Cache lại trong bộ nhớ, chỉ tính lại khi danh sách thực sự thay đổi.
+let _assigneeListCache = null;
 function loadAssigneeList() {
+  if (_assigneeListCache) return _assigneeListCache;
   try {
     const raw = JSON.parse(localStorage.getItem(ASSIGNEE_LIST_KEY) || 'null');
-    if (Array.isArray(raw)) return uniq([...DEFAULT_ASSIGNEES, ...raw]);
-  } catch (e) { /* dữ liệu hỏng -> dùng danh sách mặc định */ }
-  return [...DEFAULT_ASSIGNEES];
+    _assigneeListCache = Array.isArray(raw) ? uniq([...DEFAULT_ASSIGNEES, ...raw]) : [...DEFAULT_ASSIGNEES];
+  } catch (e) { _assigneeListCache = [...DEFAULT_ASSIGNEES]; }
+  return _assigneeListCache;
 }
 function saveAssigneeList(list) {
-  localStorage.setItem(ASSIGNEE_LIST_KEY, JSON.stringify(uniq(list)));
+  _assigneeListCache = uniq(list);
+  localStorage.setItem(ASSIGNEE_LIST_KEY, JSON.stringify(_assigneeListCache));
 }
 // Thêm 1 người thực hiện mới vào danh sách (nếu chưa có) và lưu lại — để lần
 // mở trang sau vẫn thấy người này trong danh sách chọn.
@@ -1272,10 +1394,24 @@ async function updateSingleRowFields(row, fieldUpdates) {
 
 /* ---- 8b. "Xác nhận xe đúng" (Mục III -> Mục I) --------------------------- */
 // map: { [vehicleKey]: { ownerCccd, ownerName, confirmedAt } }
+// TỐI ƯU HIỆU NĂNG QUAN TRỌNG NHẤT trong ứng dụng: loadConfirmedOwnerMap() được
+// gọi BÊN TRONG getEffectiveOwnerKey(), mà getEffectiveOwnerKey() lại được gọi
+// cho TỪNG DÒNG dữ liệu ở nhiều nơi nóng (hot path) — đặc biệt là bên trong
+// compareBySortCriteria() (chạy trong hàm so sánh của Array.sort(), tức là
+// O(n log n) lần gọi mỗi khi vẽ lại bảng!) và trong getFiltered() khi bật lọc
+// "nhiều xe". Trước đây mỗi lần gọi đều đọc lại localStorage + JSON.parse ->
+// với vài nghìn dòng dữ liệu, việc này lặp lại hàng chục nghìn lần mỗi lần
+// thao tác, gây "đơ" rõ rệt khi lọc/sắp xếp/cập nhật nhiều xe cùng lúc.
+// Nay CACHE kết quả trong bộ nhớ, chỉ đọc 1 lần và cập nhật cache ngay khi lưu.
+let _confirmedOwnerMapCache = null;
 function loadConfirmedOwnerMap() {
-  try { return JSON.parse(localStorage.getItem(CONFIRMED_OWNER_KEY) || '{}'); } catch (e) { return {}; }
+  if (_confirmedOwnerMapCache) return _confirmedOwnerMapCache;
+  try { _confirmedOwnerMapCache = JSON.parse(localStorage.getItem(CONFIRMED_OWNER_KEY) || '{}'); }
+  catch (e) { _confirmedOwnerMapCache = {}; }
+  return _confirmedOwnerMapCache;
 }
 function saveConfirmedOwnerMap(map) {
+  _confirmedOwnerMapCache = map;
   localStorage.setItem(CONFIRMED_OWNER_KEY, JSON.stringify(map));
 }
 
@@ -1642,10 +1778,18 @@ function renderDetailPanelFor(row) {
         <button type="button" id="btnCreateCommitmentPanel" class="btn btn-primary btn-sm">
           📄 Tạo Bản cam kết (${state.exportSelected.size} xe đã chọn)
         </button>
+        <button type="button" id="btnDeselectAllPanel" class="btn btn-ghost btn-sm" ${state.exportSelected.size ? '' : 'disabled'} title="Bỏ chọn tất cả xe đang chọn (mọi trang / mọi bộ lọc)">
+          🗑️ Bỏ chọn tất cả
+        </button>
       </div>
     </div>
 
     ${sectionBlock({ id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI, hideIfEmpty: false })}
+    ${sectionI.length ? `
+    <div class="section-desc" style="margin-top:-6px;">
+      Chọn checkbox các xe cần cập nhật trong Mục I bên trên, rồi bấm nút dưới đây để cập nhật <b>Trạng thái xe</b> / <b>Người thực hiện</b> cùng lúc cho riêng các xe đã chọn trong Mục I.
+      <button type="button" id="btnBulkUpdateSectionI" class="btn btn-secondary btn-sm" style="margin-left:8px;">🔄 Cập nhật hàng loạt (Mục I đã chọn)</button>
+    </div>` : ''}
 
     ${sectionBlock({
       id: 'II', title: 'II. Xe của người trùng họ tên, khác Số CCCD',
@@ -1810,6 +1954,36 @@ function renderDetailPanelFor(row) {
   // chính), gộp theo đúng chủ xe thực sự (xem createCommitmentFromSelection()).
   const btnCommitPanel = $('#btnCreateCommitmentPanel');
   if (btnCommitPanel) btnCommitPanel.addEventListener('click', createCommitmentFromSelection);
+
+  // Yêu cầu #2: "Bỏ chọn tất cả" ngay trong panel chi tiết — xoá TOÀN BỘ lựa
+  // chọn hiện tại (dùng chung state.exportSelected với trang chủ), rồi vẽ lại
+  // cả bảng chính lẫn panel để đồng bộ checkbox ở mọi nơi.
+  const btnDeselectAllPanel = $('#btnDeselectAllPanel');
+  if (btnDeselectAllPanel) {
+    btnDeselectAllPanel.addEventListener('click', () => {
+      if (!state.exportSelected.size) return;
+      state.exportSelected.clear();
+      renderTable();
+      renderDetailPanelFor(row);
+      toast('Đã bỏ chọn tất cả.');
+    });
+  }
+
+  // Yêu cầu mới: "Cập nhật hàng loạt (Mục I đã chọn)" — chỉ áp dụng cho các xe
+  // ĐANG được tích chọn (checkbox) VÀ đang nằm trong Mục I của chủ xe này (tập
+  // giao giữa sectionI và state.exportSelected), dùng lại chung modal/luồng ghi
+  // dữ liệu với nút "Cập nhật hàng loạt" ở thanh công cụ chính (openBulkUpdateModal).
+  const btnBulkUpdateSectionI = $('#btnBulkUpdateSectionI');
+  if (btnBulkUpdateSectionI) {
+    btnBulkUpdateSectionI.addEventListener('click', () => {
+      const targetRows = sectionI.filter(r => state.exportSelected.has(r._rowId));
+      if (!targetRows.length) {
+        toast('Vui lòng tích chọn (checkbox) ít nhất 1 xe trong Mục I trước.', true);
+        return;
+      }
+      openBulkUpdateModal(targetRows);
+    });
+  }
 
   // Nút "Chọn tất cả" riêng cho từng mục I/II/III/IV/V.
   const sectionsById = { I: sectionI, II: sectionII, III: sectionIII, IV: sectionIV, V: sectionV };
