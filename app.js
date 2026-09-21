@@ -63,6 +63,19 @@ const FILTER_LABELS = {
 const UNASSIGNED_FILTER_VALUE = '__chua_thuc_hien__';
 const UNASSIGNED_FILTER_LABEL = 'Chưa có ai thực hiện';
 
+// Yêu cầu (Cách khớp khi tìm địa chỉ): địa chỉ thường có nhiều cấp ngăn cách
+// bởi dấu phẩy (thôn, xã...), có nơi thiếu cấp thôn (VD "Tam Thái, Phú Ninh").
+// Kiểu "chứa chuỗi" (mặc định cũ) dễ khớp nhầm các địa chỉ dài hơn có chứa
+// cùng 1 cụm con (VD gõ "Tam Thái" khớp luôn "Khánh Thịnh, Tam Thái, Phú Ninh").
+// Cho phép người dùng CHỦ ĐỘNG chọn 1 trong 3 cách khớp, chỉ áp dụng riêng cho
+// ô tìm/lọc của trường "Địa chỉ / Phường-Xã" — không ảnh hưởng các trường khác.
+const ADDR_MATCH_MODES = [
+  { key: 'contains', label: 'Chứa chuỗi (linh hoạt)', placeholder: 'Gõ để tìm...' },
+  { key: 'exact_segment', label: 'Đúng cụm (giữa các dấu phẩy)', placeholder: 'Gõ đúng 1 cụm, VD: Tam Thái' },
+  { key: 'exact_full', label: 'Đúng hoàn toàn (đúng cả địa chỉ)', placeholder: 'Gõ đúng cả địa chỉ, VD: Tam Thái, Phú Ninh' },
+];
+const ADDR_MATCH_MODE_DEFAULT = 'contains';
+
 // Yêu cầu 2A: danh sách cột cho phép chọn làm tiêu chí sắp xếp (kết hợp nhiều
 // tiêu chí cùng lúc). "type: name" -> chỉ so sánh theo TÊN (từ cuối), bỏ qua
 // họ và chữ lót. "type: number" -> so sánh dạng số (VD số lượng xe cùng chủ).
@@ -80,6 +93,9 @@ const SORT_FIELDS = [
   { key: 'soDienThoai', label: 'Số điện thoại',          type: 'text' },
   { key: 'nguoiThucHien', label: 'Người thực hiện',      type: 'text' },
   { key: 'soLuongXe',   label: 'Số lượng xe cùng chủ',   type: 'number' },
+  // Mới: 2 tiêu chí sắp xếp bổ sung theo yêu cầu.
+  { key: 'cccd',        label: 'CCCD/MST',               type: 'text' },
+  { key: 'giaDinh',     label: 'Người cùng gia đình',    type: 'text' },
 ];
 
 // Yêu cầu #2: danh sách Trạng thái dùng chung cho MỌI nơi cho phép sửa trạng
@@ -141,6 +157,9 @@ const state = {
   rawData: [],
   filters: Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()])),
   msUI: Object.fromEntries(FILTER_FIELDS.map(f => [f, { search: '', open: false }])),
+  // Yêu cầu (Cách khớp khi tìm địa chỉ): xem ADDR_MATCH_MODES ở trên. Được lưu
+  // lại cùng bộ nhớ bộ lọc (xem persistFilterState/restoreFilterState).
+  addrMatchMode: ADDR_MATCH_MODE_DEFAULT,
   page: 1,
   pageSize: 50,
   exportSelected: new Set(),
@@ -836,6 +855,7 @@ function persistFilterState() {
       extraFilters: { ...state.extraFilters },
       quickDiaBan: state.quickDiaBan,
       sortCriteria: state.sortCriteria,
+      addrMatchMode: state.addrMatchMode,
     };
     localStorage.setItem(FILTER_STATE_KEY, JSON.stringify(data));
   } catch (e) { /* localStorage đầy/bị chặn -> bỏ qua, không ảnh hưởng chức năng chính */ }
@@ -853,6 +873,7 @@ function restoreFilterState() {
     if (data && data.extraFilters) Object.assign(state.extraFilters, data.extraFilters);
     if (data && typeof data.quickDiaBan !== 'undefined') state.quickDiaBan = data.quickDiaBan;
     if (data && Array.isArray(data.sortCriteria)) state.sortCriteria = data.sortCriteria;
+    if (data && ADDR_MATCH_MODES.some(m => m.key === data.addrMatchMode)) state.addrMatchMode = data.addrMatchMode;
   } catch (e) { /* dữ liệu lưu bị hỏng -> bỏ qua, dùng mặc định */ }
 }
 
@@ -972,21 +993,65 @@ function filterOptionLabel(field, value) {
   return value;
 }
 
+// So khớp 1 giá trị tuỳ chọn trong ô tìm/lọc với chuỗi đang gõ (đã lowercase +
+// trim sẵn). Riêng trường 'diaChi' áp dụng đúng "Cách khớp" người dùng đang
+// chọn (state.addrMatchMode); các trường lọc khác giữ nguyên kiểu "chứa
+// chuỗi" như trước giờ (không đổi hành vi).
+function optionMatchesSearch(field, label, searchLower) {
+  const text = (label || '').toString().toLowerCase();
+  if (!searchLower) return true;
+  if (field !== 'diaChi') return text.includes(searchLower);
+  const mode = state.addrMatchMode;
+  if (mode === 'exact_full') return text.trim() === searchLower;
+  if (mode === 'exact_segment') {
+    // "Đúng cụm": chuỗi gõ vào phải trùng NGUYÊN VẸN 1 trong các cụm giữa các
+    // dấu phẩy (VD "Khánh Thịnh, Tam Thái, Phú Ninh" có 3 cụm: "Khánh Thịnh",
+    // "Tam Thái", "Phú Ninh") — không khớp nếu chỉ là 1 phần của cụm.
+    return text.split(',').some(seg => seg.trim() === searchLower);
+  }
+  return text.includes(searchLower); // 'contains' (mặc định, như hành vi cũ)
+}
+
 /* ---------------------------- 6b. SẮP XẾP KẾT HỢP NHIỀU TIÊU CHÍ ------------ */
+// Bỏ các hậu tố hay bị dính vào cuối họ tên khi nhập liệu (năm sinh...), để
+// không làm sai lệch việc xác định đâu là "Tên" thật sự (từ cuối cùng).
+// Nhận diện các dạng: "TRẦN QUỐC NAM - 1980", "TRẦN QUỐC NAM 1980",
+// "TRẦN QUỐC NAM-1980"... (dấu gạch nối tuỳ chọn, có/không có khoảng trắng).
+function stripNameSuffix(raw) {
+  let s = (raw || '').toString().trim();
+  s = s.replace(/\s*[-–—]?\s*\d{4}\s*$/, '');
+  return s.trim();
+}
+
+// Tách họ tên phục vụ SẮP XẾP: đã loại bỏ hậu tố (năm sinh...) trước khi tách,
+// dùng lại splitNameParts() (họ = từ đầu, tên = từ cuối, chữ lót = ở giữa).
+function splitNameForSort(raw) {
+  const cleaned = stripNameSuffix(raw);
+  return splitNameParts(cleaned) || { ho: '', ten: '', dem: '' };
+}
+
+// Yêu cầu 2A: khi sắp xếp theo "Tên" (chủ phương tiện), phải hiểu đúng TÊN là
+// từ cuối cùng trong họ tên (VD "NAM" trong "TRẦN QUỐC NAM - 1980"), và sắp
+// xếp theo thứ tự ưu tiên: Tên -> chữ lót -> Họ (nếu Tên trùng nhau thì so
+// tiếp chữ lót, nếu chữ lót cũng trùng thì so tiếp Họ).
+function compareNameCascade(rawA, rawB) {
+  const pa = splitNameForSort(rawA);
+  const pb = splitNameForSort(rawB);
+  const cmpTen = (pa.ten || '').localeCompare(pb.ten || '', 'vi', { sensitivity: 'base' });
+  if (cmpTen !== 0) return cmpTen;
+  const cmpDem = (pa.dem || '').localeCompare(pb.dem || '', 'vi', { sensitivity: 'base' });
+  if (cmpDem !== 0) return cmpDem;
+  return (pa.ho || '').localeCompare(pb.ho || '', 'vi', { sensitivity: 'base' });
+}
+
 // Lấy giá trị dùng để so sánh khi sắp xếp cho 1 dòng theo 1 trường cụ thể.
-// Yêu cầu 2A: cột "Tên" (chủ phương tiện) CHỈ so sánh theo TÊN (từ cuối cùng
-// trong họ tên), bỏ qua họ và chữ lót — dùng lại splitNameParts() đã có sẵn
-// để tách tên (phục vụ đối chiếu Mục III).
+// (Trường 'chuXe' được xử lý riêng bằng compareNameCascade() ở dưới, không
+// qua hàm này, vì cần so sánh theo 3 cấp Tên -> chữ lót -> Họ.)
 function getSortValue(row, field) {
   if (field === 'soLuongXe') {
     return state.ownerVehicleCounts.get(getEffectiveOwnerKey(row)) || 0;
   }
-  const raw = (row[field] || '').toString().trim();
-  if (field === 'chuXe') {
-    const parts = splitNameParts(raw);
-    return parts ? parts.ten : normalizeName(raw);
-  }
-  return raw;
+  return (row[field] || '').toString().trim();
 }
 
 // So sánh 2 dòng dữ liệu theo TOÀN BỘ danh sách tiêu chí đã chọn (state.sortCriteria),
@@ -1000,12 +1065,15 @@ function compareBySortCriteria(a, b) {
     : (state.extraFilters.multiVehicle ? [{ field: 'soLuongXe', dir: 'desc' }] : []);
   for (const { field, dir } of criteria) {
     const fieldDef = SORT_FIELDS.find(f => f.key === field);
-    const va = getSortValue(a, field);
-    const vb = getSortValue(b, field);
     let cmp;
-    if (fieldDef && fieldDef.type === 'number') {
+    if (field === 'chuXe') {
+      // Yêu cầu 2A: Tên -> chữ lót -> Họ (xem compareNameCascade()).
+      cmp = compareNameCascade(a[field], b[field]);
+    } else if (fieldDef && fieldDef.type === 'number') {
+      const va = getSortValue(a, field), vb = getSortValue(b, field);
       cmp = (Number(va) || 0) - (Number(vb) || 0);
     } else {
+      const va = getSortValue(a, field), vb = getSortValue(b, field);
       cmp = va.toString().localeCompare(vb.toString(), 'vi', { sensitivity: 'base' });
     }
     if (cmp !== 0) return dir === 'desc' ? -cmp : cmp;
@@ -1026,7 +1094,7 @@ function renderMultiSelect(field) {
   const allOptions = getOptionsFor(field);
   const searchLower = ui.search.trim().toLowerCase();
   const visibleOptions = searchLower
-    ? allOptions.filter(o => filterOptionLabel(field, o).toLowerCase().includes(searchLower))
+    ? allOptions.filter(o => optionMatchesSearch(field, filterOptionLabel(field, o), searchLower))
     : allOptions;
 
   // Gọn: khi không đang thao tác (đóng dropdown) và chọn nhiều -> chỉ hiện 1 chip tóm tắt.
@@ -1061,18 +1129,44 @@ function renderMultiSelect(field) {
     dropdownHtml = `<div class="ms-dropdown">${optsHtml}</div>`;
   }
 
+  // Yêu cầu (Cách khớp khi tìm địa chỉ): gợi ý ngay trong ô nhập cách gõ đúng
+  // với chế độ khớp đang chọn (chỉ khác với trường 'diaChi').
+  const placeholderText = field === 'diaChi'
+    ? ((ADDR_MATCH_MODES.find(m => m.key === state.addrMatchMode) || {}).placeholder || 'Gõ để tìm...')
+    : 'Gõ để tìm...';
+
   container.innerHTML = `
     <div class="ms-input-box ${ui.open ? 'ms-input-box-expanded' : ''}">
       ${chipsHtml}
-      <input type="text" placeholder="Gõ để tìm..." value="${escapeHtml(ui.search)}" data-role="ms-search">
+      <input type="text" placeholder="${escapeHtml(placeholderText)}" value="${escapeHtml(ui.search)}" data-role="ms-search">
     </div>
     ${dropdownHtml}
   `;
 }
 
-function refreshFilterUIs() { FILTER_FIELDS.forEach(renderMultiSelect); }
+function refreshFilterUIs() {
+  FILTER_FIELDS.forEach(renderMultiSelect);
+  // Yêu cầu (Cách khớp khi tìm địa chỉ): đồng bộ lại <select> hiển thị đúng
+  // chế độ đang lưu trong state (kể cả sau khi restoreFilterState() vừa nạp
+  // lại từ localStorage lúc tải dữ liệu).
+  const addrMatchModeEl = $('#addrMatchMode');
+  if (addrMatchModeEl) addrMatchModeEl.value = state.addrMatchMode;
+}
 
 const filterBar = $('#filterBar');
+// Yêu cầu (Cách khớp khi tìm địa chỉ): người dùng chủ động đổi chế độ bất cứ
+// lúc nào — lưu lại ngay (nhớ cho lần sau) và vẽ lại gợi ý/placeholder của ô
+// tìm địa chỉ theo chế độ mới. KHÔNG cần renderTable() vì chế độ khớp chỉ ảnh
+// hưởng tới việc TÌM/CHỌN giá trị trong ô lọc, không đổi các lựa chọn đã chọn.
+const addrMatchModeEl = $('#addrMatchMode');
+if (addrMatchModeEl) {
+  addrMatchModeEl.addEventListener('change', (e) => {
+    const val = e.target.value;
+    state.addrMatchMode = ADDR_MATCH_MODES.some(m => m.key === val) ? val : ADDR_MATCH_MODE_DEFAULT;
+    persistFilterState();
+    renderMultiSelect('diaChi');
+  });
+}
 filterBar.addEventListener('focusin', (e) => {
   const input = e.target.closest('[data-role="ms-search"]');
   if (!input) return;
@@ -1104,7 +1198,7 @@ filterBar.addEventListener('keydown', (e) => {
   const field = input.closest('.ms-control').dataset.field;
   const search = state.msUI[field].search.trim().toLowerCase();
   if (!search) return;
-  const matches = getOptionsFor(field).filter(o => filterOptionLabel(field, o).toLowerCase().includes(search));
+  const matches = getOptionsFor(field).filter(o => optionMatchesSearch(field, filterOptionLabel(field, o), search));
   matches.forEach(m => state.filters[field].add(m));
   state.msUI[field].search = '';
   state.page = 1;
@@ -1140,8 +1234,8 @@ filterBar.addEventListener('click', (e) => {
   }
   if (option) {
     if (option.dataset.toggleAll) {
-      const visible = getOptionsFor(field).filter(o =>
-        !state.msUI[field].search || o.toLowerCase().includes(state.msUI[field].search.trim().toLowerCase()));
+      const toggleAllSearchLower = state.msUI[field].search.trim().toLowerCase();
+      const visible = getOptionsFor(field).filter(o => optionMatchesSearch(field, o, toggleAllSearchLower));
       const allSelected = visible.every(o => state.filters[field].has(o));
       if (allSelected) visible.forEach(o => state.filters[field].delete(o));
       else visible.forEach(o => state.filters[field].add(o));
@@ -1331,6 +1425,8 @@ if (sortBarEl) {
     // đã sắp xếp theo đúng thứ tự tiêu chí hiện tại — để in ra là dùng được ngay.
     const rows = getFiltered(null).slice().sort(compareBySortCriteria);
     if (!rows.length) { toast('Không có dòng nào để xuất theo bộ lọc hiện tại.', true); return; }
+    // Đồng bộ STT xuất ra với STT đang hiển thị trên bảng: đánh lại liên tục từ 1.
+    rows.forEach((row, i) => { row.stt = i + 1; });
 
     const btn = $('#btnExportXlsx');
     const oldText = btn.textContent;
@@ -1353,6 +1449,312 @@ if (sortBarEl) {
     }
   });
 }
+
+/* ---------------------------- 7c. XUẤT TRANG IN ----------------------------
+   Nút "Xuất trang in" -> hộp thoại chọn cột + khổ giấy -> dựng 1 trang in riêng
+   trong iframe ẩn rồi gọi hộp thoại in của trình duyệt (in giấy hoặc Lưu PDF).
+   - Dữ liệu in = đúng danh sách đang thấy: getFiltered(null) + compareBySortCriteria
+     (giống bảng chính và Xuất Excel), STT đánh lại từ 1 theo danh sách đó.
+   - Lựa chọn cột + khổ giấy lưu vào localStorage (PRINT_SETTINGS_KEY).
+   - Dùng iframe riêng nên KHÔNG đụng tới CSS @media print của Bản cam kết.       */
+const PRINT_SETTINGS_KEY = 'vehiclePrintSettingsV1';
+
+// nowrap: cột ngắn (biển số, số khung, CCCD, ngày, SĐT...) ưu tiên KHÔNG xuống
+//   dòng để dễ đọc/đối chiếu; các cột dài (địa chỉ, ghi chú...) được xuống dòng.
+// weight: độ rộng ước lượng (số ký tự) — chỉ dùng để tự chọn A4 ngang/dọc.
+const PRINT_COLUMNS = [
+  { key: 'stt',           header: 'STT',             locked: true, nowrap: true, weight: 4, align: 'center' },
+  { key: 'bienSo',        header: 'Biển số',         nowrap: true, weight: 11, bold: true },
+  { key: 'soKhung',       header: 'Số khung',        nowrap: true, weight: 18 },
+  { key: 'soMay',         header: 'Số máy',          nowrap: true, weight: 14 },
+  { key: 'nhanHieu',      header: 'Nhãn hiệu',       weight: 10 },
+  { key: 'loaiXe',        header: 'Loại xe',         weight: 12 },
+  { key: 'chuXe',         header: 'Chủ phương tiện', weight: 20 },
+  { key: 'cccd',          header: 'Số CCCD/MST',     nowrap: true, weight: 13 },
+  { key: 'diaChi',        header: 'Địa chỉ đăng ký', weight: 34 },
+  { key: 'phuongXaMoi',   header: 'Phường/Xã mới',   weight: 16 },
+  { key: 'trangThaiXe',   header: 'Trạng thái xe',   weight: 14 },
+  { key: 'ngayDangKy',    header: 'Ngày đăng ký',    nowrap: true, weight: 10 },
+  { key: 'soDienThoai',   header: 'Số điện thoại',   nowrap: true, weight: 11 },
+  { key: 'ghiChu',        header: 'Ghi chú',         weight: 24 },
+  { key: 'nguoiThucHien', header: 'Người thực hiện', weight: 11 },
+];
+const PRINT_DEFAULT_COLUMNS = ['stt', 'bienSo', 'chuXe', 'cccd', 'diaChi', 'soDienThoai', 'trangThaiXe', 'ghiChu'];
+// Tổng weight <= ngưỡng này thì chế độ "Tự động" chọn A4 dọc, lớn hơn thì A4 ngang.
+const PRINT_PORTRAIT_MAX_WEIGHT = 95;
+// Cỡ chữ trên trang in: thử từ MAX xuống MIN (bước STEP) cho tới khi bảng vừa khổ giấy.
+const PRINT_FONT_MAX_PT = 10;
+const PRINT_FONT_MIN_PT = 7.5;
+const PRINT_FONT_STEP_PT = 0.25;
+const PRINT_PAGE_MARGIN_MM = 8;
+// Danh sách quá dài (dễ treo trình duyệt/ra hàng trăm trang) -> hỏi xác nhận trước.
+const PRINT_CONFIRM_ROWS = 2000;
+
+function loadPrintSettings() {
+  const fallback = { columns: PRINT_DEFAULT_COLUMNS.slice(), orientation: 'auto' };
+  try {
+    const raw = localStorage.getItem(PRINT_SETTINGS_KEY);
+    if (!raw) return fallback;
+    const data = JSON.parse(raw) || {};
+    const known = new Set(PRINT_COLUMNS.map(c => c.key));
+    const cols = Array.isArray(data.columns) ? data.columns.filter(k => known.has(k)) : [];
+    const orientation = ['auto', 'landscape', 'portrait'].includes(data.orientation) ? data.orientation : 'auto';
+    // Dữ liệu lưu hỏng / không còn cột nào hợp lệ -> dùng cột mặc định.
+    if (!cols.some(k => k !== 'stt')) return { columns: fallback.columns, orientation };
+    return { columns: cols, orientation };
+  } catch (e) { return fallback; }
+}
+function savePrintSettings(s) {
+  try { localStorage.setItem(PRINT_SETTINGS_KEY, JSON.stringify(s)); } catch (e) { /* localStorage đầy/bị chặn -> bỏ qua */ }
+}
+
+// Danh sách cột thực sự sẽ in (đúng thứ tự cột trên bảng; STT luôn có).
+function getPrintColumns(settings) {
+  return PRINT_COLUMNS.filter(c => c.locked || settings.columns.includes(c.key));
+}
+function resolvePrintOrientation(cols, pref) {
+  if (pref === 'landscape' || pref === 'portrait') return pref;
+  const total = cols.reduce((sum, c) => sum + c.weight, 0);
+  return total > PRINT_PORTRAIT_MAX_WEIGHT ? 'landscape' : 'portrait';
+}
+
+/* ---- Ghi chú "có người trong gia đình tại STT xx <Tên>" -------------------
+   Quan hệ gia đình lấy từ cột Y (row.giaDinh = "Cùng gia đình với: CCCD|CCCD").
+   Coi quan hệ là 2 chiều: A ghi B, hoặc B ghi A đều tính. Chỉ dẫn chiếu tới
+   những người CÓ MẶT trong danh sách in (vì STT chỉ có nghĩa trong danh sách
+   này). Trả về Map<_rowId, chuỗi ghi chú>.                                   */
+function buildPrintFamilyNotes(rows) {
+  const listed = new Map(); // cccd -> { name, stts: [STT trong danh sách in] }
+  rows.forEach((r, i) => {
+    const c = (r.cccd || '').trim();
+    if (!c) return;
+    let e = listed.get(c);
+    if (!e) { e = { name: (r.chuXe || '').trim(), stts: [] }; listed.set(c, e); }
+    e.stts.push(i + 1);
+  });
+  // Chiều ngược: nếu dòng B (trong danh sách) ghi CCCD của A thì A cũng "có người gia đình" là B.
+  const reverse = new Map(); // cccd của A -> Set cccd của các B ghi A vào cột gia đình
+  rows.forEach(r => {
+    const c = (r.cccd || '').trim();
+    if (!c) return;
+    parseFamilyIds(r.giaDinh).forEach(id => {
+      if (!reverse.has(id)) reverse.set(id, new Set());
+      reverse.get(id).add(c);
+    });
+  });
+
+  const notes = new Map();
+  rows.forEach(r => {
+    const own = (r.cccd || '').trim();
+    const ids = new Set(parseFamilyIds(r.giaDinh));
+    if (own && reverse.has(own)) reverse.get(own).forEach(id => ids.add(id));
+    if (own) ids.delete(own); // cùng 1 người (nhiều xe) không phải "người trong gia đình"
+    const members = [];
+    ids.forEach(id => { const e = listed.get(id); if (e) members.push(e); });
+    if (!members.length) return;
+    members.sort((a, b) => a.stts[0] - b.stts[0]);
+    const parts = members.map(m => {
+      const shown = m.stts.slice(0, 4).join(', ') + (m.stts.length > 4 ? ', …' : '');
+      return `STT ${shown} ${m.name}`.trim();
+    });
+    notes.set(r._rowId, 'có người trong gia đình tại ' + parts.join('; '));
+  });
+  return notes;
+}
+
+/* ---- Dựng tài liệu HTML của trang in ---------------------------------------
+   Bố trí: lề 8mm, bảng rộng 100% khổ giấy, lưới mảnh + dòng chẵn tô xám nhạt,
+   dòng tiêu đề bảng lặp lại ở mỗi trang, mỗi dòng không bị cắt đôi giữa 2 trang.
+   Script nhúng trong tài liệu tự thu nhỏ chữ (từ 10pt xuống tối thiểu 7,5pt)
+   cho tới khi bảng vừa bề ngang khổ giấy, rồi gọi window.print().            */
+function buildPrintDocument(rows, cols, orientation, notes) {
+  const landscape = orientation === 'landscape';
+  const paperW = landscape ? 297 : 210;
+  const margin = PRINT_PAGE_MARGIN_MM;
+
+  const theadHtml = cols.map(c =>
+    `<th class="${c.align === 'center' ? 'ctr' : ''}">${escapeHtml(c.header)}</th>`).join('');
+
+  const tbodyHtml = rows.map((r, i) => {
+    const tds = cols.map(c => {
+      let inner;
+      if (c.key === 'stt') {
+        inner = String(i + 1); // STT đánh lại từ 1 theo danh sách đang lọc + sắp xếp
+      } else if (c.key === 'chuXe') {
+        inner = `<span class="nm">${escapeHtml(r.chuXe)}</span>`;
+        const note = notes.get(r._rowId);
+        if (note) inner += `<div class="fam">↳ ${escapeHtml(note)}</div>`;
+      } else {
+        inner = escapeHtml(r[c.key]);
+      }
+      const cls = [c.nowrap ? 'nw' : '', c.align === 'center' ? 'ctr' : '', c.bold ? 'b' : ''].filter(Boolean).join(' ');
+      return `<td class="${cls}">${inner}</td>`;
+    }).join('');
+    return `<tr>${tds}</tr>`;
+  }).join('');
+
+  const stamp = new Date().toLocaleString('vi-VN');
+  const css = `
+@page{size:A4 ${landscape ? 'landscape' : 'portrait'};margin:${margin}mm;
+  @bottom-right{content:"Trang " counter(page) " / " counter(pages);font:7.5pt Arial,sans-serif;color:#555;}}
+*{box-sizing:border-box;}
+:root{--fs:${PRINT_FONT_MAX_PT}pt;}
+html,body{margin:0;padding:0;background:#fff;}
+body{font-family:'Segoe UI',Roboto,Arial,'Helvetica Neue',sans-serif;color:#000;font-size:var(--fs);line-height:1.22;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact;}
+.sheet{width:${paperW - 2 * margin}mm;}
+@media print{.sheet{width:auto;}}
+.head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 1.5mm;}
+.head .t{font-size:11pt;font-weight:700;letter-spacing:.02em;}
+.head .m{font-size:8pt;color:#333;}
+table{border-collapse:collapse;width:100%;}
+th,td{border:.4pt solid #666;padding:.8mm 1.3mm;text-align:left;vertical-align:top;overflow-wrap:break-word;}
+th{background:#e3e3e3;font-weight:700;vertical-align:middle;}
+thead{display:table-header-group;}
+tr{break-inside:avoid;page-break-inside:avoid;}
+tbody tr:nth-child(even) td{background:#f3f3f3;}
+.ctr{text-align:center;}
+td.nw{white-space:nowrap;}
+td.b,.nm{font-weight:600;}
+.fam{font-size:.85em;font-style:italic;color:#222;margin-top:.3mm;line-height:1.15;}
+body.force-wrap td.nw{white-space:normal;overflow-wrap:anywhere;}`;
+
+  // Script tự thu nhỏ chữ + in. Tìm cỡ chữ lớn nhất còn vừa bề ngang bằng tìm nhị phân.
+  const script = `
+(function(){
+  var MAX=${PRINT_FONT_MAX_PT}, MIN=${PRINT_FONT_MIN_PT}, STEP=${PRINT_FONT_STEP_PT};
+  var root=document.documentElement, sheet=document.querySelector('.sheet'), table=document.querySelector('table');
+  function setPt(p){ root.style.setProperty('--fs', p+'pt'); }
+  function fits(){ return Math.max(table.getBoundingClientRect().width, sheet.scrollWidth) <= sheet.clientWidth + 1; }
+  function fitAt(n){ setPt(MAX - n*STEP); return fits(); }
+  function shrink(){
+    var N=Math.round((MAX-MIN)/STEP);
+    if (fitAt(0)) return true;
+    if (!fitAt(N)) return false;
+    var lo=0, hi=N;
+    while (hi-lo>1){ var mid=(lo+hi)>>1; if (fitAt(mid)) hi=mid; else lo=mid; }
+    setPt(MAX - hi*STEP);
+    return true;
+  }
+  function go(){
+    if (!shrink()){
+      document.body.classList.add('force-wrap');
+      if (!shrink()) setPt(MIN);
+    }
+    window.addEventListener('afterprint', function(){
+      try { parent.postMessage({type:'vehicle-print-done'}, '*'); } catch(e){}
+    });
+    setTimeout(function(){ window.focus(); window.print(); }, 60);
+  }
+  window.addEventListener('load', function(){
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(go); else go();
+  });
+})();`;
+
+  return `<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><title>Danh sách phương tiện</title>
+<style>${css}</style></head><body>
+<div class="sheet">
+<div class="head"><span class="t">DANH SÁCH PHƯƠNG TIỆN</span><span class="m">Tổng ${rows.length} dòng · In lúc ${escapeHtml(stamp)}</span></div>
+<table><thead><tr>${theadHtml}</tr></thead><tbody>${tbodyHtml}</tbody></table>
+</div>
+<script>${script}<\/script>
+</body></html>`;
+}
+
+// Dựng + in: tạo iframe ẩn (kích thước = khổ giấy để đo bề ngang chính xác).
+function runPrintList(rows, settings) {
+  const cols = getPrintColumns(settings);
+  const orientation = resolvePrintOrientation(cols, settings.orientation);
+  const html = buildPrintDocument(rows, cols, orientation, buildPrintFamilyNotes(rows));
+
+  const old = document.getElementById('printFrame');
+  if (old) old.remove();
+  const iframe = document.createElement('iframe');
+  iframe.id = 'printFrame';
+  iframe.setAttribute('aria-hidden', 'true');
+  const w = orientation === 'landscape' ? 297 : 210;
+  const h = orientation === 'landscape' ? 210 : 297;
+  iframe.style.cssText = `position:fixed;left:-99999px;top:0;border:0;width:${w}mm;height:${h}mm;`;
+  const onMsg = (ev) => {
+    if (ev.source !== iframe.contentWindow || !ev.data || ev.data.type !== 'vehicle-print-done') return;
+    window.removeEventListener('message', onMsg);
+    setTimeout(() => iframe.remove(), 1000);
+  };
+  window.addEventListener('message', onMsg);
+  iframe.srcdoc = html;
+  document.body.appendChild(iframe);
+}
+
+/* ---- Giao diện hộp thoại ---- */
+let printRowCountAtOpen = 0;
+
+function readPrintSettingsFromModal() {
+  const columns = $all('#printColumnList input[data-key]').filter(i => i.checked).map(i => i.dataset.key);
+  return { columns, orientation: $('#printOrientation').value };
+}
+function renderPrintModal() {
+  const s = loadPrintSettings();
+  $('#printColumnList').innerHTML = PRINT_COLUMNS.map(c => {
+    const on = c.locked || s.columns.includes(c.key);
+    return `<label class="print-col-item ${on ? 'checked' : ''} ${c.locked ? 'locked' : ''}">
+      <input type="checkbox" data-key="${c.key}" ${on ? 'checked' : ''} ${c.locked ? 'disabled' : ''}>
+      <span>${escapeHtml(c.header)}</span></label>`;
+  }).join('');
+  $('#printOrientation').value = s.orientation;
+  printRowCountAtOpen = getFiltered(null).length;
+  updatePrintSummary();
+}
+function updatePrintSummary() {
+  $all('#printColumnList .print-col-item').forEach(l => {
+    l.classList.toggle('checked', l.querySelector('input').checked);
+  });
+  const s = readPrintSettingsFromModal();
+  const el = $('#printSummary');
+  if (!s.columns.some(k => k !== 'stt')) {
+    el.innerHTML = '<span class="warn">Chưa chọn cột nào — hãy chọn ít nhất 1 cột để in.</span>';
+    return;
+  }
+  const cols = getPrintColumns(s);
+  const ori = resolvePrintOrientation(cols, s.orientation);
+  let html = `Sẽ in <b>${printRowCountAtOpen}</b> dòng (theo bộ lọc + sắp xếp hiện tại) · <b>${cols.length}</b> cột · A4 <b>${ori === 'landscape' ? 'ngang' : 'dọc'}</b>${s.orientation === 'auto' ? ' (tự chọn)' : ''}`;
+  if (!s.columns.includes('chuXe')) {
+    html += '<div class="note">Cột "Chủ phương tiện" đang tắt nên sẽ không hiện ghi chú người cùng gia đình.</div>';
+  }
+  el.innerHTML = html;
+}
+// Lưu ngay khi người dùng đổi lựa chọn (chỉ lưu khi còn ít nhất 1 cột, tránh lưu trạng thái rỗng).
+function persistPrintSettingsFromModal() {
+  const s = readPrintSettingsFromModal();
+  if (s.columns.some(k => k !== 'stt')) savePrintSettings(s);
+  updatePrintSummary();
+}
+
+$('#btnPrintList').addEventListener('click', () => {
+  renderPrintModal();
+  openModal('printModal');
+});
+$('#printColumnList').addEventListener('change', persistPrintSettingsFromModal);
+$('#printOrientation').addEventListener('change', persistPrintSettingsFromModal);
+function setAllPrintColumns(keys) {
+  $all('#printColumnList input[data-key]').forEach(i => { if (!i.disabled) i.checked = keys.includes(i.dataset.key); });
+  persistPrintSettingsFromModal();
+}
+$('#btnPrintColsAll').addEventListener('click', () => setAllPrintColumns(PRINT_COLUMNS.map(c => c.key)));
+$('#btnPrintColsNone').addEventListener('click', () => setAllPrintColumns([]));
+$('#btnPrintColsDefault').addEventListener('click', () => setAllPrintColumns(PRINT_DEFAULT_COLUMNS));
+
+$('#btnDoPrintList').addEventListener('click', () => {
+  const s = readPrintSettingsFromModal();
+  if (!s.columns.some(k => k !== 'stt')) { toast('Vui lòng chọn ít nhất 1 cột để in.', true); return; }
+  savePrintSettings(s);
+  // Đúng danh sách đang thấy trên bảng: đã lọc + đã sắp xếp (không phân trang).
+  const rows = getFiltered(null).slice().sort(compareBySortCriteria);
+  if (!rows.length) { toast('Không có dòng nào để in theo bộ lọc hiện tại.', true); return; }
+  if (rows.length > PRINT_CONFIRM_ROWS &&
+      !window.confirm(`Danh sách có ${rows.length} dòng, in có thể ra rất nhiều trang và mất thời gian chuẩn bị. Vẫn tiếp tục?`)) return;
+  toast(`Đang chuẩn bị trang in (${rows.length} dòng)...`);
+  runPrintList(rows, s);
+});
 
 /* ---------------------------- 7. BẢNG DỮ LIỆU ------------------------------ */
 $('#pageSizeSelect').addEventListener('change', (e) => {
@@ -1384,10 +1786,20 @@ function pruneSelectionToRows(visibleRows) {
 }
 
 function renderTable() {
+  // SỬA LỖI: trước đây persistFilterState() chỉ được gọi khi đổi "Cách khớp"
+  // địa chỉ, nên các lựa chọn bộ lọc / tiêu chí sắp xếp / lọc bổ sung / lọc
+  // nhanh địa bàn KHÔNG hề được lưu lại như mô tả ở persistFilterState().
+  // renderTable() luôn được gọi lại ngay sau MỌI thay đổi liên quan (chọn giá
+  // trị lọc, thêm/sửa/xoá tiêu chí sắp xếp, tick lọc bổ sung, lọc nhanh địa
+  // bàn...), nên đây là 1 điểm duy nhất, an toàn để luôn lưu trạng thái mới nhất.
+  persistFilterState();
   const filtered = getFiltered(null);
   // Yêu cầu 2A/2B: áp dụng sắp xếp (kết hợp nhiều tiêu chí) sau khi đã lọc,
   // trước khi phân trang, để thứ tự hiển thị và thứ tự xuất Excel khớp nhau.
   filtered.sort(compareBySortCriteria);
+  // Yêu cầu: STT luôn chạy liên tục từ 1 theo ĐÚNG danh sách đang hiển thị
+  // (sau khi đã lọc + sắp xếp) — không dùng lại STT gốc từ dữ liệu thô nữa.
+  filtered.forEach((row, i) => { row.stt = i + 1; });
   // Yêu cầu #2: tự động bỏ chọn các xe không còn nằm trong bộ lọc hiện tại
   // (xem giải thích ở pruneSelectionToRows() phía trên).
   pruneSelectionToRows(filtered);
@@ -2460,6 +2872,14 @@ function fillSettingsForm() {
   $('#tplDiaDanh').value = state.template.diaDanh;
   $('#tplMucI').value = state.template.mucI;
   $('#tplMucII').value = state.template.mucII;
+  // SỬA LỖI: ô nhập Mục III trước đây bị trùng id với ô Mục II (id="tplMucII")
+  // trong index.html, nên $('#tplMucII') (querySelector, chỉ lấy phần tử ĐẦU
+  // TIÊN khớp) luôn trả về đúng ô Mục II — ô Mục III không bao giờ được nạp
+  // giá trị, và khi lưu (xem $('#btnSaveTemplate') bên dưới) mucIII cũng
+  // không được đọc lại nên state.template.mucIII bị mất hẳn ("Nội dung Mục
+  // III" người dùng gõ vào sẽ không bao giờ được lưu). Đã sửa id trong
+  // index.html thành "tplMucIII" và bổ sung 2 dòng còn thiếu bên dưới.
+  $('#tplMucIII').value = state.template.mucIII;
   $('#tplCamDoan').value = state.template.camDoan;
 }
 
@@ -2480,6 +2900,7 @@ $('#btnSaveTemplate').addEventListener('click', () => {
     diaDanh: $('#tplDiaDanh').value.trim() || DEFAULT_TEMPLATE.diaDanh,
     mucI: $('#tplMucI').value,
     mucII: $('#tplMucII').value,
+    mucIII: $('#tplMucIII').value,
     camDoan: $('#tplCamDoan').value,
   };
   state.template = tpl;

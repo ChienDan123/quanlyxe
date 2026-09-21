@@ -109,7 +109,7 @@
       <textarea id="tplMucII" class="tpl-textarea" rows="3"></textarea>
 
       <label class="hint-label">Nội dung Mục III — Phương tiện còn đang sử dụng</label>
-      <textarea id="tplMucII" class="tpl-textarea" rows="4"></textarea>
+      <textarea id="tplMucIII" class="tpl-textarea" rows="4"></textarea>
       
       <label class="hint-label">Lời cam đoan cuối bản cam kết</label>
       <textarea id="tplCamDoan" class="tpl-textarea" rows="2"></textarea>
@@ -142,6 +142,20 @@
     </div>
     <div class="filter-field" data-field="diaChi">
       <label>Địa chỉ / Phường-Xã</label>
+      <!-- Yêu cầu (Cách khớp khi tìm địa chỉ): địa chỉ có nhiều cấp (thôn, xã...)
+           ngăn cách bởi dấu phẩy, có nơi thiếu cấp thôn -> kiểu "chứa chuỗi" dễ
+           khớp nhầm địa chỉ dài hơn. Cho chọn cách khớp, lưu lại cho lần sau
+           (xem ADDR_MATCH_MODES + persistFilterState/restoreFilterState trong app.js).
+           Đặt TRÊN ô tìm kiếm (không phải dưới) để không bị danh sách kết quả
+           (dropdown) che mất khi đang mở. -->
+      <div class="addr-match-row">
+        <label for="addrMatchMode" class="addr-match-label">Cách khớp</label>
+        <select id="addrMatchMode" class="addr-match-select" title="Chọn cách so khớp khi gõ tìm địa chỉ/phường-xã">
+          <option value="contains">Chứa chuỗi (linh hoạt)</option>
+          <option value="exact_segment">Đúng cụm (giữa dấu phẩy)</option>
+          <option value="exact_full">Đúng hoàn toàn</option>
+        </select>
+      </div>
       <div class="ms-control" data-field="diaChi"></div>
     </div>
     <div class="filter-field quick-diaban-wrap" id="quickDiaBanWrap">
@@ -184,6 +198,7 @@
     <div class="filter-actions">
       <button id="btnClearSort" class="btn btn-ghost">Xóa sắp xếp</button>
       <button id="btnExportXlsx" class="btn btn-secondary">📊 Xuất Excel (.xlsx)</button>
+      <button id="btnPrintList" class="btn btn-secondary" title="In danh sách đang lọc + sắp xếp (chọn cột, A4 ngang/dọc)">🖨️ Xuất trang in</button>
     </div>
   </section>
 
@@ -277,6 +292,47 @@
       <div class="sync-note" id="detailSyncNote"></div>
     </div>
   </aside>
+</div>
+
+<!-- ============ MODAL XUẤT TRANG IN ============
+     Chọn cột sẽ in + khổ giấy. Lựa chọn được lưu (localStorage) để lần sau không
+     phải chọn lại. Danh sách cột được vẽ bằng JS (PRINT_COLUMNS trong app.js). -->
+<div id="printModal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>🖨️ Xuất trang in</h2>
+      <button class="modal-close" data-close="printModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">In đúng danh sách đang lọc + sắp xếp (STT đánh lại từ 1). Lựa chọn bên dưới được <b>tự động lưu</b> cho lần in sau, có thể đổi bất cứ lúc nào.</p>
+
+      <div class="print-cols-head">
+        <span class="hint-label" style="margin:0;">Cột hiển thị trên trang in</span>
+        <span class="print-cols-quick">
+          <button type="button" id="btnPrintColsAll" class="btn btn-ghost btn-sm">Chọn tất cả</button>
+          <button type="button" id="btnPrintColsNone" class="btn btn-ghost btn-sm">Bỏ chọn hết</button>
+          <button type="button" id="btnPrintColsDefault" class="btn btn-ghost btn-sm">Mặc định</button>
+        </span>
+      </div>
+      <div id="printColumnList" class="print-col-grid"></div>
+      <p class="hint" style="margin-top:8px;">Cột STT luôn có (để ghi chú người cùng gia đình dẫn chiếu theo STT). Ghi chú người cùng gia đình hiện ngay dưới tên ở cột <b>Chủ phương tiện</b>.</p>
+
+      <label class="hint-label" for="printOrientation" style="margin-top:12px;">Khổ giấy</label>
+      <select id="printOrientation" class="tpl-input">
+        <option value="auto">Tự động chọn A4 ngang / dọc theo số cột</option>
+        <option value="landscape">A4 ngang</option>
+        <option value="portrait">A4 dọc</option>
+      </select>
+
+      <div id="printSummary" class="print-summary"></div>
+    </div>
+    <div class="modal-footer">
+      <span class="hint">Chữ tự thu nhỏ cho vừa khổ giấy (không nhỏ hơn 7,5pt). Nên tắt "Headers and footers" trong hộp thoại in để tiết kiệm chỗ.</span>
+      <div class="footer-btns">
+        <button id="btnDoPrintList" class="btn btn-primary">🖨️ In / Xuất PDF</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ============ MODAL CẬP NHẬT HÀNG LOẠT ============ -->

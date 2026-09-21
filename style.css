@@ -103,6 +103,17 @@ input,select,textarea{font-family:inherit;font-size:14px;}
 .ms-option input{pointer-events:none;}
 .ms-empty{padding:10px;color:var(--text-muted);font-size:12px;text-align:center;}
 
+/* ---------- CÁCH KHỚP KHI TÌM ĐỊA CHỈ ----------------------------------------
+   Hàng nhỏ dưới ô tìm/lọc "Địa chỉ / Phường-Xã", cho chọn 1 trong 3 cách khớp
+   (Chứa chuỗi / Đúng cụm / Đúng hoàn toàn). Xem ADDR_MATCH_MODES trong app.js. */
+.addr-match-row{display:flex;align-items:center;gap:6px;margin-bottom:2px;}
+.addr-match-label{font-size:11px;color:var(--text-muted);white-space:nowrap;text-transform:none;font-weight:600;}
+.addr-match-select{
+  flex:1;padding:4px 6px;border:1px solid var(--border);border-radius:6px;
+  font-size:12px;background:#fff;color:var(--text);min-width:0;
+}
+.addr-match-select:focus{border-color:var(--primary);outline:none;}
+
 /* ---------- SORT BAR (Yêu cầu #2A/2B/2C) ---------- */
 .sort-bar{align-items:flex-start;}
 .sort-field-wrap{flex:2;min-width:320px;}
@@ -336,6 +347,24 @@ table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
 .doc-signature-block{text-align:center;width:260px;}
 .doc-signature-block .sign-space{height:70px;}
 
+/* ---------- MODAL XUẤT TRANG IN ----------------------------------------------
+   Chỉ là giao diện chọn cột/khổ giấy. Bản in thật được dựng trong 1 iframe ẩn
+   với CSS riêng (xem buildPrintDocument() trong app.js), nên KHÔNG đụng tới khối
+   @media print của Bản cam kết bên dưới. */
+.print-cols-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;}
+.print-cols-quick{display:flex;gap:2px;flex-wrap:wrap;}
+.print-col-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px 10px;}
+.print-col-item{
+  display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:13px;cursor:pointer;
+  border:1px solid var(--border);border-radius:6px;background:#fff;user-select:none;
+}
+.print-col-item:hover{background:var(--highlight);}
+.print-col-item.checked{border-color:var(--primary);background:var(--highlight);}
+.print-col-item.locked{cursor:default;opacity:.75;}
+.print-summary{margin-top:4px;padding:8px 10px;background:#f6f8fb;border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);}
+.print-summary .warn{color:var(--danger);font-weight:600;}
+.print-summary .note{color:var(--warn);margin-top:2px;}
+
 /* ---------- TOAST ---------- */
 .toast{
   position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
@@ -368,4 +397,15 @@ table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
      ngang, riêng bảng chính vẫn giữ sticky dọc top:0 sẵn có của <thead th>). */
   .col-sticky-chuxe{left:auto;width:auto;min-width:0;max-width:none;white-space:nowrap;}
   .mini-sticky-chuxe{left:auto;width:auto;min-width:0;max-width:none;white-space:nowrap;}
+}
+
+/* SỬA LỖI (responsive): trên màn hình rất hẹp (điện thoại nhỏ), các min-width
+   cố định của khối "Sắp xếp" (Yêu cầu #1/2A) và "Lọc bổ sung" có thể rộng hơn
+   cả bề ngang màn hình sau khi .filter-bar đã chuyển sang cột dọc ở trên, gây
+   tràn ngang (kéo lệch cả trang, không chỉ riêng khối này). Nới lỏng lại để
+   luôn vừa màn hình và cho phép các ô chọn tiêu chí sắp xếp tự xuống dòng. */
+@media (max-width:480px){
+  .filter-field, .sort-field-wrap, .extra-filters-wrap{min-width:0;}
+  .sort-criteria-row{flex-wrap:wrap;row-gap:4px;}
+  .sort-criteria-row .sort-field-select, .sort-criteria-row .sort-dir-select{min-width:0;flex:1 1 auto;}
 }
