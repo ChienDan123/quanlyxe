@@ -260,6 +260,35 @@ function escapeHtml(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/* ---- 3b. Phân biệt "click để xem chi tiết" và "kéo chuột để bôi đen/copy" -
+   Trước đây, mọi click lên 1 dòng xe (bảng chính hoặc bảng mini trong panel
+   chi tiết) đều mở panel Chi tiết ngay lập tức — kể cả khi người dùng chỉ
+   đang RÊ CHUỘT để BÔI ĐEN copy biển số / họ tên / địa chỉ... Sự kiện `click`
+   vẫn nổ ra ngay sau khi thả chuột (mouseup), nên vừa bôi đen xong là bị
+   "nhảy" sang panel chi tiết, mất luôn vùng chọn.
+   Giải pháp: ghi lại toạ độ chuột lúc `mousedown` (dùng chung cho toàn trang
+   qua 1 listener duy nhất), rồi khi `click` xảy ra, chỉ coi là "click xem chi
+   tiết" nếu (1) chuột KHÔNG di chuyển đáng kể giữa mousedown và click, VÀ
+   (2) hiện KHÔNG có vùng văn bản nào đang được bôi đen (window.getSelection()
+   rỗng). Nếu người dùng rê chuột để chọn chữ (hoặc double/triple-click chọn
+   nhanh 1 từ/1 dòng), điều kiện trên sẽ không thoả -> không mở panel, cho
+   phép Ctrl+C copy bình thường; còn 1 click đơn thuần (không kéo) vẫn mở
+   panel chi tiết như cũ. */
+let _rowMouseDownPos = null;
+document.addEventListener('mousedown', (e) => {
+  _rowMouseDownPos = { x: e.clientX, y: e.clientY };
+});
+const ROW_DRAG_THRESHOLD_PX = 5;
+function isTextSelectOrDragClick(e) {
+  const selection = window.getSelection();
+  const hasTextSelection = !!(selection && selection.toString().trim().length > 0);
+  const dragged = !!(_rowMouseDownPos && (
+    Math.abs(e.clientX - _rowMouseDownPos.x) > ROW_DRAG_THRESHOLD_PX ||
+    Math.abs(e.clientY - _rowMouseDownPos.y) > ROW_DRAG_THRESHOLD_PX
+  ));
+  return hasTextSelection || dragged;
+}
+
 /* ---------------------------- 4. KẾT NỐI GOOGLE SHEET ---------------------- */
 
 /* ---- 4a. Tab UI của modal kết nối ---- */
@@ -1120,6 +1149,10 @@ $('#tableBody').addEventListener('click', (e) => {
   if (e.target.closest('[data-role="row-status-select"], [data-role="row-note-input"], [data-role="row-assignee-select"]')) {
     return;
   }
+  // Yêu cầu (bôi đen để copy thông tin dòng xe): nếu đây là thao tác kéo
+  // chuột để chọn chữ (hoặc đang có vùng bôi đen), KHÔNG mở panel chi tiết —
+  // xem giải thích chi tiết ở isTextSelectOrDragClick().
+  if (isTextSelectOrDragClick(e)) return;
   openDetailPanel(rowId);
 });
 
@@ -1747,13 +1780,21 @@ function renderDetailPanelFor(row) {
     ? `<button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;" data-select-all="${sectionId}">☑️ Chọn tất cả (${rows.length})</button>`
     : '';
 
+  // Yêu cầu (bố trí lại nút "Cập nhật hàng loạt (Mục I đã chọn)"): nút này cần
+  // nằm CÙNG HÀNG với tiêu đề Mục I và nút "☑️ Chọn tất cả", nên được truyền vào
+  // sectionBlock() qua tham số `titleExtra` — chỉ hiển thị khi Mục I có ít nhất
+  // 1 xe (tương tự điều kiện của nút "Chọn tất cả").
+  const bulkUpdateSectionIBtn = sectionI.length
+    ? `<button type="button" id="btnBulkUpdateSectionI" class="btn btn-secondary btn-sm" style="margin-left:8px;" title="Tích chọn (checkbox) các xe cần cập nhật trong Mục I bên dưới, rồi bấm nút này">🔄 Cập nhật hàng loạt (Mục I đã chọn)</button>`
+    : '';
+
   // Yêu cầu #5: ẩn hoàn toàn các mục II, III, IV, V khi không có dữ liệu (không
   // tiêu đề, không khoảng trống thừa). Mục I luôn hiển thị (ít nhất là chính xe
   // đang xem), nên không cần ẩn.
-  const sectionBlock = ({ id, title, desc, rows, extraCols, extraCellsFn, cssClass, hideIfEmpty }) => {
+  const sectionBlock = ({ id, title, desc, rows, extraCols, extraCellsFn, cssClass, hideIfEmpty, titleExtra }) => {
     if (hideIfEmpty && !rows.length) return '';
     return `
-    <div class="section-title">${title} <span class="tag-count">${rows.length}</span>${selectAllBtn(id, rows)}</div>
+    <div class="section-title">${title} <span class="tag-count">${rows.length}</span>${selectAllBtn(id, rows)}${titleExtra || ''}</div>
     ${desc ? `<div class="section-desc">${desc}</div>` : ''}
     ${miniTable(rows, id, extraCols, extraCellsFn, cssClass)}`;
   };
@@ -1784,12 +1825,13 @@ function renderDetailPanelFor(row) {
       </div>
     </div>
 
-    ${sectionBlock({ id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI, hideIfEmpty: false })}
-    ${sectionI.length ? `
-    <div class="section-desc" style="margin-top:-6px;">
-      Chọn checkbox các xe cần cập nhật trong Mục I bên trên, rồi bấm nút dưới đây để cập nhật <b>Trạng thái xe</b> / <b>Người thực hiện</b> cùng lúc cho riêng các xe đã chọn trong Mục I.
-      <button type="button" id="btnBulkUpdateSectionI" class="btn btn-secondary btn-sm" style="margin-left:8px;">🔄 Cập nhật hàng loạt (Mục I đã chọn)</button>
-    </div>` : ''}
+    ${sectionBlock({
+      id: 'I', title: 'I. Xe cùng Số CCCD (xe chính thức)', rows: sectionI, hideIfEmpty: false,
+      titleExtra: bulkUpdateSectionIBtn,
+      desc: sectionI.length
+        ? 'Tích chọn (checkbox) các xe cần cập nhật ở bảng dưới, rồi bấm "🔄 Cập nhật hàng loạt (Mục I đã chọn)" ở trên để cập nhật Trạng thái xe / Người thực hiện cùng lúc cho các xe đã chọn trong Mục I.'
+        : undefined
+    })}
 
     ${sectionBlock({
       id: 'II', title: 'II. Xe của người trùng họ tên, khác Số CCCD',
@@ -1900,6 +1942,10 @@ function renderDetailPanelFor(row) {
       // Yêu cầu #2: không chuyển panel khi bấm vào ô nhập Ghi chú / chọn
       // Trạng thái / chọn Người thực hiện ngay trên dòng của bảng mini.
       if (e.target.closest('[data-role="row-status-select"], [data-role="row-note-input"], [data-role="row-assignee-select"], [data-confirm-owner]')) return;
+      // Yêu cầu (bôi đen để copy thông tin dòng xe): tương tự bảng chính,
+      // không chuyển panel nếu đây là thao tác kéo chuột chọn chữ / đang có
+      // vùng bôi đen — xem isTextSelectOrDragClick().
+      if (isTextSelectOrDragClick(e)) return;
       const targetRow = state.rawData.find(r => r._rowId === tr.dataset.rowid);
       if (targetRow) renderDetailPanelFor(targetRow);
     });

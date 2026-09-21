@@ -264,8 +264,9 @@ tbody tr.selected-row td.sticky-col{background:var(--highlight);}
 .owner-card .row b{min-width:110px;color:var(--text-muted);font-weight:600;}
 .section-title{
   font-size:13px;font-weight:700;color:var(--primary-dark);margin:18px 0 8px;
-  text-transform:uppercase;display:flex;align-items:center;gap:6px;
+  text-transform:uppercase;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
 }
+.section-title .btn{text-transform:none;}
 .section-desc{font-size:11.5px;color:var(--text-muted);margin:-4px 0 8px;font-style:italic;text-transform:none;}
 /* Bọc bảng mini để có thanh trượt ngang RIÊNG cho từng mục (I-V) trong panel
    Chi tiết chủ phương tiện — cần thiết để tính năng cột cố định (sticky) bên
