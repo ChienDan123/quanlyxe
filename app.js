@@ -151,6 +151,9 @@ const state = {
   // excludeDone / excludeRecontact MẶC ĐỊNH BẬT (true) theo đúng yêu cầu: khi
   // mở trang, tự động loại người "đã thực hiện" và người "cần liên hệ lại".
   extraFilters: { hasPhone: false, multiVehicle: false, excludeDone: true, excludeRecontact: true },
+  // Yêu cầu (Lọc nhanh theo Địa bàn cũ): null = không lọc (hiện đầy đủ), hoặc
+  // 1 trong các key của QUICK_DIA_BAN_OPTIONS ('tam_dan' | 'tam_thai' | 'phu_thinh').
+  quickDiaBan: null,
   // Cache số lượng xe theo từng chủ xe (tính theo CCCD hiệu lực, có tính cả
   // các xe đã được "Xác nhận xe đúng"). Được tính lại mỗi khi dữ liệu thay đổi.
   ownerVehicleCounts: new Map(),
@@ -170,7 +173,37 @@ function stripDiacritics(s) {
   return (s || '').toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().trim().replace(/\s+/g, ' ');
 }
+
+/* ---- Lọc nhanh theo Địa bàn cũ -------------------------------------------
+   Dữ liệu địa chỉ thực tế viết rất đa dạng: "Tam Đàn", "Tam đàn", "T.Đàn",
+   "T Đàn", "TĐàn"... Sau khi bỏ dấu + viết thường (stripDiacritics), các biến
+   thể trên đều quy về dạng gần giống nhau, nên mỗi địa bàn được nhận diện
+   bằng 1 regex duy nhất: tên đầy đủ ("tam") HOẶC chữ viết tắt ("t"), theo sau
+   là dấu chấm/khoảng trắng tuỳ ý, rồi đến phần tên riêng ("dan", "thai",...).
+   \b (word boundary) ở đầu/cuối đảm bảo không khớp nhầm vào giữa 1 từ khác
+   (VD: "phat dan" sẽ KHÔNG bị coi là khớp "t dan" vì "t" ở giữa từ "phat").
+   Phú Thịnh: theo yêu cầu, "Tam Vinh" thuộc địa bàn Phú Thịnh cũ nên được
+   gộp luôn vào cùng 1 lựa chọn lọc. */
+const QUICK_DIA_BAN_OPTIONS = [
+  { key: 'tam_dan', label: 'Tam Đàn', patterns: [/\bt(?:am)?\.?\s*dan\b/] },
+  { key: 'tam_thai', label: 'Tam Thái', patterns: [/\bt(?:am)?\.?\s*thai\b/] },
+  {
+    key: 'phu_thinh', label: 'Phú Thịnh',
+    patterns: [/\bp(?:hu)?\.?\s*thinh\b/, /\bt(?:am)?\.?\s*vinh\b/],
+  },
+];
+// Kiểm tra 1 dòng xe có thuộc địa bàn cũ `key` hay không — so khớp trên cả
+// "Địa chỉ đăng ký" (địa chỉ gốc, ghi theo địa bàn cũ) lẫn "Phường/Xã mới"
+// (đề phòng trường hợp dữ liệu ghi tên địa bàn cũ vào cột này).
+function rowMatchesQuickDiaBan(row, key) {
+  const opt = QUICK_DIA_BAN_OPTIONS.find(o => o.key === key);
+  if (!opt) return true;
+  const haystack = stripDiacritics(`${row.diaChi || ''} ${row.phuongXaMoi || ''}`);
+  return opt.patterns.some(re => re.test(haystack));
+}
+
 function uniq(arr) { return Array.from(new Set(arr.filter(v => v && v.trim() !== ''))); }
+
 
 // TỐI ƯU HIỆU NĂNG (cập nhật hàng loạt nhiều xe): chạy các tác vụ bất đồng bộ
 // (VD: ghi từng dòng về Google Sheet) với SỐ LƯỢNG ĐỒNG THỜI GIỚI HẠN thay vì
@@ -569,6 +602,8 @@ function getFiltered(excludeField) {
     const hasAssigneeFilter = state.filters.nguoiThucHien && state.filters.nguoiThucHien.size > 0;
     if (state.extraFilters.excludeDone && !hasAssigneeFilter && isRowDone(row)) return false;
     if (state.extraFilters.excludeRecontact && isRowNeedRecontact(row)) return false;
+    // Yêu cầu (Lọc nhanh theo Địa bàn cũ): kết hợp AND với các bộ lọc khác.
+    if (state.quickDiaBan && !rowMatchesQuickDiaBan(row, state.quickDiaBan)) return false;
     return true;
   });
 }
@@ -807,6 +842,9 @@ $('#btnClearFilters').addEventListener('click', () => {
   // thái mặc định của trang (BẬT — tự động loại khỏi danh sách), thay vì tắt hẳn.
   state.extraFilters.excludeDone = true;
   state.extraFilters.excludeRecontact = true;
+  // Yêu cầu (Lọc nhanh theo Địa bàn cũ): "Xóa bộ lọc" cũng bỏ chọn địa bàn cũ.
+  state.quickDiaBan = null;
+  updateQuickDiaBanButtonsUI();
   renderSortBar();
   state.page = 1;
   // FIX BUG: trước đây xóa bộ lọc không reset trạng thái đã chọn xe (checkbox),
@@ -816,6 +854,29 @@ $('#btnClearFilters').addEventListener('click', () => {
   state.exportSelected.clear();
   refreshFilterUIs(); renderTable();
 });
+
+/* ------------------- 6b-2. LỌC NHANH THEO ĐỊA BÀN CŨ ----------------------- */
+// Nhóm nút bấm 1 lần để lọc nhanh theo địa bàn cũ (Tam Đàn / Tam Thái / Phú
+// Thịnh — Phú Thịnh gộp luôn "Tam Vinh"), kết hợp AND được với mọi bộ lọc
+// khác đang có (bộ lọc "Địa chỉ", "Trạng thái xe"...). Hoạt động như nhóm nút
+// chọn 1 (radio): bấm vào nút đang chọn sẽ BỎ CHỌN (quay lại danh sách đầy đủ).
+function updateQuickDiaBanButtonsUI() {
+  $all('[data-quick-diaban]').forEach(btn => {
+    btn.classList.toggle('active', state.quickDiaBan === btn.dataset.quickDiaban);
+  });
+}
+const quickDiaBanWrap = $('#quickDiaBanWrap');
+if (quickDiaBanWrap) {
+  quickDiaBanWrap.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-quick-diaban]');
+    if (!btn) return;
+    const key = btn.dataset.quickDiaban;
+    state.quickDiaBan = (state.quickDiaBan === key) ? null : key;
+    state.page = 1;
+    updateQuickDiaBanButtonsUI();
+    renderTable();
+  });
+}
 
 /* ------------------- 6c. THANH SẮP XẾP + LỌC BỔ SUNG + XUẤT EXCEL --------- */
 // Yêu cầu 2A: vẽ danh sách tiêu chí sắp xếp đang chọn (kéo thêm được nhiều

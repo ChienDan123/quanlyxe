@@ -57,6 +57,13 @@ input,select,textarea{font-family:inherit;font-size:14px;}
 .filter-actions{display:flex;align-items:center;gap:10px;margin-left:auto;}
 .filtered-count{font-size:13px;color:var(--text-muted);white-space:nowrap;}
 
+/* Yêu cầu: Lọc nhanh theo Địa bàn cũ — nhóm nút bấm 1 lần, hoạt động như
+   nhóm chọn-1 (radio): nút đang được chọn có nền màu nổi bật (.active). */
+.quick-diaban-wrap{min-width:260px;}
+.quick-diaban-btns{display:flex;flex-wrap:wrap;gap:6px;}
+.quick-diaban-btn{border:1px solid var(--border);}
+.quick-diaban-btn.active{background:var(--primary);color:#fff;border-color:var(--primary);}
+
 /* multiselect control */
 .ms-control{position:relative;}
 .ms-input-box{
