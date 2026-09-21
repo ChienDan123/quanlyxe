@@ -112,6 +112,11 @@ const ASSIGNEE_LIST_KEY = 'vehicleAssigneeListV1';
 const DEFAULT_ASSIGNEES = ['Nhơn', 'Tiến', 'Tuấn', 'Thuận', 'Thi'];
 // Giá trị đặc biệt trong <select> Người thực hiện dùng để mở hộp thoại thêm mới.
 const ASSIGNEE_ADD_NEW_VALUE = '__add_new__';
+// Yêu cầu (Lưu dữ liệu cục bộ + lọc): key lưu bộ lọc/sắp xếp đang chọn trên
+// localStorage (nhẹ, chỉ vài trăm byte -> dùng localStorage là đủ, không cần
+// IndexedDB). Dữ liệu XE (nặng, có thể hàng trăm nghìn dòng) dùng IndexedDB —
+// xem FILTER_STATE_KEY và IDB_* bên dưới.
+const FILTER_STATE_KEY = 'vehicleFilterStateV1';
 
 const DEFAULT_TEMPLATE = {
   kinhGui: 'Kính gửi: Công an xã Chiên Đàn',
@@ -492,6 +497,11 @@ async function connectViaAppsScript(url, { silent = false } = {}) {
     toast(`Đã tải ${state.rawData.length} bản ghi (đồng bộ 2 chiều đang bật).`);
     // Đồng bộ mẫu Bản cam kết từ Sheet nếu có, và Sheet chưa có mẫu cục bộ mới hơn.
     trySyncTemplateFromSheet(url);
+    // Yêu cầu #5: nếu phiên trước còn để lại các thay đổi CHƯA kịp đồng bộ lên
+    // Sheet (đóng trình duyệt/mất mạng giữa chừng), thử gửi tiếp NGAY khi vừa
+    // kết nối lại được — không phải chờ người dùng sửa thêm 1 dòng mới thì mới
+    // kích hoạt hàng đợi.
+    processSyncQueue();
   } catch (err) {
     console.error(err);
     const msg = 'Lỗi kết nối Apps Script: ' + err.message +
@@ -519,7 +529,25 @@ function matchKeyForRow(row) {
   return null;
 }
 
+// Đưa 1 thay đổi của dòng `row` vào hàng đợi đồng bộ NGẦM (không await, không
+// chặn UI) — dùng chung cho MỌI nơi cần ghi ngược Sheet theo mô hình local-first:
+// lưu local trước, đồng bộ sau. Nếu dòng thiếu khoá khớp (Mã ID/MOTO_ID/Biển
+// số), báo cho người dùng biết thay đổi này chỉ nằm ở local, không tự đồng bộ
+// lên Sheet được (nhưng KHÔNG mất dữ liệu — vẫn còn trong IndexedDB).
+function enqueueRowSync(row, updatesByHeader) {
+  if (!isWriteConnected()) return;
+  const mk = matchKeyForRow(row);
+  if (!mk) {
+    toast('Đã lưu cục bộ, nhưng dòng này thiếu Mã ID/MOTO_ID/Biển số nên không tự đồng bộ lên Sheet được.', true);
+    return;
+  }
+  enqueueSync(mk.header, mk.value, updatesByHeader, row._rowId);
+}
+
 // Ghi một hoặc nhiều trường của 1 dòng ngược về Google Sheet (yêu cầu chế độ 'gas').
+// LƯU Ý: hàm này gọi mạng TRỰC TIẾP (await) — chỉ còn dùng cho các thao tác cần
+// biết ngay kết quả thành/bại (hiện không còn nơi nào gọi theo kiểu chặn UI
+// nữa, mọi luồng cập nhật dữ liệu chính đều qua enqueueRowSync() ở trên).
 async function updateRowOnSheet(row, updatesByHeader) {
   if (state.mode !== 'gas' || !state.gasUrl) {
     return { ok: false, error: 'Chưa kết nối chế độ Apps Script (2 chiều).' };
@@ -537,6 +565,295 @@ async function updateRowOnSheet(row, updatesByHeader) {
   } catch (err) {
     return { ok: false, error: String(err) };
   }
+}
+
+/* ---- 4d. LƯU CỤC BỘ (IndexedDB) + HÀNG ĐỢI ĐỒNG BỘ NGẦM ------------------
+   Mục tiêu (3 yêu cầu lớn của tính năng này):
+   1) Lưu toàn bộ dữ liệu xe xuống máy (IndexedDB — phù hợp dữ liệu lớn, hạn
+      mức lưu trữ cao hơn nhiều so với localStorage) để mở lại trang là có
+      ngay dữ liệu, không phải chờ tải lại từ server.
+   2) Mọi thay đổi (trạng thái, ghi chú, người thực hiện, xác nhận xe...) được
+      áp dụng NGAY vào bộ nhớ + lưu cục bộ trước, việc ghi lên Google Sheet
+      được đẩy vào 1 HÀNG ĐỢI, xử lý NGẦM phía sau — không chờ, không chặn
+      thao tác tiếp theo của người dùng. Hàng đợi cũng được lưu IndexedDB nên
+      nếu mạng lỗi / đóng trình duyệt giữa chừng, lần mở sau sẽ tự thử lại.
+   ------------------------------------------------------------------------- */
+const IDB_DB_NAME = 'vehicleAppCacheV1';
+const IDB_STORE_NAME = 'kv';
+const IDB_KEY_RAW_DATA = 'rawData';
+const IDB_KEY_SYNC_QUEUE = 'syncQueue';
+
+let _idbPromise = null;
+function openIdb() {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve) => {
+    if (!('indexedDB' in window)) { resolve(null); return; } // trình duyệt không hỗ trợ -> bỏ qua cache, app vẫn chạy bình thường
+    let req;
+    try { req = indexedDB.open(IDB_DB_NAME, 1); } catch (e) { resolve(null); return; }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE_NAME)) db.createObjectStore(IDB_STORE_NAME);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null); // lỗi mở DB (VD chế độ ẩn danh chặn) -> coi như không có cache
+  });
+  return _idbPromise;
+}
+// Lưu ý: IndexedDB lưu trực tiếp object/array (structured clone) — KHÔNG cần
+// JSON.stringify/parse như localStorage, nên nhanh hơn nhiều với mảng lớn.
+async function idbGet(key) {
+  const db = await openIdb();
+  if (!db) return undefined;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+      const req = tx.objectStore(IDB_STORE_NAME).get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(undefined);
+    } catch (e) { resolve(undefined); }
+  });
+}
+async function idbSet(key, value) {
+  const db = await openIdb();
+  if (!db) return false;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+      tx.objectStore(IDB_STORE_NAME).put(value, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    } catch (e) { resolve(false); }
+  });
+}
+
+// Ghi toàn bộ `state.rawData` (đã bao gồm mọi chỉnh sửa cục bộ mới nhất) xuống
+// IndexedDB. Chạy NỀN (không await ở nơi gọi) + DEBOUNCE nhẹ (400ms) để gộp
+// nhiều thay đổi liên tiếp (VD: cập nhật hàng loạt nhiều xe) thành 1 lần ghi
+// duy nhất, tránh ghi ổ đĩa lặp lại liên tục gây tốn tài nguyên với dữ liệu lớn.
+let _persistRawDataTimer = null;
+function persistRawDataToCache() {
+  clearTimeout(_persistRawDataTimer);
+  _persistRawDataTimer = setTimeout(() => {
+    idbSet(IDB_KEY_RAW_DATA, state.rawData).catch(() => {});
+  }, 400);
+}
+
+/* ---- Hàng đợi đồng bộ ngầm lên Google Sheet ------------------------------ */
+let syncQueue = [];
+let syncQueueLoaded = false;
+let syncInFlight = false;
+let syncRetryTimer = null;
+// Yêu cầu #5 (thử lại khi lỗi/rớt mạng): dùng BACKOFF TĂNG DẦN thay vì cố định
+// 15s — thử lại nhanh (5s) cho các lỗi tạm thời, giãn dần tối đa 2 phút nếu
+// lỗi lặp lại nhiều lần liên tiếp (tránh spam request khi mất mạng lâu), rồi
+// reset về mức nhanh nhất ngay khi có 1 lần đồng bộ thành công.
+const SYNC_RETRY_BASE_MS = 5000;
+const SYNC_RETRY_MAX_MS = 120000;
+let syncRetryAttempt = 0;
+
+async function ensureSyncQueueLoaded() {
+  if (syncQueueLoaded) return;
+  syncQueueLoaded = true;
+  const saved = await idbGet(IDB_KEY_SYNC_QUEUE);
+  syncQueue = Array.isArray(saved) ? saved : [];
+}
+function persistSyncQueue() {
+  return idbSet(IDB_KEY_SYNC_QUEUE, syncQueue).catch(() => {});
+}
+
+// Thêm 1 tác vụ ghi ngược lên Sheet vào hàng đợi rồi kích hoạt xử lý NỀN ngay
+// (không await — hàm gọi hàm này có thể trả về/kết thúc ngay lập tức).
+//
+// TỐI ƯU (Yêu cầu #4 — "chỉ đồng bộ những dòng thực sự có thay đổi"): nếu dòng
+// này ĐÃ có sẵn 1 tác vụ CHƯA GỬI (chưa xử lý) trong hàng đợi, GỘP các trường
+// thay đổi mới vào tác vụ đó thay vì tạo thêm 1 tác vụ mới — vừa giảm số lần
+// gọi Apps Script khi người dùng sửa liên tiếp nhiều trường/nhiều lần trên
+// cùng 1 xe, vừa tránh 2 request cùng ghi 1 dòng chồng chéo nhau. Tác vụ đang
+// ở đầu hàng đợi và ĐANG được gửi đi (syncInFlight) thì KHÔNG gộp vào (để
+// không đổi nội dung 1 request đã bay đi), mà tạo tác vụ mới nối tiếp sau nó.
+function enqueueSync(matchHeader, matchValue, updatesByHeader, rowId) {
+  const startIdx = syncInFlight ? 1 : 0; // bỏ qua job đầu nếu đang gửi dở
+  for (let i = syncQueue.length - 1; i >= startIdx; i--) {
+    const job = syncQueue[i];
+    if (job.matchHeader === matchHeader && job.matchValue === matchValue) {
+      Object.assign(job.updates, updatesByHeader);
+      job.rowId = rowId;
+      persistSyncQueue();
+      updateSyncStatusBadge();
+      processSyncQueue();
+      return;
+    }
+  }
+  syncQueue.push({
+    id: 'sync_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+    rowId, matchHeader, matchValue, updates: updatesByHeader,
+    attempts: 0, createdAt: Date.now(),
+  });
+  persistSyncQueue();
+  updateSyncStatusBadge();
+  processSyncQueue(); // fire-and-forget, chạy nền
+}
+
+// Xử lý hàng đợi TUẦN TỰ (không song song) để giữ đúng thứ tự ghi khi cùng 1
+// dòng bị sửa nhiều lần liên tiếp. Nếu 1 tác vụ lỗi, DỪNG lại và hẹn thử lại
+// sau ít giây thay vì thử liên tục làm nghẽn — nhẹ nhàng báo qua badge trạng
+// thái, không hiện popup lỗi gây khó chịu cho người dùng. KHÔNG BAO GIỜ xoá
+// tác vụ lỗi khỏi hàng đợi (chỉ xoá khi ghi THÀNH CÔNG) -> không mất dữ liệu
+// người dùng đã nhập dù mất mạng/lỗi bao lâu đi nữa, hễ có mạng lại là tự ghi tiếp.
+async function processSyncQueue() {
+  if (syncInFlight) return;
+  await ensureSyncQueueLoaded();
+  if (!syncQueue.length || !isWriteConnected()) { updateSyncStatusBadge(); return; }
+  // navigator.onLine=false là tín hiệu chắc chắn KHÔNG có mạng -> khỏi thử,
+  // để dành cho listener 'online' bên dưới kích hoạt lại ngay khi có mạng.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    scheduleSyncRetry();
+    updateSyncStatusBadge();
+    return;
+  }
+  syncInFlight = true;
+  updateSyncStatusBadge();
+  const hadQueueBefore = syncQueue.length > 0;
+  try {
+    while (syncQueue.length && isWriteConnected()) {
+      const job = syncQueue[0];
+      try {
+        const res = await gasRequest(state.gasUrl, {
+          action: 'updateRow', matchHeader: job.matchHeader, matchValue: job.matchValue, updates: job.updates,
+        });
+        if (!res || res.ok === false) throw new Error((res && res.error) || 'Phản hồi không hợp lệ từ Apps Script.');
+        syncQueue.shift();
+        await persistSyncQueue();
+        syncRetryAttempt = 0; // thành công -> reset backoff về mức nhanh nhất cho lần lỗi sau (nếu có)
+      } catch (err) {
+        job.attempts = (job.attempts || 0) + 1;
+        job.lastError = String((err && err.message) || err);
+        await persistSyncQueue();
+        scheduleSyncRetry();
+        break; // dừng vòng lặp, để dành các tác vụ còn lại cho lần thử sau
+      }
+    }
+  } finally {
+    syncInFlight = false;
+    // Hàng đợi vừa rỗng hẳn (không còn lỗi treo) -> báo "đã đồng bộ xong" rồi tự ẩn.
+    if (hadQueueBefore && !syncQueue.length) flashSyncDone();
+    updateSyncStatusBadge();
+  }
+}
+function scheduleSyncRetry() {
+  if (syncRetryTimer) return;
+  const delay = Math.min(SYNC_RETRY_MAX_MS, SYNC_RETRY_BASE_MS * Math.pow(2, syncRetryAttempt));
+  syncRetryAttempt++;
+  syncRetryTimer = setTimeout(() => {
+    syncRetryTimer = null;
+    processSyncQueue();
+  }, delay);
+}
+// Badge nhỏ báo trạng thái đồng bộ ngầm (cạnh badge chế độ kết nối) — chỉ hiện
+// khi có việc đang chờ/đang chạy, ẩn hẳn khi hàng đợi rỗng để không gây rối mắt.
+function updateSyncStatusBadge() {
+  const el = $('#syncStatusBadge');
+  if (!el) return;
+  if (!syncQueue.length) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (offline) {
+    el.textContent = `📴 Mất mạng — ${syncQueue.length} thay đổi sẽ tự đồng bộ khi có mạng lại`;
+    el.className = 'badge badge-mode sync-error';
+  } else if (syncInFlight) {
+    el.textContent = `🔄 Đang đồng bộ ngầm (${syncQueue.length})...`;
+    el.className = 'badge badge-mode mode-gas';
+  } else if (syncQueue.some(j => j.attempts > 0)) {
+    el.textContent = `⏳ ${syncQueue.length} thay đổi lỗi — đang chờ thử lại tự động`;
+    el.className = 'badge badge-mode sync-error';
+  } else {
+    el.textContent = `⏳ ${syncQueue.length} thay đổi chờ đồng bộ`;
+    el.className = 'badge badge-mode mode-csv';
+  }
+}
+// Nhấp nháy "✅ Đã đồng bộ xong" trong vài giây khi hàng đợi vừa được xử lý
+// hết sạch — cho người dùng biết chắc mọi thứ đã lên Sheet, đúng yêu cầu có
+// trạng thái rõ ràng cho cả 3 pha (đang đồng bộ / đang chờ thử lại / đã xong).
+function flashSyncDone() {
+  const el = $('#syncStatusBadge');
+  if (!el) return;
+  el.classList.remove('hidden');
+  el.textContent = '✅ Đã đồng bộ xong';
+  el.className = 'badge badge-mode sync-done';
+  setTimeout(() => { if (!syncQueue.length) el.classList.add('hidden'); }, 2500);
+}
+
+// Yêu cầu #5: khi trình duyệt báo có mạng lại (sự kiện 'online'), thử đồng bộ
+// ngay lập tức thay vì chờ hết thời gian backoff hiện tại -> trải nghiệm mượt
+// hơn nhiều so với chỉ dựa vào hẹn giờ cố định.
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    syncRetryAttempt = 0;
+    if (syncRetryTimer) { clearTimeout(syncRetryTimer); syncRetryTimer = null; }
+    processSyncQueue();
+    updateSyncStatusBadge();
+  });
+  window.addEventListener('offline', updateSyncStatusBadge);
+  // Cảnh báo nếu người dùng đóng tab/trình duyệt khi còn thay đổi CHƯA kịp
+  // đồng bộ lên Sheet — dữ liệu vẫn AN TOÀN (đã lưu IndexedDB, lần sau mở lại
+  // sẽ tự tiếp tục đồng bộ), nhưng vẫn nên nhắc để người dùng yên tâm chờ thêm
+  // chút nếu mạng đang chập chờn.
+  window.addEventListener('beforeunload', (e) => {
+    if (syncQueue.length) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+}
+
+// Sau khi tải dữ liệu MỚI từ server (kết nối lại / tự làm mới ngầm), áp lại
+// các thay đổi ĐANG CHỜ trong hàng đợi lên trên dữ liệu vừa tải — tránh tình
+// huống dữ liệu mới từ Sheet (còn giá trị CŨ vì chưa kịp nhận thay đổi) đè mất
+// thay đổi người dùng vừa thao tác nhưng chưa kịp đồng bộ xong.
+function reapplyPendingSyncToRawData() {
+  if (!syncQueueLoaded || !syncQueue.length) return;
+  syncQueue.forEach(job => {
+    const matchField = FIELD_MAP.find(f => f.header === job.matchHeader);
+    if (!matchField) return;
+    const row = state.rawData.find(r => (r[matchField.key] || '') === job.matchValue);
+    if (!row) return;
+    Object.keys(job.updates || {}).forEach(header => {
+      const f = FIELD_MAP.find(f => f.header === header);
+      if (f) row[f.key] = job.updates[header];
+    });
+  });
+}
+
+/* ---- Lưu / khôi phục trạng thái bộ lọc + sắp xếp -------------------------
+   Lưu trên localStorage (dữ liệu nhỏ, chỉ danh sách lựa chọn) để khi mở lại
+   trang (kể cả sau khi tắt hẳn trình duyệt), các bộ lọc đang chọn (Địa chỉ,
+   Trạng thái, Người thực hiện, Lọc nhanh địa bàn cũ, Lọc bổ sung, Sắp xếp...)
+   được khôi phục nguyên trạng, không phải lọc lại từ đầu. */
+function persistFilterState() {
+  try {
+    const data = {
+      filters: Object.fromEntries(FILTER_FIELDS.map(f => [f, Array.from(state.filters[f] || [])])),
+      extraFilters: { ...state.extraFilters },
+      quickDiaBan: state.quickDiaBan,
+      sortCriteria: state.sortCriteria,
+    };
+    localStorage.setItem(FILTER_STATE_KEY, JSON.stringify(data));
+  } catch (e) { /* localStorage đầy/bị chặn -> bỏ qua, không ảnh hưởng chức năng chính */ }
+}
+function restoreFilterState() {
+  try {
+    const raw = localStorage.getItem(FILTER_STATE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && data.filters) {
+      FILTER_FIELDS.forEach(f => {
+        state.filters[f] = new Set(Array.isArray(data.filters[f]) ? data.filters[f] : []);
+      });
+    }
+    if (data && data.extraFilters) Object.assign(state.extraFilters, data.extraFilters);
+    if (data && typeof data.quickDiaBan !== 'undefined') state.quickDiaBan = data.quickDiaBan;
+    if (data && Array.isArray(data.sortCriteria)) state.sortCriteria = data.sortCriteria;
+  } catch (e) { /* dữ liệu lưu bị hỏng -> bỏ qua, dùng mặc định */ }
 }
 
 /* ---------------------------- 5. XỬ LÝ DỮ LIỆU ĐỌC VÀO ---------------------- */
@@ -565,11 +882,24 @@ function processRows(rows) {
     return obj;
   }).filter(r => r.bienSo || r.soKhung || r.chuXe || r.cccd);
 
+  // Yêu cầu (lưu trước, đồng bộ ngầm sau): dữ liệu mới tải từ server có thể
+  // chưa kịp phản ánh các thay đổi người dùng vừa thao tác nhưng còn đang chờ
+  // trong hàng đợi đồng bộ ngầm -> áp lại các thay đổi đó NGAY trên dữ liệu
+  // vừa tải, để không bị "trồi ngược" về giá trị cũ trên giao diện.
+  reapplyPendingSyncToRawData();
+
   state.filters = Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()]));
+  // Yêu cầu (Lưu trạng thái bộ lọc đã chọn): khôi phục lại đúng các bộ lọc /
+  // sắp xếp / lọc nhanh địa bàn cũ mà người dùng đã chọn ở phiên trước, thay vì
+  // luôn bắt đầu từ danh sách trống mỗi lần tải dữ liệu (kể cả khi tải ngầm).
+  restoreFilterState();
   state.exportSelected = new Set();
   state.page = 1;
   computeOwnerVehicleCounts();
   refreshAll();
+  // Yêu cầu (Lưu dữ liệu cục bộ): lưu ngay dữ liệu vừa xử lý xong xuống
+  // IndexedDB để lần mở trang sau có ngay dữ liệu mà không cần chờ mạng.
+  persistRawDataToCache();
 }
 
 /* ---------------------------- 6. BỘ LỌC CASCADE ---------------------------- */
@@ -1305,17 +1635,22 @@ if (bulkAssigneeSelectEl) {
   });
 }
 
-// TỐI ƯU HIỆU NĂNG (mục "Cải thiện hiệu năng lưu"): trước đây vòng lặp này
-// dùng `for...await` để ghi TUẦN TỰ từng xe một về Google Sheet — với N xe,
-// tổng thời gian chờ = N lần độ trễ mạng cộng lại, nên chọn càng nhiều xe càng
-// chậm rõ rệt. Nay dùng runWithConcurrencyLimit() để gửi TỐI ĐA 6 request cùng
-// lúc (đủ nhanh, không làm quá tải Apps Script Web App vốn xử lý khá chậm mỗi
-// request). Với ghi chú cục bộ (chế độ CSV / chưa kết nối), dùng persist=false
-// để KHÔNG ghi xuống localStorage cho từng xe, mà gộp lại ghi 1 LẦN DUY NHẤT ở
-// cuối (persistNotesStore()) — giảm hẳn số lần thao tác I/O đồng bộ.
-const BULK_UPDATE_CONCURRENCY = 6;
+// LƯU Ý (đã nâng cấp lên mô hình local-first): trước đây khối cập nhật hàng
+// loạt bên dưới ghi trực tiếp lên Google Sheet (tuần tự, hoặc sau đó là tối đa
+// 6 request đồng thời qua runWithConcurrencyLimit()) và người dùng phải CHỜ
+// đến khi tất cả request xong mới thấy modal đóng lại. Nay mọi thay đổi được
+// áp dụng NGAY vào bộ nhớ + IndexedDB, còn việc ghi lên Sheet được đẩy vào
+// hàng đợi đồng bộ NGẦM (enqueueRowSync) — xem handler '#btnBulkApply' bên
+// dưới. runWithConcurrencyLimit() vẫn được giữ lại (không xoá) để không phá vỡ
+// nơi khác có thể đang dùng, nhưng không còn cần thiết cho luồng này nữa.
 
-$('#btnBulkApply').addEventListener('click', async () => {
+// LOCAL-FIRST (Yêu cầu #2 + #4): áp dụng thay đổi cho TẤT CẢ xe đã chọn NGAY
+// LẬP TỨC trong bộ nhớ + IndexedDB (không chờ mạng), rồi đẩy từng dòng THỰC SỰ
+// thay đổi vào hàng đợi đồng bộ ngầm. Nhờ vậy modal đóng lại tức thì kể cả khi
+// chọn hàng nghìn xe hoặc mạng đang chậm/mất — trước đây phải chờ từng đợt
+// request (dù đã giới hạn 6 đồng thời) mới xong, dễ gây cảm giác "đơ" trên máy
+// yếu/mobile. runWithConcurrencyLimit() không còn cần dùng ở đây nữa.
+$('#btnBulkApply').addEventListener('click', () => {
   const rows = bulkUpdateRows;
   if (!rows.length) { closeModal('bulkUpdateModal'); return; }
 
@@ -1327,46 +1662,25 @@ $('#btnBulkApply').addEventListener('click', async () => {
   const assigneeVal = (bulkAssigneeEl && bulkAssigneeEl.value !== ASSIGNEE_ADD_NEW_VALUE) ? bulkAssigneeEl.value : '';
   if (!statusVal && !noteVal && !assigneeVal) { toast('Chưa nhập Trạng thái xe, Ghi chú hoặc Người thực hiện để cập nhật.', true); return; }
 
-  const applyBtn = $('#btnBulkApply');
-  applyBtn.disabled = true; applyBtn.textContent = `Đang áp dụng (0/${rows.length})...`;
-
-  let okCount = 0, failCount = 0, doneCount = 0;
   const writeConnected = isWriteConnected();
 
-  await runWithConcurrencyLimit(rows, BULK_UPDATE_CONCURRENCY, async (r) => {
+  rows.forEach(r => {
     const newGhiChu = noteVal
       ? (mode === 'append' && r.ghiChu ? `${r.ghiChu}; ${noteVal}` : noteVal)
       : r.ghiChu;
     const updates = {};
-    if (statusVal) updates['Trạng thái xe'] = statusVal;
-    if (noteVal) updates['Ghi Chú'] = newGhiChu;
-    if (assigneeVal) updates['Người thực hiện'] = assigneeVal;
-
-    if (writeConnected) {
-      const res = await updateRowOnSheet(r, updates);
-      if (res && res.ok) {
-        if (statusVal) r.trangThaiXe = statusVal;
-        if (noteVal) r.ghiChu = newGhiChu;
-        if (assigneeVal) r.nguoiThucHien = assigneeVal;
-        okCount++;
-      } else failCount++;
-    } else {
-      // Chưa kết nối 2 chiều -> vẫn cập nhật tạm trong bộ nhớ + lưu ghi chú cục
-      // bộ, nhưng KHÔNG ghi xuống localStorage ngay (persist=false) — sẽ gộp
-      // ghi 1 lần duy nhất sau khi toàn bộ vòng lặp hoàn tất.
-      if (statusVal) r.trangThaiXe = statusVal;
-      if (noteVal) r.ghiChu = newGhiChu;
-      if (assigneeVal) r.nguoiThucHien = assigneeVal;
-      saveNoteFor(getEffectiveOwnerKey(r), { status: statusVal || r.trangThaiXe, text: newGhiChu || '' }, false);
-      okCount++;
-    }
-    doneCount++;
-    applyBtn.textContent = `Đang áp dụng (${doneCount}/${rows.length})...`;
+    if (statusVal) { updates['Trạng thái xe'] = statusVal; r.trangThaiXe = statusVal; }
+    if (noteVal) { updates['Ghi Chú'] = newGhiChu; r.ghiChu = newGhiChu; }
+    if (assigneeVal) { updates['Người thực hiện'] = assigneeVal; r.nguoiThucHien = assigneeVal; }
+    // Gộp ghi 1 lần cho toàn bộ lô (persist=false) — xem persistNotesStore() dưới.
+    saveNoteFor(getEffectiveOwnerKey(r), { status: r.trangThaiXe, text: r.ghiChu }, false);
+    // Chỉ đưa vào hàng đợi đồng bộ những dòng THỰC SỰ có thay đổi ghi lên Sheet.
+    if (writeConnected && Object.keys(updates).length) enqueueRowSync(r, updates);
   });
 
-  if (!writeConnected) persistNotesStore(); // ghi 1 lần duy nhất cho toàn bộ lô
+  persistNotesStore();       // ghi ghi-chú-cục-bộ 1 lần duy nhất cho toàn bộ lô
+  persistRawDataToCache();   // lưu IndexedDB 1 lần duy nhất cho toàn bộ lô
 
-  applyBtn.disabled = false; applyBtn.textContent = '💾 Áp dụng';
   bulkUpdateRows = [];
   renderTable();
   // Nếu panel chi tiết đang mở, vẽ lại để phản ánh đúng thay đổi (VD: cập nhật
@@ -1375,7 +1689,7 @@ $('#btnBulkApply').addEventListener('click', async () => {
     renderDetailPanelFor(currentDetailRow);
   }
   closeModal('bulkUpdateModal');
-  toast(`Đã cập nhật ${okCount} xe.` + (failCount ? ` (${failCount} xe lỗi khi ghi Sheet)` : ''));
+  toast(`Đã cập nhật ${rows.length} xe (lưu cục bộ ngay).` + (writeConnected ? ' Đang đồng bộ ngầm lên Google Sheet...' : ''));
 });
 
 /* ---------------------------- 8. GHI CHÚ / TRẠNG THÁI CỤC BỘ ---------------- */
@@ -1465,6 +1779,11 @@ function buildRowAssigneeSelectHtml(row) {
 // Người thực hiện...) — dùng chung cho ô nhập trên từng dòng (bảng chính +
 // bảng mini trong panel chi tiết) và mục "Cập nhật... cho riêng xe này".
 // `fieldUpdates` dạng { trangThaiXe: '...', ghiChu: '...', nguoiThucHien: '...' }.
+// LOCAL-FIRST: áp dụng thay đổi NGAY vào bộ nhớ + lưu xuống IndexedDB TRƯỚC,
+// rồi mới đẩy việc ghi lên Google Sheet vào hàng đợi đồng bộ NGẦM phía sau —
+// không await mạng, không chặn thao tác tiếp theo của người dùng (Yêu cầu #2).
+// Vẫn giữ kiểu `async function` (trả về Promise) để KHÔNG phải sửa các nơi
+// đang gọi `await updateSingleRowFields(...)` — hàm chỉ đơn giản resolve ngay.
 async function updateSingleRowFields(row, fieldUpdates) {
   const updatesByHeader = {};
   Object.keys(fieldUpdates).forEach(key => {
@@ -1472,17 +1791,16 @@ async function updateSingleRowFields(row, fieldUpdates) {
     if (f) updatesByHeader[f.header] = fieldUpdates[key];
   });
 
-  if (isWriteConnected()) {
-    const res = await updateRowOnSheet(row, updatesByHeader);
-    if (!res || !res.ok) {
-      toast('Lỗi ghi về Google Sheet: ' + ((res && res.error) || 'không xác định'), true);
-      return false;
-    }
-  }
-  // Cập nhật ngay trong bộ nhớ (áp dụng cả khi đang ở chế độ chỉ đọc CSV) +
-  // lưu tạm trên trình duyệt để không mất dữ liệu khi chưa kết nối 2 chiều.
+  // 1) Cập nhật ngay trong bộ nhớ (áp dụng cả khi đang ở chế độ chỉ đọc CSV).
   Object.assign(row, fieldUpdates);
+  // 2) Lưu ngay xuống IndexedDB (debounce nhẹ bên trong) — không mất dữ liệu
+  //    nếu đóng trình duyệt/mất mạng ngay sau khi vừa nhập.
+  persistRawDataToCache();
+  // 3) Lưu ghi chú cục bộ (localStorage) — dùng cho các đối chiếu chủ xe khác.
   saveNoteFor(getEffectiveOwnerKey(row), { status: row.trangThaiXe, text: row.ghiChu });
+  // 4) Đồng bộ NGẦM lên Google Sheet nếu đang kết nối 2 chiều — fire-and-forget,
+  //    có hàng đợi lưu bền + tự thử lại (xem enqueueSync/processSyncQueue).
+  if (isWriteConnected()) enqueueRowSync(row, updatesByHeader);
   return true;
 }
 
@@ -1514,6 +1832,9 @@ function saveConfirmedOwnerMap(map) {
 // KHÔNG đổi Số CCCD/MST gốc của vehicleRow — chỉ đánh dấu qua bảng ánh xạ riêng,
 // nên khi xem chi tiết trực tiếp xe này hoặc in Bản cam kết, xe vẫn hiển thị
 // đúng thông tin gốc như trước.
+// LOCAL-FIRST: xác nhận + cập nhật Ghi Chú ngay trong bộ nhớ/IndexedDB, đồng
+// bộ Sheet ở hàng đợi ngầm (không await mạng, không còn cần try/catch báo lỗi
+// ngay tại đây — lỗi mạng sẽ tự được xử lý/thử lại bởi hàng đợi đồng bộ).
 async function confirmVehicleOwner(vehicleRow, ownerRow) {
   const map = loadConfirmedOwnerMap();
   map[vehicleKey(vehicleRow)] = {
@@ -1525,11 +1846,9 @@ async function confirmVehicleOwner(vehicleRow, ownerRow) {
   const oldNote = (vehicleRow.ghiChu || '').trim();
   const newNote = (!oldNote || !oldNote.includes(noteAddition)) ? (oldNote ? `${oldNote}; ${noteAddition}` : noteAddition) : oldNote;
   vehicleRow.ghiChu = newNote;
+  persistRawDataToCache();
 
-  if (isWriteConnected()) {
-    const res = await updateRowOnSheet(vehicleRow, { 'Ghi Chú': newNote });
-    if (!res || !res.ok) toast('Đã xác nhận trên trình duyệt, nhưng ghi Ghi Chú về Sheet thất bại: ' + ((res && res.error) || ''), true);
-  }
+  if (isWriteConnected()) enqueueRowSync(vehicleRow, { 'Ghi Chú': newNote });
   // Xe vừa được xác nhận sẽ được tính vào đúng nhóm chủ xe mới -> tính lại số
   // lượng xe/chủ xe để bộ lọc "nhiều xe" và cột sắp xếp "Số lượng xe" cập nhật đúng.
   computeOwnerVehicleCounts();
@@ -1759,7 +2078,11 @@ function setupDetailHScrollSync() {
     renderTable();
   });
 
-  btnSheet.addEventListener('click', async () => {
+  // LOCAL-FIRST: nút này giờ chỉ khác nút "Lưu tạm" ở chỗ CÓ đẩy thêm việc ghi
+  // lên Google Sheet vào hàng đợi đồng bộ ngầm — vẫn lưu local + IndexedDB
+  // ngay lập tức, không chờ mạng, và có tự thử lại nếu lỗi/mất mạng (không
+  // còn báo lỗi một lần rồi thôi như trước).
+  btnSheet.addEventListener('click', () => {
     const row = currentDetailRow;
     if (!row) return;
     const updates = { 'Ghi Chú': $('#noteTextArea').value };
@@ -1767,18 +2090,19 @@ function setupDetailHScrollSync() {
     const assigneeVal = $('#noteAssigneeSelect') ? $('#noteAssigneeSelect').value : '';
     if (statusVal) updates['Trạng thái xe'] = statusVal;
     if (assigneeVal && assigneeVal !== ASSIGNEE_ADD_NEW_VALUE) updates['Người thực hiện'] = assigneeVal;
-    btnSheet.disabled = true; btnSheet.textContent = 'Đang lưu...';
-    const res = await updateRowOnSheet(row, updates);
-    btnSheet.disabled = state.mode !== 'gas'; btnSheet.textContent = '⬆️ Lưu về Google Sheet';
-    if (res && res.ok) {
-      row.ghiChu = updates['Ghi Chú'];
-      if (statusVal) row.trangThaiXe = statusVal;
-      if (updates['Người thực hiện']) row.nguoiThucHien = updates['Người thực hiện'];
-      doSaveLocal(row);
-      renderTable();
-      toast('Đã ghi về Google Sheet.');
+
+    row.ghiChu = updates['Ghi Chú'];
+    if (statusVal) row.trangThaiXe = statusVal;
+    if (updates['Người thực hiện']) row.nguoiThucHien = updates['Người thực hiện'];
+    persistRawDataToCache();
+    doSaveLocal(row);
+    renderTable();
+
+    if (isWriteConnected()) {
+      enqueueRowSync(row, updates);
+      toast('Đã lưu cục bộ — đang đồng bộ ngầm lên Google Sheet...');
     } else {
-      toast('Lỗi ghi về Sheet: ' + ((res && res.error) || 'không xác định'), true);
+      toast('Đã lưu cục bộ (chưa kết nối chế độ 2 chiều nên chưa đồng bộ Sheet).');
     }
   });
 })();
@@ -2150,7 +2474,7 @@ $('#btnResetTemplate').addEventListener('click', () => {
   toast('Đã khôi phục mẫu mặc định (chưa lưu).');
 });
 
-$('#btnSaveTemplate').addEventListener('click', async () => {
+$('#btnSaveTemplate').addEventListener('click', () => {
   const tpl = {
     kinhGui: $('#tplKinhGui').value.trim() || DEFAULT_TEMPLATE.kinhGui,
     diaDanh: $('#tplDiaDanh').value.trim() || DEFAULT_TEMPLATE.diaDanh,
@@ -2161,12 +2485,17 @@ $('#btnSaveTemplate').addEventListener('click', async () => {
   state.template = tpl;
   saveTemplateLocal(tpl);
   toast('Đã lưu mẫu Bản cam kết trên trình duyệt.');
-  if (state.mode === 'gas' && state.gasUrl) {
-    const res = await gasRequest(state.gasUrl, { action: 'saveSettings', template: tpl }).catch(e => ({ ok: false, error: String(e) }));
-    if (res && res.ok) toast('Đã đồng bộ mẫu về Google Sheet.');
-    else toast('Lưu tạm thành công, nhưng đồng bộ Sheet thất bại: ' + ((res && res.error) || ''), true);
-  }
   closeModal('settingsModal');
+  // LOCAL-FIRST: đã lưu xong trên trình duyệt (ở trên) — phần đồng bộ mẫu lên
+  // Google Sheet chạy NGẦM phía sau, không giữ modal mở để chờ mạng.
+  if (state.mode === 'gas' && state.gasUrl) {
+    gasRequest(state.gasUrl, { action: 'saveSettings', template: tpl })
+      .then(res => {
+        if (res && res.ok) toast('Đã đồng bộ mẫu về Google Sheet.');
+        else toast('Lưu tạm thành công, nhưng đồng bộ Sheet thất bại: ' + ((res && res.error) || ''), true);
+      })
+      .catch(e => toast('Lưu tạm thành công, nhưng đồng bộ Sheet thất bại: ' + String(e), true));
+  }
 });
 
 async function trySyncTemplateFromSheet(url) {
@@ -2354,17 +2683,17 @@ $('#btnDownloadWord').addEventListener('click', async () => {
   await markExportedOnSheet();
 });
 
-async function markExportedOnSheet() {
+// LOCAL-FIRST: đưa việc đánh dấu ngày xuất cam kết vào hàng đợi đồng bộ ngầm
+// cho từng xe thay vì ghi tuần tự và chờ (await) từng request một — không còn
+// chặn UI khi xuất bản cam kết cho nhiều xe cùng lúc.
+function markExportedOnSheet() {
   if (state.mode !== 'gas' || !state.gasUrl) return;
   const today = new Date().toLocaleDateString('vi-VN');
   const allExportedRows = state.commitmentDocs.flatMap(d => d.vehicles);
-  let okCount = 0, failCount = 0;
-  for (const row of allExportedRows) {
-    const res = await updateRowOnSheet(row, { [EXPORT_FLAG_HEADER]: today });
-    if (res && res.ok) okCount++; else failCount++;
+  allExportedRows.forEach(row => enqueueRowSync(row, { [EXPORT_FLAG_HEADER]: today }));
+  if (allExportedRows.length) {
+    toast(`Đang đồng bộ ngầm ngày xuất cam kết cho ${allExportedRows.length} xe lên Google Sheet...`);
   }
-  if (okCount) toast(`Đã đánh dấu "${EXPORT_FLAG_HEADER}" cho ${okCount} xe trên Google Sheet.` + (failCount ? ` (${failCount} xe lỗi)` : ''));
-  else if (failCount) toast('Không thể đánh dấu ngày xuất trên Sheet (kiểm tra kết nối Apps Script).', true);
 }
 
 function sanitizeFilename(s) {
@@ -2498,12 +2827,43 @@ function refreshAll() {
   updateRecordCount();
   refreshFilterUIs();
   renderSortBar();
+  // Yêu cầu (Lọc nhanh theo Địa bàn cũ / Lưu trạng thái bộ lọc): đồng bộ lại
+  // trạng thái "đang chọn" của nhóm nút lọc nhanh sau khi state.quickDiaBan có
+  // thể vừa được khôi phục từ localStorage (restoreFilterState()).
+  updateQuickDiaBanButtonsUI();
   renderTable();
   updateModeBadge();
+  updateSyncStatusBadge();
 }
 
-(function init() {
+(async function init() {
+  // Yêu cầu (Lưu thay đổi trước, đồng bộ ngầm sau): nạp hàng đợi đồng bộ ngầm
+  // (nếu phiên trước còn dang dở) TRƯỚC KHI xử lý dữ liệu, để mọi lần tải dữ
+  // liệu (từ cache hay từ server) đều áp lại đúng các thay đổi đang chờ.
+  await ensureSyncQueueLoaded();
+
+  // Yêu cầu (Lưu dữ liệu cục bộ): ưu tiên hiển thị NGAY dữ liệu đã lưu trên máy
+  // (IndexedDB) — không bắt buộc phải chờ tải lại từ server mới được làm việc.
+  // Sau bước này, vẫn tự động tải bản mới nhất từ server ở NGẦM phía dưới như
+  // trước đây (connectViaAppsScript/connectViaCsv silent) để luôn đồng bộ.
+  let hasCachedData = false;
+  try {
+    const cached = await idbGet(IDB_KEY_RAW_DATA);
+    if (Array.isArray(cached) && cached.length) {
+      state.rawData = cached;
+      reapplyPendingSyncToRawData();
+      restoreFilterState();
+      state.exportSelected = new Set();
+      state.page = 1;
+      computeOwnerVehicleCounts();
+      hasCachedData = true;
+    }
+  } catch (e) { /* IndexedDB lỗi/không hỗ trợ -> bỏ qua, tải bình thường từ server */ }
   refreshAll();
+  if (hasCachedData) {
+    toast(`Đã hiển thị ${state.rawData.length} bản ghi từ bộ nhớ cục bộ — đang đồng bộ bản mới nhất...`);
+  }
+
   const preferGas = (localStorage.getItem(MODE_KEY) || 'gas') === 'gas';
   // Nếu trình duyệt/thiết bị này chưa từng lưu URL riêng, dùng URL mặc định
   // đã hardcode ở trên -> luôn tự kết nối, kể cả tab mới / máy khác / điện thoại.

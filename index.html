@@ -14,6 +14,11 @@
     <h1>🏍️ Quản lý Phương tiện &amp; Bản cam kết</h1>
     <span id="recordCount" class="badge">0 bản ghi</span>
     <span id="modeBadge" class="badge badge-mode hidden"></span>
+    <!-- Yêu cầu (đồng bộ ngầm + trạng thái rõ ràng): hiện trạng thái hàng đợi
+         đồng bộ nền lên Google Sheet (đang đồng bộ / đang chờ thử lại / đã
+         xong). Ẩn hoàn toàn khi không có gì cần đồng bộ. Xem updateSyncStatusBadge()
+         trong app.js. -->
+    <span id="syncStatusBadge" class="badge badge-mode hidden"></span>
   </div>
   <div class="header-right">
     <button id="btnSettings" class="btn btn-ghost" title="Cài đặt mẫu Bản cam kết">⚙️ Cài đặt</button>

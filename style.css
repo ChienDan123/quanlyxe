@@ -31,6 +31,12 @@ input,select,textarea{font-family:inherit;font-size:14px;}
 .badge-mode.mode-gas{background:#e6f7ee;color:var(--success);}
 .badge-mode.mode-csv{background:#fff3e0;color:var(--warn);}
 .badge.hidden{display:none;}
+/* Badge trạng thái đồng bộ ngầm: thêm trạng thái "đã xong" (xanh, mờ dần) và
+   "lỗi/chờ thử lại" (đỏ nhạt) bên cạnh 2 lớp mode-gas/mode-csv đã dùng cho
+   "đang đồng bộ" / "đang chờ". */
+.badge-mode.sync-done{background:#e6f7ee;color:var(--success);animation:syncDoneFade 2.4s ease forwards;}
+.badge-mode.sync-error{background:#fdecea;color:var(--danger);}
+@keyframes syncDoneFade{0%{opacity:1;}70%{opacity:1;}100%{opacity:0;}}
 .header-right{display:flex;gap:8px;flex-wrap:wrap;}
 
 .btn{border:none;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:600;transition:.15s;}
@@ -346,6 +352,10 @@ table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
   #commitmentContainer{position:absolute;left:0;top:0;width:100%;}
   .doc-page{box-shadow:none;margin:0;page-break-after:always;width:auto;min-height:auto;}
 }
+
+/* Tối ưu mobile: cuộn ngang/dọc mượt hơn (quán tính) trên iOS/Safari cho các
+   vùng cuộn chính — bảng dữ liệu, panel chi tiết. Không ảnh hưởng desktop. */
+.table-wrap, .detail-panel, .modal-body{-webkit-overflow-scrolling:touch;}
 
 @media (max-width:1000px){
   .filter-bar{flex-direction:column;align-items:stretch;}
