@@ -103,9 +103,18 @@ input,select,textarea{font-family:inherit;font-size:14px;}
 .ms-option input{pointer-events:none;}
 .ms-empty{padding:10px;color:var(--text-muted);font-size:12px;text-align:center;}
 
+/* Yêu cầu (Ô nhập địa chỉ resizable): cho phép kéo rộng/thu hẹp riêng ô tìm
+   "Địa chỉ / Phường-Xã" (không đụng tới các ô multi-select khác). Bỏ flex-grow
+   để chiều rộng không bị flexbox ghi đè lại sau khi kéo, và bật resize:horizontal
+   + overflow:auto (điều kiện bắt buộc để trình duyệt hiện tay cầm kéo). */
+.filter-field[data-field="diaChi"]{flex:0 1 260px;}
+.filter-field[data-field="diaChi"] .ms-input-box{
+  resize:horizontal;overflow:auto;width:100%;min-width:190px;max-width:900px;
+}
+
 /* ---------- CÁCH KHỚP KHI TÌM ĐỊA CHỈ ----------------------------------------
-   Hàng nhỏ dưới ô tìm/lọc "Địa chỉ / Phường-Xã", cho chọn 1 trong 3 cách khớp
-   (Chứa chuỗi / Đúng cụm / Đúng hoàn toàn). Xem ADDR_MATCH_MODES trong app.js. */
+   Hàng nhỏ dưới ô tìm/lọc "Địa chỉ / Phường-Xã", cho chọn 1 trong 2 cách khớp
+   (Chứa chuỗi / Bắt đầu bằng). Xem ADDR_MATCH_MODES trong app.js. */
 .addr-match-row{display:flex;align-items:center;gap:6px;margin-bottom:2px;}
 .addr-match-label{font-size:11px;color:var(--text-muted);white-space:nowrap;text-transform:none;font-weight:600;}
 .addr-match-select{
@@ -157,6 +166,11 @@ tbody td{padding:9px 12px;border-bottom:1px solid #eef0f3;font-size:13px;white-s
 tbody tr{cursor:pointer;}
 tbody tr:hover{background:#f8fafc;}
 tbody tr.selected-row{background:var(--highlight);}
+/* Yêu cầu (Đánh dấu đã in): làm mờ nhẹ + gạch ngang tên biển số cho các dòng
+   đã đánh dấu "Đã in", để dễ phân biệt phần CHƯA in còn lại trong bảng chính. */
+tbody tr.row-printed{opacity:.55;}
+tbody tr.row-printed td.sticky-col{background:#f3f4f6;}
+.printed-badge{font-size:11px;opacity:.9;}
 .col-chk{width:36px;}
 .empty-state{text-align:center;color:var(--text-muted);padding:40px !important;cursor:default;}
 

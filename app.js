@@ -65,14 +65,16 @@ const UNASSIGNED_FILTER_LABEL = 'Chưa có ai thực hiện';
 
 // Yêu cầu (Cách khớp khi tìm địa chỉ): địa chỉ thường có nhiều cấp ngăn cách
 // bởi dấu phẩy (thôn, xã...), có nơi thiếu cấp thôn (VD "Tam Thái, Phú Ninh").
-// Kiểu "chứa chuỗi" (mặc định cũ) dễ khớp nhầm các địa chỉ dài hơn có chứa
-// cùng 1 cụm con (VD gõ "Tam Thái" khớp luôn "Khánh Thịnh, Tam Thái, Phú Ninh").
-// Cho phép người dùng CHỦ ĐỘNG chọn 1 trong 3 cách khớp, chỉ áp dụng riêng cho
+// Chỉ còn 2 CÁCH KHỚP (đã bỏ "Đúng cụm" / "Đúng hoàn toàn" vì gây nhầm lẫn):
+//   - "contains": chứa chuỗi ở bất kỳ đâu trong địa chỉ (linh hoạt, mặc định cũ).
+//   - "starts_with": bắt đầu bằng chuỗi đã gõ — khớp nếu CẢ địa chỉ bắt đầu
+//     bằng chuỗi gõ, HOẶC 1 trong các cụm (giữa dấu phẩy) bắt đầu bằng chuỗi đó
+//     (VD gõ "Tam Th" khớp cụm "Tam Thái" trong "Khánh Thịnh, Tam Thái, Phú Ninh").
+// Cho phép người dùng CHỦ ĐỘNG chọn 1 trong 2 cách khớp, chỉ áp dụng riêng cho
 // ô tìm/lọc của trường "Địa chỉ / Phường-Xã" — không ảnh hưởng các trường khác.
 const ADDR_MATCH_MODES = [
   { key: 'contains', label: 'Chứa chuỗi (linh hoạt)', placeholder: 'Gõ để tìm...' },
-  { key: 'exact_segment', label: 'Đúng cụm (giữa các dấu phẩy)', placeholder: 'Gõ đúng 1 cụm, VD: Tam Thái' },
-  { key: 'exact_full', label: 'Đúng hoàn toàn (đúng cả địa chỉ)', placeholder: 'Gõ đúng cả địa chỉ, VD: Tam Thái, Phú Ninh' },
+  { key: 'starts_with', label: 'Bắt đầu bằng', placeholder: 'Gõ phần đầu, VD: Tam Th' },
 ];
 const ADDR_MATCH_MODE_DEFAULT = 'contains';
 
@@ -181,6 +183,9 @@ const state = {
   // Cache số lượng xe theo từng chủ xe (tính theo CCCD hiệu lực, có tính cả
   // các xe đã được "Xác nhận xe đúng"). Được tính lại mỗi khi dữ liệu thay đổi.
   ownerVehicleCounts: new Map(),
+  // Yêu cầu (Đánh dấu đã in): Set các khoá xe (xem rowPrintKey) đã đánh dấu
+  // "Đã in" — khởi tạo ngay từ localStorage để còn nguyên qua các lần tải lại.
+  printedMarks: loadPrintedMarks(),
 };
 
 /* ---------------------------- 3. TIỆN ÍCH CHUNG ---------------------------- */
@@ -1002,12 +1007,12 @@ function optionMatchesSearch(field, label, searchLower) {
   if (!searchLower) return true;
   if (field !== 'diaChi') return text.includes(searchLower);
   const mode = state.addrMatchMode;
-  if (mode === 'exact_full') return text.trim() === searchLower;
-  if (mode === 'exact_segment') {
-    // "Đúng cụm": chuỗi gõ vào phải trùng NGUYÊN VẸN 1 trong các cụm giữa các
-    // dấu phẩy (VD "Khánh Thịnh, Tam Thái, Phú Ninh" có 3 cụm: "Khánh Thịnh",
-    // "Tam Thái", "Phú Ninh") — không khớp nếu chỉ là 1 phần của cụm.
-    return text.split(',').some(seg => seg.trim() === searchLower);
+  if (mode === 'starts_with') {
+    // "Bắt đầu bằng": khớp nếu cả địa chỉ bắt đầu bằng chuỗi gõ, HOẶC 1 trong
+    // các cụm giữa dấu phẩy (thôn/xã...) bắt đầu bằng chuỗi gõ (VD "Khánh
+    // Thịnh, Tam Thái, Phú Ninh" gõ "Tam Th" -> khớp cụm "Tam Thái").
+    if (text.startsWith(searchLower)) return true;
+    return text.split(',').some(seg => seg.trim().startsWith(searchLower));
   }
   return text.includes(searchLower); // 'contains' (mặc định, như hành vi cũ)
 }
@@ -1458,6 +1463,36 @@ if (sortBarEl) {
    - Lựa chọn cột + khổ giấy lưu vào localStorage (PRINT_SETTINGS_KEY).
    - Dùng iframe riêng nên KHÔNG đụng tới CSS @media print của Bản cam kết.       */
 const PRINT_SETTINGS_KEY = 'vehiclePrintSettingsV1';
+// Yêu cầu (Đánh dấu đã in): lưu danh sách các xe đã được đánh dấu "Đã in"
+// (chỉ ở trình duyệt này, không đồng bộ Sheet) để có thể LOẠI TRỪ khi in lần
+// sau -> dễ xác định phần chưa in. Khoá nhận diện 1 xe theo thứ tự ưu tiên
+// giống MATCH_KEY_PRIORITY (mã ID/MOTO_ID/biển số), dự phòng số khung rồi
+// đến CCCD+biển số, để vẫn ổn định qua các lần tải lại dữ liệu.
+const PRINTED_MARKS_KEY = 'vehiclePrintedMarksV1';
+function rowPrintKey(row) {
+  for (const k of MATCH_KEY_PRIORITY) { if (row[k] && String(row[k]).trim()) return k + ':' + String(row[k]).trim(); }
+  if (row.soKhung && row.soKhung.trim()) return 'soKhung:' + row.soKhung.trim();
+  return 'cb:' + (row.cccd || '').trim() + '|' + (row.bienSo || '').trim();
+}
+function loadPrintedMarks() {
+  try {
+    const raw = localStorage.getItem(PRINTED_MARKS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch (e) { return new Set(); }
+}
+function savePrintedMarks() {
+  try { localStorage.setItem(PRINTED_MARKS_KEY, JSON.stringify(Array.from(state.printedMarks))); }
+  catch (e) { /* localStorage đầy/bị chặn -> bỏ qua */ }
+}
+function isRowPrinted(row) { return state.printedMarks.has(rowPrintKey(row)); }
+function markRowsPrinted(rows, printed) {
+  rows.forEach(r => {
+    const k = rowPrintKey(r);
+    if (printed) state.printedMarks.add(k); else state.printedMarks.delete(k);
+  });
+  savePrintedMarks();
+}
 
 // nowrap: cột ngắn (biển số, số khung, CCCD, ngày, SĐT...) ưu tiên KHÔNG xuống
 //   dòng để dễ đọc/đối chiếu; các cột dài (địa chỉ, ghi chú...) được xuống dòng.
@@ -1490,8 +1525,19 @@ const PRINT_PAGE_MARGIN_MM = 8;
 // Danh sách quá dài (dễ treo trình duyệt/ra hàng trăm trang) -> hỏi xác nhận trước.
 const PRINT_CONFIRM_ROWS = 2000;
 
+// Yêu cầu (Nâng cấp chức năng In): thêm các tuỳ chọn lọc/mở rộng danh sách in,
+// lưu chung với lựa chọn cột/khổ giấy (localStorage) để lần sau không phải
+// chọn lại. excludePrinted: loại các dòng đã đánh dấu "Đã in". autoMark: sau
+// khi in xong, tự động đánh dấu các dòng vừa in là "Đã in". expandSameCccd /
+// expandSameNameOldId: xem expandPrintRows() bên dưới.
+const PRINT_EXTRA_DEFAULTS = {
+  excludePrinted: false,
+  autoMarkPrinted: true,
+  expandSameCccd: false,
+  expandSameNameOldId: false,
+};
 function loadPrintSettings() {
-  const fallback = { columns: PRINT_DEFAULT_COLUMNS.slice(), orientation: 'auto' };
+  const fallback = { columns: PRINT_DEFAULT_COLUMNS.slice(), orientation: 'auto', ...PRINT_EXTRA_DEFAULTS };
   try {
     const raw = localStorage.getItem(PRINT_SETTINGS_KEY);
     if (!raw) return fallback;
@@ -1499,9 +1545,13 @@ function loadPrintSettings() {
     const known = new Set(PRINT_COLUMNS.map(c => c.key));
     const cols = Array.isArray(data.columns) ? data.columns.filter(k => known.has(k)) : [];
     const orientation = ['auto', 'landscape', 'portrait'].includes(data.orientation) ? data.orientation : 'auto';
+    const extras = {};
+    Object.keys(PRINT_EXTRA_DEFAULTS).forEach(k => {
+      extras[k] = typeof data[k] === 'boolean' ? data[k] : PRINT_EXTRA_DEFAULTS[k];
+    });
     // Dữ liệu lưu hỏng / không còn cột nào hợp lệ -> dùng cột mặc định.
-    if (!cols.some(k => k !== 'stt')) return { columns: fallback.columns, orientation };
-    return { columns: cols, orientation };
+    if (!cols.some(k => k !== 'stt')) return { columns: fallback.columns, orientation, ...extras };
+    return { columns: cols, orientation, ...extras };
   } catch (e) { return fallback; }
 }
 function savePrintSettings(s) {
@@ -1518,11 +1568,24 @@ function resolvePrintOrientation(cols, pref) {
   return total > PRINT_PORTRAIT_MAX_WEIGHT ? 'landscape' : 'portrait';
 }
 
-/* ---- Ghi chú "có người trong gia đình tại STT xx <Tên>" -------------------
+/* ---- Ghi chú người cùng gia đình / cùng chủ khi in -------------------------
    Quan hệ gia đình lấy từ cột Y (row.giaDinh = "Cùng gia đình với: CCCD|CCCD").
    Coi quan hệ là 2 chiều: A ghi B, hoặc B ghi A đều tính. Chỉ dẫn chiếu tới
    những người CÓ MẶT trong danh sách in (vì STT chỉ có nghĩa trong danh sách
-   này). Trả về Map<_rowId, chuỗi ghi chú>.                                   */
+   này). Trả về Map<_rowId, chuỗi ghi chú>.
+
+   Logic (theo yêu cầu điều chỉnh):
+   1) Cùng 1 người (cùng số CCCD, nhiều xe) không còn bị bỏ qua hoàn toàn như
+      trước: nếu người đó có > 1 xe trong danh sách in, luôn ghi chú NGẮN GỌN
+      "công dân có x xe cần rà soát" (không liệt kê chi tiết STT — vì đó vẫn
+      chỉ là 1 người, không phải người khác trong gia đình).
+   2) Ghi chú CHI TIẾT "có người trong gia đình tại STT …" chỉ dùng cho người
+      KHÁC (khác số CCCD) được xác định qua cột "Người cùng gia đình". Nếu các
+      dòng của "người chính" (cùng CCCD với dòng đang xét) đã được xếp GẦN
+      NHAU và liền kề với dòng của người thân đó rồi (dễ nhận ra bằng mắt khi
+      in ra), thì KHÔNG cần ghi chú chi tiết cho người thân đó nữa — chỉ ghi
+      chi tiết khi họ KHÔNG nằm liền kề (xe/dòng của người thân nằm tách rời,
+      cần dẫn chiếu STT để dễ tìm).                                          */
 function buildPrintFamilyNotes(rows) {
   const listed = new Map(); // cccd -> { name, stts: [STT trong danh sách in] }
   rows.forEach((r, i) => {
@@ -1543,23 +1606,108 @@ function buildPrintFamilyNotes(rows) {
     });
   });
 
+  // 1 dãy STT được coi là "đã xếp gần nhau" nếu, sau khi sắp xếp, nó tạo thành
+  // 1 khối LIỀN MẠCH không có khoảng hở (VD [3,4,5] -> gần nhau; [3,7] -> không).
+  function isAdjacentBlock(sttArr) {
+    if (sttArr.length <= 1) return true;
+    const sorted = [...sttArr].sort((a, b) => a - b);
+    return sorted[sorted.length - 1] - sorted[0] + 1 === sorted.length;
+  }
+
   const notes = new Map();
-  rows.forEach(r => {
+  rows.forEach((r, idx) => {
     const own = (r.cccd || '').trim();
+    const parts = [];
+
+    // (1) Cùng 1 người, nhiều xe -> ghi chú ngắn gọn "công dân có x xe cần rà soát".
+    const selfEntry = own ? listed.get(own) : null;
+    const selfCount = selfEntry ? selfEntry.stts.length : 1;
+    if (selfCount > 1) parts.push(`công dân có ${selfCount} xe cần rà soát`);
+
+    // (2) Người khác cùng gia đình (khác CCCD).
     const ids = new Set(parseFamilyIds(r.giaDinh));
     if (own && reverse.has(own)) reverse.get(own).forEach(id => ids.add(id));
-    if (own) ids.delete(own); // cùng 1 người (nhiều xe) không phải "người trong gia đình"
+    if (own) ids.delete(own); // (1) đã xử lý riêng, không tính là "người trong gia đình"
     const members = [];
     ids.forEach(id => { const e = listed.get(id); if (e) members.push(e); });
-    if (!members.length) return;
-    members.sort((a, b) => a.stts[0] - b.stts[0]);
-    const parts = members.map(m => {
-      const shown = m.stts.slice(0, 4).join(', ') + (m.stts.length > 4 ? ', …' : '');
-      return `STT ${shown} ${m.name}`.trim();
-    });
-    notes.set(r._rowId, 'có người trong gia đình tại ' + parts.join('; '));
+
+    if (members.length) {
+      // Chỉ giữ lại chi tiết cho những người thân mà xe/dòng của họ CHƯA nằm
+      // liền kề với (các) dòng của người chính đang được ghi chú -> nếu đã
+      // liền kề (dễ thấy) thì bỏ, khỏi ghi chú chi tiết trùng lặp không cần thiết.
+      const selfStts = selfEntry ? selfEntry.stts : [idx + 1];
+      const needDetail = members.filter(m => !isAdjacentBlock([...selfStts, ...m.stts]));
+      if (needDetail.length) {
+        needDetail.sort((a, b) => a.stts[0] - b.stts[0]);
+        const detailParts = needDetail.map(m => {
+          const shown = m.stts.slice(0, 4).join(', ') + (m.stts.length > 4 ? ', …' : '');
+          return `STT ${shown} ${m.name}`.trim();
+        });
+        parts.push('có người trong gia đình tại ' + detailParts.join('; '));
+      }
+    }
+
+    if (parts.length) notes.set(r._rowId, parts.join('; '));
   });
   return notes;
+}
+
+// Tách "địa chỉ đăng ký" (row.diaChi, dạng "Thôn, Xã cũ" hoặc chỉ "Xã cũ" khi
+// thiếu cấp thôn) thành { thon, xa }: xã = cụm CUỐI CÙNG (giữa các dấu phẩy),
+// thôn = cụm ĐẦU TIÊN nếu địa chỉ có từ 2 cụm trở lên, ngược lại để trống.
+function splitDiaChiThonXa(diaChi) {
+  const segs = (diaChi || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!segs.length) return { thon: '', xa: '' };
+  return { thon: segs.length > 1 ? segs[0] : '', xa: segs[segs.length - 1] };
+}
+
+/* ---- Mở rộng danh sách in để "in theo thôn" / "in lẻ từng người" ----------
+   Yêu cầu: khi in, cho phép CHỌN THÊM (tự động bổ sung vào danh sách đang in)
+   các trường hợp liên quan sau đây, tìm trên TOÀN BỘ dữ liệu (không chỉ đang
+   lọc) và kể cả những dòng đã đánh dấu "Đã in":
+     a) Cùng số CCCD (từ 9 ký tự trở lên) — tức là chắc chắn cùng 1 người, dù
+        dòng đó có đang bị bộ lọc hiện tại loại ra hay không.
+     b) Cùng xã (cũ) nhưng khác thôn, trùng tên, và số CMND/CCCD của dòng KHÁC
+        THÔN đó có độ dài <= 9 ký tự (số CMND cũ) — đây là dấu hiệu 1 người có
+        thể bị ghi trùng ở 2 thôn khác nhau do dữ liệu cũ, cần rà soát gần
+        người trùng tên.
+   Trả về mảng dòng mới (rows gốc + các dòng mở rộng, đã loại trùng), CHƯA sắp
+   xếp lại (gọi compareBySortCriteria bên ngoài nếu cần).                     */
+function expandPrintRows(baseRows, opts) {
+  const result = baseRows.slice();
+  const seen = new Set(result.map(r => r._rowId));
+  const addRow = (r) => { if (!seen.has(r._rowId)) { seen.add(r._rowId); result.push(r); } };
+
+  if (opts.expandSameCccd) {
+    const cccds = new Set();
+    baseRows.forEach(r => { const c = (r.cccd || '').trim(); if (c.length >= 9) cccds.add(c); });
+    if (cccds.size) {
+      state.rawData.forEach(r => {
+        const c = (r.cccd || '').trim();
+        if (c.length >= 9 && cccds.has(c)) addRow(r);
+      });
+    }
+  }
+
+  if (opts.expandSameNameOldId) {
+    // Lấy nền từ danh sách hiện có (kể cả những dòng vừa được mở rộng ở bước
+    // trên) để 1 người vừa được thêm vào cũng được dùng làm "gốc" để tìm tiếp.
+    const bases = result.map(r => ({ row: r, name: normalizeName(r.chuXe), addr: splitDiaChiThonXa(r.diaChi) }))
+      .filter(b => b.name && b.addr.xa);
+    if (bases.length) {
+      state.rawData.forEach(r => {
+        const c = (r.cccd || '').trim();
+        if (!c || c.length > 9) return; // chỉ bắt số CMND cũ (<=9 ký tự)
+        const name = normalizeName(r.chuXe);
+        const addr = splitDiaChiThonXa(r.diaChi);
+        if (!name || !addr.xa) return;
+        const match = bases.some(b => b.name === name && b.addr.xa === addr.xa && b.addr.thon !== addr.thon);
+        if (match) addRow(r);
+      });
+    }
+  }
+
+  return result;
 }
 
 /* ---- Dựng tài liệu HTML của trang in ---------------------------------------
@@ -1690,7 +1838,27 @@ let printRowCountAtOpen = 0;
 
 function readPrintSettingsFromModal() {
   const columns = $all('#printColumnList input[data-key]').filter(i => i.checked).map(i => i.dataset.key);
-  return { columns, orientation: $('#printOrientation').value };
+  const get = (id, fallback) => { const el = $(id); return el ? el.checked : fallback; };
+  return {
+    columns,
+    orientation: $('#printOrientation').value,
+    excludePrinted: get('#chkPrintExcludePrinted', PRINT_EXTRA_DEFAULTS.excludePrinted),
+    autoMarkPrinted: get('#chkPrintAutoMark', PRINT_EXTRA_DEFAULTS.autoMarkPrinted),
+    expandSameCccd: get('#chkPrintExpandSameCccd', PRINT_EXTRA_DEFAULTS.expandSameCccd),
+    expandSameNameOldId: get('#chkPrintExpandSameNameOldId', PRINT_EXTRA_DEFAULTS.expandSameNameOldId),
+  };
+}
+// Tính danh sách dòng SẼ IN theo đúng luật: lọc + sắp xếp hiện tại (giống bảng
+// chính) -> loại "Đã in" nếu bật -> mở rộng theo CCCD/tên trùng nếu bật (mở
+// rộng LUÔN lấy trên toàn bộ dữ liệu, kể cả dòng đã đánh dấu "Đã in").
+function computePrintRows(settings) {
+  let rows = getFiltered(null).slice().sort(compareBySortCriteria);
+  if (settings.excludePrinted) rows = rows.filter(r => !isRowPrinted(r));
+  const beforeExpand = rows.length;
+  if (settings.expandSameCccd || settings.expandSameNameOldId) {
+    rows = expandPrintRows(rows, settings).sort(compareBySortCriteria);
+  }
+  return { rows, addedByExpand: rows.length - beforeExpand };
 }
 function renderPrintModal() {
   const s = loadPrintSettings();
@@ -1701,6 +1869,11 @@ function renderPrintModal() {
       <span>${escapeHtml(c.header)}</span></label>`;
   }).join('');
   $('#printOrientation').value = s.orientation;
+  const setChk = (id, val) => { const el = $(id); if (el) el.checked = !!val; };
+  setChk('#chkPrintExcludePrinted', s.excludePrinted);
+  setChk('#chkPrintAutoMark', s.autoMarkPrinted);
+  setChk('#chkPrintExpandSameCccd', s.expandSameCccd);
+  setChk('#chkPrintExpandSameNameOldId', s.expandSameNameOldId);
   printRowCountAtOpen = getFiltered(null).length;
   updatePrintSummary();
 }
@@ -1716,7 +1889,14 @@ function updatePrintSummary() {
   }
   const cols = getPrintColumns(s);
   const ori = resolvePrintOrientation(cols, s.orientation);
-  let html = `Sẽ in <b>${printRowCountAtOpen}</b> dòng (theo bộ lọc + sắp xếp hiện tại) · <b>${cols.length}</b> cột · A4 <b>${ori === 'landscape' ? 'ngang' : 'dọc'}</b>${s.orientation === 'auto' ? ' (tự chọn)' : ''}`;
+  const { rows, addedByExpand } = computePrintRows(s);
+  let html = `Sẽ in <b>${rows.length}</b> dòng · <b>${cols.length}</b> cột · A4 <b>${ori === 'landscape' ? 'ngang' : 'dọc'}</b>${s.orientation === 'auto' ? ' (tự chọn)' : ''}`;
+  if (s.excludePrinted) {
+    html += `<div class="note">Đã loại các dòng đã đánh dấu "Đã in" (còn lại: phần chưa in, trong tổng ${printRowCountAtOpen} dòng theo bộ lọc hiện tại).</div>`;
+  }
+  if (addedByExpand > 0) {
+    html += `<div class="note">Đã tự động thêm <b>${addedByExpand}</b> dòng liên quan (cùng CCCD / cùng xã khác thôn trùng tên), kể cả dòng đã in.</div>`;
+  }
   if (!s.columns.includes('chuXe')) {
     html += '<div class="note">Cột "Chủ phương tiện" đang tắt nên sẽ không hiện ghi chú người cùng gia đình.</div>';
   }
@@ -1735,6 +1915,10 @@ $('#btnPrintList').addEventListener('click', () => {
 });
 $('#printColumnList').addEventListener('change', persistPrintSettingsFromModal);
 $('#printOrientation').addEventListener('change', persistPrintSettingsFromModal);
+['#chkPrintExcludePrinted', '#chkPrintAutoMark', '#chkPrintExpandSameCccd', '#chkPrintExpandSameNameOldId'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('change', persistPrintSettingsFromModal);
+});
 function setAllPrintColumns(keys) {
   $all('#printColumnList input[data-key]').forEach(i => { if (!i.disabled) i.checked = keys.includes(i.dataset.key); });
   persistPrintSettingsFromModal();
@@ -1747,12 +1931,14 @@ $('#btnDoPrintList').addEventListener('click', () => {
   const s = readPrintSettingsFromModal();
   if (!s.columns.some(k => k !== 'stt')) { toast('Vui lòng chọn ít nhất 1 cột để in.', true); return; }
   savePrintSettings(s);
-  // Đúng danh sách đang thấy trên bảng: đã lọc + đã sắp xếp (không phân trang).
-  const rows = getFiltered(null).slice().sort(compareBySortCriteria);
-  if (!rows.length) { toast('Không có dòng nào để in theo bộ lọc hiện tại.', true); return; }
+  const { rows } = computePrintRows(s);
+  if (!rows.length) { toast('Không có dòng nào để in theo bộ lọc/tuỳ chọn hiện tại.', true); return; }
   if (rows.length > PRINT_CONFIRM_ROWS &&
       !window.confirm(`Danh sách có ${rows.length} dòng, in có thể ra rất nhiều trang và mất thời gian chuẩn bị. Vẫn tiếp tục?`)) return;
   toast(`Đang chuẩn bị trang in (${rows.length} dòng)...`);
+  // Yêu cầu (Đánh dấu đã in): đánh dấu NGAY khi bắt đầu in (nếu bật tuỳ chọn),
+  // để không phụ thuộc việc trình duyệt có báo "in xong" hay không.
+  if (s.autoMarkPrinted) { markRowsPrinted(rows, true); renderTable(); }
   runPrintList(rows, s);
 });
 
@@ -1815,10 +2001,10 @@ function renderTable() {
     tbody.innerHTML = `<tr><td colspan="16" class="empty-state">Không có dòng nào khớp bộ lọc.</td></tr>`;
   } else {
     tbody.innerHTML = pageRows.map(row => `
-      <tr data-rowid="${row._rowId}" class="${state.exportSelected.has(row._rowId) ? 'selected-row' : ''}">
+      <tr data-rowid="${row._rowId}" class="${state.exportSelected.has(row._rowId) ? 'selected-row' : ''} ${isRowPrinted(row) ? 'row-printed' : ''}" ${isRowPrinted(row) ? 'title="Đã đánh dấu: Đã in"' : ''}>
         <td class="col-chk"><input type="checkbox" data-role="row-chk" ${state.exportSelected.has(row._rowId) ? 'checked' : ''}></td>
         <td>${escapeHtml(row.stt)}</td>
-        <td class="sticky-col col-sticky-bienso">${escapeHtml(row.bienSo)}</td>
+        <td class="sticky-col col-sticky-bienso">${escapeHtml(row.bienSo)} ${isRowPrinted(row) ? '<span class="printed-badge" title="Đã in">🖨️</span>' : ''}</td>
         <td>${escapeHtml(row.soKhung)}</td>
         <td>${escapeHtml(row.soMay)}</td>
         <td>${escapeHtml(row.nhanHieu)}</td>
@@ -1905,7 +2091,32 @@ function updateSelectedCount() {
   // Yêu cầu #2: nút "Bỏ chọn tất cả" chỉ bật khi đang có ít nhất 1 xe được chọn.
   const deselectBtn = $('#btnDeselectAll');
   if (deselectBtn) deselectBtn.disabled = state.exportSelected.size === 0;
+  // Yêu cầu (Đánh dấu đã in): 2 nút đánh dấu/bỏ đánh dấu cũng chỉ bật khi có
+  // ít nhất 1 xe đang được chọn (dùng chung cơ chế chọn (checkbox) sẵn có).
+  const markBtn = $('#btnMarkPrinted');
+  if (markBtn) markBtn.disabled = state.exportSelected.size === 0;
+  const unmarkBtn = $('#btnUnmarkPrinted');
+  if (unmarkBtn) unmarkBtn.disabled = state.exportSelected.size === 0;
 }
+
+// Yêu cầu (Đánh dấu đã in): đánh dấu/bỏ đánh dấu "Đã in" cho các xe đang được
+// tích chọn (checkbox) ở bảng chính — áp dụng trên MỌI trang/bộ lọc, giống
+// hệt phạm vi của "Bỏ chọn tất cả" / "Cập nhật hàng loạt".
+function selectedRowsForMarking() {
+  return state.rawData.filter(r => state.exportSelected.has(r._rowId));
+}
+$('#btnMarkPrinted').addEventListener('click', () => {
+  const rows = selectedRowsForMarking();
+  if (!rows.length) return;
+  markRowsPrinted(rows, true);
+  toast(`Đã đánh dấu "Đã in" cho ${rows.length} xe.`);
+});
+$('#btnUnmarkPrinted').addEventListener('click', () => {
+  const rows = selectedRowsForMarking();
+  if (!rows.length) return;
+  markRowsPrinted(rows, false);
+  toast(`Đã bỏ đánh dấu "Đã in" cho ${rows.length} xe.`);
+});
 
 // Yêu cầu #2: "Bỏ chọn tất cả" ở trang chủ — xoá TOÀN BỘ lựa chọn hiện tại
 // (trên mọi trang / không chỉ trang đang xem), vì selectedCount vốn cũng đang

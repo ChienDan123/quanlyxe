@@ -144,19 +144,20 @@
       <label>Địa chỉ / Phường-Xã</label>
       <!-- Yêu cầu (Cách khớp khi tìm địa chỉ): địa chỉ có nhiều cấp (thôn, xã...)
            ngăn cách bởi dấu phẩy, có nơi thiếu cấp thôn -> kiểu "chứa chuỗi" dễ
-           khớp nhầm địa chỉ dài hơn. Cho chọn cách khớp, lưu lại cho lần sau
-           (xem ADDR_MATCH_MODES + persistFilterState/restoreFilterState trong app.js).
+           khớp nhầm địa chỉ dài hơn. Chỉ còn 2 cách khớp: "Chứa chuỗi" và
+           "Bắt đầu bằng". Lưu lại cho lần sau (xem ADDR_MATCH_MODES +
+           persistFilterState/restoreFilterState trong app.js).
            Đặt TRÊN ô tìm kiếm (không phải dưới) để không bị danh sách kết quả
-           (dropdown) che mất khi đang mở. -->
+           (dropdown) che mất khi đang mở. Ô tìm kiếm bên dưới có thể kéo rộng/
+           thu hẹp (resizable) — xem .ms-input-box trong style.css. -->
       <div class="addr-match-row">
         <label for="addrMatchMode" class="addr-match-label">Cách khớp</label>
         <select id="addrMatchMode" class="addr-match-select" title="Chọn cách so khớp khi gõ tìm địa chỉ/phường-xã">
           <option value="contains">Chứa chuỗi (linh hoạt)</option>
-          <option value="exact_segment">Đúng cụm (giữa dấu phẩy)</option>
-          <option value="exact_full">Đúng hoàn toàn</option>
+          <option value="starts_with">Bắt đầu bằng</option>
         </select>
       </div>
-      <div class="ms-control" data-field="diaChi"></div>
+      <div class="ms-control ms-control-resizable" data-field="diaChi"></div>
     </div>
     <div class="filter-field quick-diaban-wrap" id="quickDiaBanWrap">
       <label>Lọc nhanh theo địa bàn cũ</label>
@@ -209,6 +210,12 @@
       <span id="selectedCount" class="selected-count">0 xe đã chọn để xuất</span>
       <button id="btnDeselectAll" class="btn btn-ghost btn-sm" disabled title="Bỏ chọn tất cả xe đang chọn (mọi trang / mọi bộ lọc)">🗑️ Bỏ chọn tất cả</button>
       <button id="btnBulkUpdate" class="btn btn-secondary btn-sm" disabled title="Chọn ít nhất 1 xe để cập nhật hàng loạt">🔄 Cập nhật hàng loạt</button>
+      <!-- Yêu cầu (Nâng cấp chức năng In — Đánh dấu đã in): đánh dấu/bỏ đánh dấu
+           "Đã in" cho các xe đang tích chọn (checkbox), để lần in sau có thể
+           loại trừ (xem tuỳ chọn "Loại trừ dòng đã in" trong hộp thoại Xuất trang in).
+           Đánh dấu chỉ lưu ở trình duyệt này (localStorage), không ghi lên Sheet. -->
+      <button id="btnMarkPrinted" class="btn btn-ghost btn-sm" disabled title="Đánh dấu các xe đang chọn là 'Đã in'">🖨️✅ Đánh dấu đã in</button>
+      <button id="btnUnmarkPrinted" class="btn btn-ghost btn-sm" disabled title="Bỏ đánh dấu 'Đã in' cho các xe đang chọn">↺ Bỏ đánh dấu đã in</button>
     </div>
     <div class="toolbar-right">
       <label>Số dòng/trang:
@@ -323,6 +330,23 @@
         <option value="landscape">A4 ngang</option>
         <option value="portrait">A4 dọc</option>
       </select>
+
+      <!-- Yêu cầu (Nâng cấp chức năng In): đánh dấu đã in + mở rộng danh sách in
+           theo CCCD trùng / cùng xã khác thôn trùng tên (in theo thôn, in lẻ từng
+           người). Xem computePrintRows()/expandPrintRows() trong app.js. -->
+      <div class="section-title" style="margin-top:14px;">🖨️ Đã in / Mở rộng danh sách in</div>
+      <label class="chk-inline" style="display:flex;margin-bottom:6px;">
+        <input type="checkbox" id="chkPrintExcludePrinted"> Loại trừ các dòng đã đánh dấu "Đã in" (chỉ in phần chưa in)
+      </label>
+      <label class="chk-inline" style="display:flex;margin-bottom:6px;">
+        <input type="checkbox" id="chkPrintAutoMark"> Tự động đánh dấu "Đã in" cho các dòng vừa xuất trang in này
+      </label>
+      <label class="chk-inline" style="display:flex;margin-bottom:6px;">
+        <input type="checkbox" id="chkPrintExpandSameCccd"> Thêm người có cùng số CCCD (≥ 9 ký tự) — kể cả người đã in, để in đủ theo từng người
+      </label>
+      <label class="chk-inline" style="display:flex;">
+        <input type="checkbox" id="chkPrintExpandSameNameOldId"> Thêm người cùng xã khác thôn, trùng tên, số CMND cũ ≤ 9 ký tự (gần trùng) — kể cả người đã in, để in theo thôn
+      </label>
 
       <div id="printSummary" class="print-summary"></div>
     </div>
