@@ -67,14 +67,14 @@ const UNASSIGNED_FILTER_LABEL = 'Chưa có ai thực hiện';
 // bởi dấu phẩy (thôn, xã...), có nơi thiếu cấp thôn (VD "Tam Thái, Phú Ninh").
 // Chỉ còn 2 CÁCH KHỚP (đã bỏ "Đúng cụm" / "Đúng hoàn toàn" vì gây nhầm lẫn):
 //   - "contains": chứa chuỗi ở bất kỳ đâu trong địa chỉ (linh hoạt, mặc định cũ).
-//   - "starts_with": bắt đầu bằng chuỗi đã gõ — khớp nếu CẢ địa chỉ bắt đầu
-//     bằng chuỗi gõ, HOẶC 1 trong các cụm (giữa dấu phẩy) bắt đầu bằng chuỗi đó
-//     (VD gõ "Tam Th" khớp cụm "Tam Thái" trong "Khánh Thịnh, Tam Thái, Phú Ninh").
+//   - "starts_with": CHỈ khớp khi CẢ địa chỉ bắt đầu đúng bằng chuỗi đã gõ
+//     (VD gõ "Tam Thái" khớp "Tam Thái, Phú Ninh" nhưng KHÔNG khớp "Khánh
+//     Thịnh, Tam Thái, Phú Ninh" vì chuỗi đó không nằm ở đầu địa chỉ).
 // Cho phép người dùng CHỦ ĐỘNG chọn 1 trong 2 cách khớp, chỉ áp dụng riêng cho
 // ô tìm/lọc của trường "Địa chỉ / Phường-Xã" — không ảnh hưởng các trường khác.
 const ADDR_MATCH_MODES = [
   { key: 'contains', label: 'Chứa chuỗi (linh hoạt)', placeholder: 'Gõ để tìm...' },
-  { key: 'starts_with', label: 'Bắt đầu bằng', placeholder: 'Gõ phần đầu, VD: Tam Th' },
+  { key: 'starts_with', label: 'Bắt đầu bằng', placeholder: 'Gõ đúng phần đầu địa chỉ, VD: Tam Thái' },
 ];
 const ADDR_MATCH_MODE_DEFAULT = 'contains';
 
@@ -1008,11 +1008,11 @@ function optionMatchesSearch(field, label, searchLower) {
   if (field !== 'diaChi') return text.includes(searchLower);
   const mode = state.addrMatchMode;
   if (mode === 'starts_with') {
-    // "Bắt đầu bằng": khớp nếu cả địa chỉ bắt đầu bằng chuỗi gõ, HOẶC 1 trong
-    // các cụm giữa dấu phẩy (thôn/xã...) bắt đầu bằng chuỗi gõ (VD "Khánh
-    // Thịnh, Tam Thái, Phú Ninh" gõ "Tam Th" -> khớp cụm "Tam Thái").
-    if (text.startsWith(searchLower)) return true;
-    return text.split(',').some(seg => seg.trim().startsWith(searchLower));
+    // "Bắt đầu bằng": CHỈ khớp khi cả địa chỉ bắt đầu đúng bằng chuỗi đã gõ.
+    // Không khớp theo từng cụm (thôn/xã...) nữa — trước đây có kiểm tra thêm
+    // "1 trong các cụm giữa dấu phẩy bắt đầu bằng chuỗi gõ" khiến gõ "Tam Thái"
+    // vẫn khớp nhầm "Khánh Thịnh, Tam Thái, Phú Ninh" (giống hệt "Chứa chuỗi").
+    return text.trim().startsWith(searchLower);
   }
   return text.includes(searchLower); // 'contains' (mặc định, như hành vi cũ)
 }
