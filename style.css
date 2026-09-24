@@ -340,26 +340,12 @@ thead .mini-sticky-col{z-index:15;background:#f0f3f8;}
 .sync-row{display:flex;justify-content:flex-end;gap:8px;margin-top:8px;}
 .sync-note{font-size:11.5px;color:var(--text-muted);margin-top:4px;}
 
-/* ---------- COMMITMENT DOC (mô phỏng file Word) ---------- */
+/* ---------- COMMITMENT DOC (mô phỏng file Word) ----------
+   CSS của trang văn bản (.doc-page, bảng, chữ ký...) nằm trong app.js (COMMITMENT_DOC_CSS) để dùng
+   chung cho xem trước, In/PDF và Word. Ở đây chỉ còn phần khung modal. */
 .commitment-nav{display:flex;align-items:center;gap:8px;font-size:13px;}
 .commitment-body{background:#e9ecf1;padding:24px;}
-.doc-page{
-  background:#fff;width:210mm;min-height:297mm;margin:0 auto 20px;padding:20mm 18mm;
-  box-shadow:0 2px 10px rgba(0,0,0,.15);font-family:'Times New Roman',serif;font-size:13.5pt;line-height:1.5;color:#111;
-}
-.doc-page[contenteditable]:focus{outline:2px dashed var(--primary);outline-offset:4px;}
-.doc-center{text-align:center;}
-.doc-bold{font-weight:700;}
-.doc-italic{font-style:italic;}
-.doc-title{font-size:15pt;font-weight:700;margin:14px 0 4px;}
-.doc-field-line{margin:8px 0;}
-.doc-field-line .fill{border-bottom:1px dotted #444;display:inline-block;min-width:160px;padding:0 4px;}
-table.doc-table{width:100%;border-collapse:collapse;margin:14px 0;font-size:10.5pt;table-layout:fixed;}
-table.doc-table th, table.doc-table td{border:1px solid #333;padding:5px 6px;vertical-align:top;overflow-wrap:break-word;word-break:break-word;}
-table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
-.doc-signature{display:flex;justify-content:flex-end;margin-top:30px;}
-.doc-signature-block{text-align:center;width:260px;}
-.doc-signature-block .sign-space{height:70px;}
+#commitmentContainer{width:max-content;min-width:100%;}
 
 /* ---------- MODAL XUẤT TRANG IN ----------------------------------------------
    Chỉ là giao diện chọn cột/khổ giấy. Bản in thật được dựng trong 1 iframe ẩn
@@ -388,12 +374,16 @@ table.doc-table th{background:#f2f2f2;text-align:center;font-weight:700;}
 .toast.hidden{display:none;}
 .toast.error{background:var(--danger);}
 
-/* ---------- PRINT ---------- */
+/* ---------- PRINT ----------
+   Nút "In / Xuất PDF" in qua iframe riêng (printCommitments() trong app.js). Khối dưới chỉ là dự phòng
+   khi người dùng nhấn Ctrl+P lúc đang mở Bản cam kết: gỡ giới hạn chiều cao/cuộn của modal để không bị cắt trang. */
 @media print{
   body *{visibility:hidden;}
   #commitmentContainer, #commitmentContainer *{visibility:visible;}
-  #commitmentContainer{position:absolute;left:0;top:0;width:100%;}
-  .doc-page{box-shadow:none;margin:0;page-break-after:always;width:auto;min-height:auto;}
+  .modal-overlay{position:absolute;inset:auto;left:0;top:0;width:100%;background:none;display:block;}
+  .modal, .modal-body{max-height:none;overflow:visible;width:auto;max-width:none;padding:0;background:none;border-radius:0;}
+  #commitmentContainer{position:absolute;left:0;top:0;width:100%;min-width:0;}
+  .doc-page{box-shadow:none;margin:0;break-after:page;page-break-after:always;}
 }
 
 /* Tối ưu mobile: cuộn ngang/dọc mượt hơn (quán tính) trên iOS/Safari cho các

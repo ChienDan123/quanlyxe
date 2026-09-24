@@ -3176,6 +3176,7 @@ function createCommitmentFromSelection() {
   state.commitmentDocs = Array.from(groups.values());
   renderAllCommitmentDocs();
   openModal('commitmentOverlay');
+  if (typeof ensureDocxLib === 'function') ensureDocxLib().catch(() => {}); // nạp sẵn thư viện Word
 }
 
 $('#btnCreateCommitment').addEventListener('click', createCommitmentFromSelection);
@@ -3189,10 +3190,81 @@ function renderAllCommitmentDocs() {
   $('#docCounter').textContent = `${state.commitmentDocs.length} bản cam kết`;
 }
 
-// Ghép nhiều dòng nội dung (textarea) thành các <div class="doc-field-line">.
-function multilineToFieldLines(text, extraClass) {
+/* ---- 12b. THỂ THỨC BẢN CAM KẾT (dùng chung cho xem trước / in PDF / Word) ----
+   Khổ A4, lề theo Nghị định 30/2020/NĐ-CP: trên 20mm, dưới 20mm, trái 30mm, phải 15mm
+   => vùng nội dung rộng 165mm (= 9354 twips). Phông Times New Roman 13pt.
+   Bảng luôn có tổng độ rộng = vùng nội dung nên KHÔNG tràn trang; ô dài tự xuống dòng. */
+const DOC_TEXT_WIDTH = 9354; // twips (1mm ≈ 56.7 twips)
+const DOC_TABLE_COLS = [ // tổng = DOC_TEXT_WIDTH
+  { w: 640,  head: 'STT' },
+  { w: 1400, head: 'Biển số' },
+  { w: 3050, head: 'Loại xe, nhãn hiệu, số loại<br><span class="nb">(kèm Số khung / Số máy)</span>' },
+  { w: 1500, head: 'GCNĐKX số;<br>cấp ngày' },
+  { w: 1550, head: 'Tình trạng xe<br><span class="nb">(còn sử dụng / đã bán)</span>' },
+  { w: 1214, head: 'Ghi chú' },
+];
+
+// CSS duy nhất của Bản cam kết: được nạp vào trang (xem trước) và chép vào iframe khi In/PDF.
+const COMMITMENT_DOC_CSS = `
+.doc-page{box-sizing:border-box;background:#fff;color:#000;width:210mm;min-height:297mm;margin:0 auto 20px;
+  padding:20mm 15mm 20mm 30mm;box-shadow:0 2px 10px rgba(0,0,0,.15);
+  font-family:'Times New Roman',Times,serif;font-size:13pt;line-height:1.3;}
+.doc-page *{box-sizing:border-box;}
+.doc-page:focus{outline:2px dashed #1e5fbf;outline-offset:4px;}
+.doc-page u{text-decoration:underline;text-underline-offset:2px;}
+.doc-quochieu{margin:0;text-align:center;font-weight:700;font-size:13pt;}
+.doc-tieungu{margin:0;text-align:center;font-weight:700;font-size:14pt;}
+.doc-title{margin:18pt 0 2pt;text-align:center;font-weight:700;font-size:14pt;}
+.doc-trichyeu{margin:0 auto;max-width:125mm;text-align:center;font-weight:700;}
+.doc-rule{width:40mm;margin:4pt auto 12pt;border-top:1px solid #000;height:0;}
+.doc-kinhgui{margin:6pt 0 8pt;text-align:center;font-weight:700;}
+.doc-p{margin:0 0 4pt;text-align:justify;text-indent:10mm;orphans:2;widows:2;}
+.doc-heading{margin:8pt 0 3pt;text-align:justify;font-weight:700;break-after:avoid;page-break-after:avoid;}
+.doc-fline{display:flex;align-items:baseline;gap:4mm;margin:0 0 3pt;}
+.doc-fline .f{display:flex;align-items:baseline;flex:1 1 0;min-width:0;}
+.doc-fline .l{white-space:nowrap;padding-right:2mm;}
+.doc-fline .v{flex:1 1 auto;min-width:8mm;min-height:1.3em;padding:0 1mm;border-bottom:1px dotted #000;overflow-wrap:anywhere;}
+.doc-fline .v:focus,.doc-table td:focus{outline:1px dashed #1e5fbf;}
+table.doc-table{width:100%;table-layout:fixed;border-collapse:collapse;margin:6pt 0 10pt;font-size:11pt;line-height:1.25;}
+table.doc-table th,table.doc-table td{border:1px solid #000;padding:1.2mm 1.8mm;vertical-align:top;
+  overflow-wrap:anywhere;word-break:break-word;text-align:left;}
+table.doc-table th{background:#f2f2f2;text-align:center;vertical-align:middle;font-weight:700;}
+table.doc-table td.c{text-align:center;}
+table.doc-table .nb{font-weight:400;}
+table.doc-table .sub{font-size:10pt;}
+table.doc-table thead{display:table-header-group;}
+table.doc-table tr{break-inside:avoid;page-break-inside:avoid;}
+.doc-sign{display:flex;justify-content:flex-end;margin-top:12pt;break-inside:avoid;page-break-inside:avoid;}
+.doc-sign-block{width:75mm;text-align:center;}
+.doc-sign-block .doc-bold{font-weight:700;}
+.doc-sign-block .doc-italic{font-style:italic;}
+.doc-sign-block .sign-space{height:26mm;}
+`;
+// Riêng khi in: bỏ khung giấy giả lập; lề do @page đảm nhiệm nên không bị tràn / mất lề.
+const COMMITMENT_PRINT_CSS = `
+@page{size:A4;margin:20mm 15mm 20mm 30mm;}
+html,body{margin:0;padding:0;background:#fff;}
+.doc-page{width:auto;min-height:0;margin:0;padding:0;box-shadow:none;break-after:page;page-break-after:always;}
+.doc-page:last-child{break-after:auto;page-break-after:auto;}
+`;
+(function injectCommitmentCss() {
+  const st = document.createElement('style');
+  st.id = 'commitmentDocCss';
+  st.textContent = COMMITMENT_DOC_CSS;
+  document.head.appendChild(st);
+})();
+
+// Ghép nhiều dòng nội dung (textarea) thành các đoạn văn đánh số 1., 2., 3. ...
+function multilineToFieldLines(text) {
   return (text || '').split('\n').map(l => l.trim()).filter(Boolean)
-    .map((line, i) => `<div class="doc-field-line ${extraClass || ''}">${i + 1}. ${escapeHtml(line)}</div>`).join('');
+    .map((line, i) => `<div class="doc-p">${i + 1}. ${escapeHtml(line)}</div>`).join('');
+}
+
+// Một dòng điền thông tin: [{label, value}, ...]. Giá trị đặt trên đường chấm chấm (gạch chân).
+function docFieldLine(fields) {
+  return `<div class="doc-fline">${fields.map(f =>
+    `<span class="f"><span class="l">${escapeHtml(f.label)}</span><span class="v" contenteditable="true">${escapeHtml(f.value || '')}</span></span>`
+  ).join('')}</div>`;
 }
 
 function buildDocPageElement(doc, index) {
@@ -3206,78 +3278,51 @@ function buildDocPageElement(doc, index) {
     .filter(v => /bán|chuyển nhượng|cho|tặng/i.test(v.trangThaiXe || ''))
     .map(v => v.bienSo).filter(Boolean).join(', ');
 
-  // Cột "Loại xe, nhãn hiệu, số loại" GỘP CHUNG với "Số khung + Số máy" trong 1 cột
-  // để tránh tràn trang khi in (theo yêu cầu bố cục).
-  const rowsHtml = doc.vehicles.map((v, i) => `
-    <tr>
-      <td style="text-align:center;">${i + 1}</td>
-      <td>${escapeHtml(v.bienSo)}</td>
-      <td>
-        ${escapeHtml(v.loaiXe)}${v.nhanHieu ? ' - ' + escapeHtml(v.nhanHieu) : ''}<br>
-        <span style="font-size:9.5pt;color:#333;">Số khung: ${escapeHtml(v.soKhung) || '—'}</span><br>
-        <span style="font-size:9.5pt;color:#333;">Số máy: ${escapeHtml(v.soMay) || '—'}</span>
-      </td>
-      <td class="fill" contenteditable="true"></td>
-      <td>${escapeHtml(v.trangThaiXe) || '<span class="fill" contenteditable="true"></span>'}</td>
-      <td>${escapeHtml(v.ghiChu) || '<span class="fill" contenteditable="true"></span>'}</td>
-    </tr>
-  `).join('');
+  const colsHtml = DOC_TABLE_COLS.map(c => `<col style="width:${(c.w / DOC_TEXT_WIDTH * 100).toFixed(2)}%">`).join('');
+  const headHtml = DOC_TABLE_COLS.map(c => `<th>${c.head}</th>`).join('');
+  const rowsHtml = doc.vehicles.map((v, i) => {
+    const kind = [v.loaiXe, v.nhanHieu].filter(Boolean).map(escapeHtml).join(' - ');
+    return `<tr>` +
+      `<td class="c">${i + 1}</td>` +
+      `<td>${escapeHtml(v.bienSo)}</td>` +
+      `<td>${kind}<br><span class="sub">Số khung: ${escapeHtml(v.soKhung) || '…'}</span><br><span class="sub">Số máy: ${escapeHtml(v.soMay) || '…'}</span></td>` +
+      `<td>Số: ............<br>Ngày: ..........</td>` +
+      `<td>${escapeHtml(v.trangThaiXe) || '..........'}</td>` +
+      `<td>${escapeHtml(v.ghiChu) || '..........'}</td>` +
+      `</tr>`;
+  }).join('');
 
-  wrapper.innerHTML = `
-    <div class="doc-center doc-bold">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</div>
-    <div class="doc-center doc-bold">Độc lập - Tự do - Hạnh phúc</div>
-    <div class="doc-center doc-title">BẢN CAM KẾT</div>
-    <div class="doc-center doc-italic">(Về việc kê khai, xác nhận tình trạng phương tiện và cam kết trách nhiệm đối với phương tiện đứng tên sở hữu)</div>
-
-    <div class="doc-field-line">${escapeHtml(tpl.kinhGui)}</div>
-
-    <div class="doc-field-line">Tên tôi là (chủ xe đứng tên trong Giấy chứng nhận đăng ký xe):</div>
-    <div class="doc-field-line">Họ và tên: <span class="fill" contenteditable="true">${escapeHtml(doc.chuXe)}</span></div>
-    <div class="doc-field-line">Ngày, tháng, năm sinh: <span class="fill" contenteditable="true">......................</span></div>
-    <div class="doc-field-line">Số CCCD/Mã định danh cá nhân: <span class="fill" contenteditable="true">${escapeHtml(doc.cccd)}</span></div>
-    <div class="doc-field-line">Ngày cấp: <span class="fill" contenteditable="true">.................</span> &nbsp; Nơi cấp: <span class="fill" contenteditable="true">.................</span></div>
-    <div class="doc-field-line">Địa chỉ thường trú: <span class="fill" contenteditable="true">${escapeHtml(doc.diaChi)}</span></div>
-    <div class="doc-field-line">Số điện thoại liên hệ: <span class="fill" contenteditable="true">${escapeHtml(doc.phones)}</span></div>
-
-    <div class="doc-field-line">Là chủ sở hữu phương tiện có thông tin như sau:</div>
-
-    <table class="doc-table">
-      <thead>
-        <tr>
-          <th style="width:6%;">STT</th>
-          <th style="width:14%;">Biển số</th>
-          <th style="width:34%;">Loại xe, nhãn hiệu, số loại<br>(kèm Số khung/Số máy)</th>
-          <th style="width:16%;">GCNĐKX số;<br>cấp ngày</th>
-          <th style="width:14%;">Tình trạng xe<br><span style="font-weight:400;">(còn sử dụng/đã bán)</span></th>
-          <th style="width:16%;">Ghi chú</th>
-        </tr>
-      </thead>
-      <tbody>${rowsHtml}</tbody>
-    </table>
-
-    <div class="doc-field-line">Nay tôi làm Bản cam kết này để kê khai, xác nhận tình trạng phương tiện nêu trên và cam đoan, chịu trách nhiệm về các nội dung sau đây (đối chiếu theo tình trạng từng xe đã kê khai tại cột "Tình trạng xe" nêu trên):</div>
-
-    <div class="doc-field-line doc-bold">I. Đối với phương tiện đã bán/chuyển nhượng/cho/tặng nhưng không xác định được thông tin người mua/người đang sử dụng xe</div>
-    ${soldPlates ? `<div class="doc-field-line">Các phương tiện liên quan có biển số: <span class="fill" contenteditable="true">${escapeHtml(soldPlates)}</span>.</div>` : ''}
-    ${multilineToFieldLines(tpl.mucI)}
-
-    <div class="doc-field-line doc-bold">II. Đối với phương tiện hư hỏng, không còn hoạt động hoặc bị mất:</div>
-    ${multilineToFieldLines(tpl.mucII)}
-    
-    <div class="doc-field-line doc-bold">III. Đối với phương tiện còn đang sử dụng (ngoài những phương tiện ở mục I và mục II):</div>
-    ${multilineToFieldLines(tpl.mucIII)}
-
-    <div class="doc-field-line">${escapeHtml(tpl.camDoan)}</div>
-
-    <div class="doc-signature">
-      <div class="doc-signature-block">
-        <div class="doc-italic">${escapeHtml(tpl.diaDanh)}, ngày ..... tháng ..... năm ..........</div>
-        <div class="doc-bold" style="margin-top:6px;">NGƯỜI CAM KẾT</div>
-        <div class="doc-italic">(Ký, ghi rõ họ tên)</div>
-        <div class="sign-space"></div>
-      </div>
-    </div>
-  `;
+  wrapper.innerHTML =
+    `<div class="doc-quochieu">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</div>` +
+    `<div class="doc-tieungu"><u>Độc lập - Tự do - Hạnh phúc</u></div>` +
+    `<div class="doc-title">BẢN CAM KẾT</div>` +
+    `<div class="doc-trichyeu">Về việc kê khai, xác nhận tình trạng phương tiện và cam kết trách nhiệm đối với phương tiện đứng tên sở hữu</div>` +
+    `<div class="doc-rule"></div>` +
+    `<div class="doc-kinhgui">${escapeHtml(tpl.kinhGui)}</div>` +
+    `<div class="doc-p">Tên tôi là (chủ xe đứng tên trong Giấy chứng nhận đăng ký xe):</div>` +
+    docFieldLine([{ label: 'Họ và tên:', value: doc.chuXe }]) +
+    docFieldLine([{ label: 'Ngày, tháng, năm sinh:', value: '' }]) +
+    docFieldLine([{ label: 'Số CCCD/Mã định danh cá nhân:', value: doc.cccd }]) +
+    docFieldLine([{ label: 'Ngày cấp:', value: '' }, { label: 'Nơi cấp:', value: '' }]) +
+    docFieldLine([{ label: 'Địa chỉ thường trú:', value: doc.diaChi }]) +
+    docFieldLine([{ label: 'Số điện thoại liên hệ:', value: doc.phones }]) +
+    `<div class="doc-p">Là chủ sở hữu phương tiện có thông tin như sau:</div>` +
+    `<table class="doc-table"><colgroup>${colsHtml}</colgroup><thead><tr>${headHtml}</tr></thead><tbody>${rowsHtml}</tbody></table>` +
+    `<div class="doc-p">Nay tôi làm Bản cam kết này để kê khai, xác nhận tình trạng phương tiện nêu trên và cam đoan, chịu trách nhiệm về các nội dung sau đây (đối chiếu theo tình trạng từng xe đã kê khai tại cột "Tình trạng xe" nêu trên):</div>` +
+    `<div class="doc-heading">I. Đối với phương tiện <u>đã bán/chuyển nhượng/cho/tặng</u> nhưng không xác định được thông tin người mua/người đang sử dụng xe:</div>` +
+    (soldPlates ? docFieldLine([{ label: 'Các phương tiện liên quan có biển số:', value: soldPlates }]) : '') +
+    multilineToFieldLines(tpl.mucI) +
+    `<div class="doc-heading">II. Đối với phương tiện <u>hư hỏng, không còn hoạt động hoặc bị mất</u>:</div>` +
+    multilineToFieldLines(tpl.mucII) +
+    `<div class="doc-heading">III. Đối với phương tiện <u>còn đang sử dụng</u> (ngoài những phương tiện ở mục I và mục II):</div>` +
+    multilineToFieldLines(tpl.mucIII) +
+    `<div class="doc-p">${escapeHtml(tpl.camDoan)}</div>` +
+    `<div class="doc-sign"><div class="doc-sign-block">` +
+      `<div class="doc-italic">${escapeHtml(tpl.diaDanh)}, ngày ..... tháng ..... năm ..........</div>` +
+      `<div class="doc-bold">NGƯỜI CAM KẾT</div>` +
+      `<div class="doc-italic">(Ký, ghi rõ họ tên)</div>` +
+      `<div class="sign-space"></div>` +
+    `</div></div>`;
   return wrapper;
 }
 
@@ -3291,28 +3336,94 @@ function scrollDoc(delta) {
   pages[currentDocScrollIndex].scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-$('#btnPrint').addEventListener('click', () => window.print());
+// In / Xuất PDF: dựng bản in trong iframe ẩn (khổ A4 + @page lề chuẩn). Không in trực tiếp từ
+// cửa sổ modal vì modal bị giới hạn chiều cao/overflow nên nội dung bị cắt và tràn trang.
+function printCommitments() {
+  const pages = $all('.doc-page', $('#commitmentContainer'));
+  if (!pages.length) { toast('Chưa có bản cam kết nào để in.', true); return; }
+  const body = pages.map(p => {
+    const c = p.cloneNode(true); // lấy đúng nội dung người dùng đã chỉnh sửa
+    c.removeAttribute('contenteditable'); c.removeAttribute('data-doc-index');
+    c.querySelectorAll('[contenteditable]').forEach(e => e.removeAttribute('contenteditable'));
+    return c.outerHTML;
+  }).join('');
+  const html = `<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><title>Bản cam kết</title>` +
+    `<style>${COMMITMENT_DOC_CSS}${COMMITMENT_PRINT_CSS}</style></head><body>${body}</body></html>`;
+
+  const old = document.getElementById('commitmentPrintFrame');
+  if (old) old.remove();
+  const iframe = document.createElement('iframe');
+  iframe.id = 'commitmentPrintFrame';
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.cssText = 'position:fixed;left:-99999px;top:0;border:0;width:210mm;height:297mm;';
+  iframe.onload = () => {
+    const w = iframe.contentWindow;
+    const go = () => {
+      w.onafterprint = () => setTimeout(() => iframe.remove(), 500);
+      w.focus(); w.print();
+    };
+    if (w.document.fonts && w.document.fonts.ready) w.document.fonts.ready.then(() => setTimeout(go, 50)); else setTimeout(go, 100);
+  };
+  iframe.srcdoc = html;
+  document.body.appendChild(iframe);
+}
+$('#btnPrint').addEventListener('click', printCommitments);
 
 /* ---------------------------- 13. TẢI VỀ WORD (.docx) ----------------------- */
+// Lỗi cũ: index.html trỏ tới docx@8.5.0/build/index.js — file này KHÔNG tồn tại trong gói docx 8.5.0
+// (bản chạy trên trình duyệt là build/index.umd.js) nên thư viện không bao giờ nạp được.
+// Nay: nạp theo yêu cầu, ưu tiên bản đặt cùng ứng dụng (lib/docx.umd.js, dùng được khi offline),
+// nếu thiếu thì thử lần lượt các CDN.
+const DOCX_SOURCES = [
+  'lib/docx.umd.js',
+  'https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js',
+  'https://unpkg.com/docx@8.5.0/build/index.umd.js',
+];
+let docxLoadPromise = null;
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onload = () => (typeof docx !== 'undefined' && docx.Packer) ? resolve() : reject(new Error('Không nhận ra thư viện: ' + src));
+    s.onerror = () => { s.remove(); reject(new Error('Không tải được: ' + src)); };
+    document.head.appendChild(s);
+  });
+}
+function ensureDocxLib() {
+  if (typeof docx !== 'undefined' && docx.Packer) return Promise.resolve();
+  if (!docxLoadPromise) {
+    docxLoadPromise = (async () => {
+      for (const src of DOCX_SOURCES) {
+        try { await loadScriptOnce(src); return; } catch (e) { console.warn(e.message); }
+      }
+      throw new Error('docx-load-failed');
+    })().catch(err => { docxLoadPromise = null; throw err; }); // cho phép thử lại lần sau
+  }
+  return docxLoadPromise;
+}
+
 $('#btnDownloadWord').addEventListener('click', async () => {
-  if (typeof docx === 'undefined') { toast('Không tải được thư viện docx (kiểm tra kết nối mạng).', true); return; }
   const pages = $all('.doc-page', $('#commitmentContainer'));
   if (!pages.length) { toast('Chưa có bản cam kết nào để tải.', true); return; }
   toast('Đang tạo file Word...');
+  try { await ensureDocxLib(); }
+  catch (e) { toast('Không tải được thư viện docx. Hãy kiểm tra kết nối mạng hoặc đặt file lib/docx.umd.js cạnh index.html.', true); return; }
+  let okCount = 0;
   for (let i = 0; i < pages.length; i++) {
     try {
       const doc = buildDocxFromPage(pages[i]);
       const blob = await docx.Packer.toBlob(doc);
       const ownerName = (state.commitmentDocs[i] && state.commitmentDocs[i].chuXe) || `BanCamKet_${i + 1}`;
       downloadBlob(blob, `BanCamKet_${sanitizeFilename(ownerName)}.docx`);
-      await new Promise(res => setTimeout(res, 350));
+      okCount++;
+      await new Promise(res => setTimeout(res, 500));
     } catch (err) {
       console.error(err);
       toast('Lỗi khi tạo file Word cho bản #' + (i + 1), true);
     }
   }
   // Đánh dấu "đã xuất bản cam kết" ngược về Sheet (nếu đang ở chế độ 2 chiều).
-  await markExportedOnSheet();
+  if (okCount) await markExportedOnSheet();
 });
 
 // LOCAL-FIRST: đưa việc đánh dấu ngày xuất cam kết vào hàng đợi đồng bộ ngầm
@@ -3340,80 +3451,183 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
-function buildDocxFromPage(pageEl) {
-  const { Document, Paragraph, TextRun, AlignmentType } = docx;
-  const children = [];
-
-  Array.from(pageEl.children).forEach(node => {
-    const tag = node.tagName.toLowerCase();
-    if (tag === 'table') {
-      children.push(buildDocxTable(node, docx));
-      children.push(new Paragraph({ text: '' }));
-      return;
-    }
-    if (node.classList.contains('doc-signature')) {
-      const block = node.querySelector('.doc-signature-block');
-      const lines = block ? Array.from(block.children).map(c => c.textContent.trim()).filter(Boolean) : [];
-      lines.forEach((line, idx) => {
-        children.push(new Paragraph({
-          alignment: AlignmentType.RIGHT,
-          children: [new TextRun({ text: line, bold: idx === 1, italics: idx === 0 || idx === 2 })]
-        }));
-      });
-      children.push(new Paragraph({ text: '' }));
-      children.push(new Paragraph({ text: '' }));
-      return;
-    }
-    const text = node.textContent.replace(/\s+/g, ' ').trim();
-    if (!text) return;
-    const alignment = node.classList.contains('doc-center') ? AlignmentType.CENTER : AlignmentType.LEFT;
-    const bold = node.classList.contains('doc-bold');
-    const italics = node.classList.contains('doc-italic');
-    const isTitle = node.classList.contains('doc-title');
-    children.push(new Paragraph({
-      alignment,
-      spacing: { after: 120 },
-      children: [new TextRun({ text, bold: bold || isTitle, italics, size: isTitle ? 30 : undefined })]
-    }));
+// Tách nội dung inline của 1 node thành các "dòng", mỗi dòng gồm các đoạn {text,b,i,u,size}.
+// Nhận biết <b>/<strong>, <i>/<em>, <u>; <br> hoặc <div>/<p> lồng nhau (do người dùng nhấn Enter
+// khi chỉnh sửa) tạo dòng mới.
+function docxInlineLines(node, base) {
+  const lines = [[]];
+  const cur = () => lines[lines.length - 1];
+  const walk = (n, fmt) => {
+    n.childNodes.forEach(ch => {
+      if (ch.nodeType === 3) {
+        const t = ch.nodeValue.replace(/[\s\u00a0]+/g, ' ');
+        if (t) cur().push({ text: t, b: fmt.b, i: fmt.i, u: fmt.u, size: fmt.size });
+      } else if (ch.nodeType === 1) {
+        const tag = ch.tagName.toLowerCase();
+        if (tag === 'br') { lines.push([]); return; }
+        const f = { ...fmt };
+        if (tag === 'b' || tag === 'strong') f.b = true;
+        if (tag === 'i' || tag === 'em') f.i = true;
+        if (tag === 'u') f.u = true;
+        if (ch.classList.contains('nb')) f.b = false;
+        if (ch.classList.contains('sub')) f.size = 20;
+        const block = tag === 'div' || tag === 'p';
+        if (block && cur().length) lines.push([]);
+        walk(ch, f);
+        if (block && cur().length) lines.push([]);
+      }
+    });
+  };
+  walk(node, base);
+  // Cắt khoảng trắng đầu/cuối dòng, bỏ dòng rỗng ở hai đầu.
+  lines.forEach(l => {
+    if (l.length) { l[0].text = l[0].text.replace(/^\s+/, ''); l[l.length - 1].text = l[l.length - 1].text.replace(/\s+$/, ''); }
   });
-
-  return new Document({ sections: [{ children }] });
+  const clean = lines.map(l => l.filter(p => p.text));
+  while (clean.length && !clean[0].length) clean.shift();
+  while (clean.length && !clean[clean.length - 1].length) clean.pop();
+  return clean;
 }
 
-function buildDocxTable(tableEl, docxLib) {
-  const { Table, TableRow, TableCell, Paragraph, TextRun, AlignmentType, WidthType, ShadingType } = docxLib;
-  const rows = Array.from(tableEl.querySelectorAll('tr'));
-  if (!rows.length) return new Paragraph({ text: '' });
-  const numCols = rows[0].children.length;
-  const totalWidth = 9350;
-  // Giữ tỉ lệ độ rộng tương đối giống bản xem trước (cột nội dung xe được rộng
-  // nhất vì đã gộp Loại xe/Nhãn hiệu + Số khung/Số máy vào chung một cột).
-  const relWidths = [0.06, 0.14, 0.34, 0.16, 0.14, 0.16];
-  const colWidths = numCols === relWidths.length
-    ? relWidths.map(r => Math.floor(totalWidth * r))
-    : Array(numCols).fill(Math.floor(totalWidth / numCols));
+function buildDocxFromPage(pageEl) {
+  const D = docx;
+  const { Document, Paragraph, TextRun, AlignmentType, Tab, TabStopType, LeaderType, BorderStyle, UnderlineType } = D;
+  const W = DOC_TEXT_WIDTH;
+  const children = [];
 
-  const docxRows = rows.map(tr => {
-    const isHeader = tr.parentElement.tagName.toLowerCase() === 'thead';
-    const cells = Array.from(tr.children).map((td, ci) => {
-      // Với ô đã gộp nội dung xe (nhiều dòng do <br>), tách thành nhiều Paragraph.
-      const lines = isHeader
-        ? [td.textContent.replace(/\s+/g, ' ').trim()]
-        : td.innerHTML.split(/<br\s*\/?>/i).map(h => h.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()).filter(l => l.length);
-      const paras = (lines.length ? lines : ['']).map(line => new Paragraph({
-        alignment: isHeader ? AlignmentType.CENTER : AlignmentType.LEFT,
-        children: [new TextRun({ text: line, bold: isHeader, size: isHeader ? undefined : 20 })]
+  const toRuns = (line, defSize) => line.map(p => new TextRun({
+    text: p.text, bold: !!p.b, italics: !!p.i, size: p.size || defSize,
+    underline: p.u ? { type: UnderlineType.SINGLE } : undefined,
+  }));
+
+  // Dựng các Paragraph từ 1 node HTML theo tuỳ chọn định dạng.
+  const addBlock = (node, o) => {
+    const lines = docxInlineLines(node, { b: !!o.bold, i: !!o.italics, u: false, size: o.size });
+    lines.forEach((line, idx) => {
+      const indent = {};
+      if (o.firstLine && idx === 0) indent.firstLine = o.firstLine;
+      if (o.left) indent.left = o.left;
+      if (o.right) indent.right = o.right;
+      children.push(new Paragraph({
+        alignment: o.alignment,
+        keepNext: !!o.keepNext,
+        keepLines: true,
+        indent,
+        spacing: { before: idx === 0 ? (o.before || 0) : 0, after: idx === lines.length - 1 ? (o.after ?? 80) : 0 },
+        children: toRuns(line, o.size),
       }));
-      return new TableCell({
-        width: { size: colWidths[ci] || Math.floor(totalWidth / numCols), type: WidthType.DXA },
-        shading: isHeader ? { type: ShadingType.CLEAR, fill: 'F2F2F2', color: 'auto' } : undefined,
-        children: paras
-      });
     });
-    return new TableRow({ children: cells });
+    return lines.length;
+  };
+
+  Array.from(pageEl.children).forEach(node => {
+    const cl = node.classList;
+    if (node.tagName.toLowerCase() === 'table') {
+      children.push(buildDocxTable(node, D));
+      children.push(new Paragraph({ spacing: { before: 0, after: 60 }, children: [] }));
+      return;
+    }
+    if (cl.contains('doc-rule')) { // đường kẻ ngắn dưới trích yếu
+      const side = Math.round((W - 2268) / 2); // 40mm
+      children.push(new Paragraph({
+        indent: { left: side, right: side },
+        border: { bottom: { style: BorderStyle.SINGLE, size: 6, space: 1, color: '000000' } },
+        spacing: { before: 0, after: 200 }, children: [],
+      }));
+      return;
+    }
+    if (cl.contains('doc-fline')) { // dòng điền: nhãn + giá trị (gạch chân) + đường chấm chấm tới hết dòng
+      const fields = Array.from(node.querySelectorAll('.f')).map(f => ({
+        label: (f.querySelector('.l')?.textContent || '').replace(/\s+/g, ' ').trim(),
+        value: (f.querySelector('.v')?.textContent || '').replace(/\s+/g, ' ').trim(),
+      }));
+      const n = fields.length || 1;
+      const runs = [];
+      fields.forEach((f, k) => {
+        runs.push(new TextRun({ text: (k ? ' ' : '') + f.label + ' ' }));
+        if (f.value) runs.push(new TextRun({ text: f.value, underline: { type: UnderlineType.DOTTED } }));
+        runs.push(new TextRun({ children: [new Tab()] }));
+      });
+      children.push(new Paragraph({
+        spacing: { before: 0, after: 60 },
+        tabStops: fields.map((_, k) => ({
+          type: k === n - 1 ? TabStopType.RIGHT : TabStopType.LEFT,
+          position: Math.round(W * (k + 1) / n), leader: LeaderType.DOT,
+        })),
+        children: runs,
+      }));
+      return;
+    }
+    if (cl.contains('doc-sign')) { // khối chữ ký: căn giữa trong khối 75mm nằm bên phải
+      const left = W - 4250;
+      const kids = Array.from(node.querySelectorAll('.doc-sign-block > div')).filter(c => !c.classList.contains('sign-space'));
+      kids.forEach((c, idx) => addBlock(c, {
+        alignment: AlignmentType.CENTER, left, keepNext: true, before: idx === 0 ? 240 : 0, after: 0,
+        bold: c.classList.contains('doc-bold'), italics: c.classList.contains('doc-italic'),
+      }));
+      for (let k = 0; k < 4; k++) {
+        children.push(new Paragraph({ keepNext: k < 3, spacing: { before: 0, after: 0 }, children: [] }));
+      }
+      return;
+    }
+    if (cl.contains('doc-quochieu')) { addBlock(node, { alignment: AlignmentType.CENTER, bold: true, after: 0 }); return; }
+    if (cl.contains('doc-tieungu'))  { addBlock(node, { alignment: AlignmentType.CENTER, bold: true, size: 28, after: 0 }); return; }
+    if (cl.contains('doc-title'))    { addBlock(node, { alignment: AlignmentType.CENTER, bold: true, size: 28, before: 360, after: 40 }); return; }
+    if (cl.contains('doc-trichyeu')) { addBlock(node, { alignment: AlignmentType.CENTER, bold: true, after: 0, left: 1400, right: 1400 }); return; }
+    if (cl.contains('doc-kinhgui'))  { addBlock(node, { alignment: AlignmentType.CENTER, bold: true, before: 120, after: 120 }); return; }
+    if (cl.contains('doc-heading'))  { addBlock(node, { alignment: AlignmentType.JUSTIFIED, bold: true, before: 160, after: 60, keepNext: true }); return; }
+    if (cl.contains('doc-p'))        { addBlock(node, { alignment: AlignmentType.JUSTIFIED, firstLine: 567, after: 80 }); return; }
+    // Khối do người dùng tự thêm khi chỉnh sửa
+    const added = addBlock(node, { alignment: AlignmentType.JUSTIFIED, after: 80 });
+    if (!added && node.querySelector('br')) children.push(new Paragraph({ children: [] }));
   });
 
-  return new Table({ columnWidths: colWidths, width: { size: totalWidth, type: WidthType.DXA }, rows: docxRows });
+  return new Document({
+    creator: 'Quản lý Phương tiện',
+    title: 'Bản cam kết',
+    styles: { default: { document: { run: { font: 'Times New Roman', size: 26 }, paragraph: { spacing: { line: 312 } } } } },
+    sections: [{
+      properties: { page: {
+        size: { width: 11906, height: 16838 }, // A4
+        margin: { top: 1134, bottom: 1134, left: 1701, right: 851 }, // 20 / 20 / 30 / 15 mm
+      } },
+      children,
+    }],
+  });
+}
+
+function buildDocxTable(tableEl, D) {
+  const { Table, TableRow, TableCell, Paragraph, TextRun, AlignmentType, WidthType, ShadingType, VerticalAlign, TableLayoutType, UnderlineType } = D;
+  const colWidths = DOC_TABLE_COLS.map(c => c.w); // tổng = bề rộng vùng nội dung => không tràn trang
+  const rows = Array.from(tableEl.querySelectorAll('tr')).map(tr => {
+    const isHeader = tr.parentElement.tagName.toLowerCase() === 'thead';
+    const cells = Array.from(tr.children).slice(0, colWidths.length).map((td, ci) => {
+      const lines = docxInlineLines(td, { b: isHeader, i: false, u: false, size: 22 });
+      const centered = isHeader || td.classList.contains('c');
+      const paras = (lines.length ? lines : [[]]).map(line => new Paragraph({
+        alignment: centered ? AlignmentType.CENTER : AlignmentType.LEFT,
+        spacing: { before: 0, after: 0, line: 260 },
+        children: line.map(p => new TextRun({
+          text: p.text, bold: !!p.b, italics: !!p.i, size: p.size || 22,
+          underline: p.u ? { type: UnderlineType.SINGLE } : undefined,
+        })),
+      }));
+      return new TableCell({
+        width: { size: colWidths[ci], type: WidthType.DXA },
+        verticalAlign: isHeader ? VerticalAlign.CENTER : VerticalAlign.TOP,
+        shading: isHeader ? { type: ShadingType.CLEAR, fill: 'F2F2F2', color: 'auto' } : undefined,
+        children: paras,
+      });
+    });
+    return new TableRow({ cantSplit: true, tableHeader: isHeader, children: cells });
+  });
+  return new Table({
+    width: { size: DOC_TEXT_WIDTH, type: WidthType.DXA },
+    columnWidths: colWidths,
+    layout: TableLayoutType.FIXED,
+    margins: { top: 60, bottom: 60, left: 100, right: 100 },
+    rows,
+  });
 }
 
 /* ---------------------------- 13b. KÉO GIÃN PANEL CHI TIẾT (DESKTOP) ------- */
