@@ -250,11 +250,12 @@
           <th>Ngày đăng ký</th>
           <th>SĐT</th>
           <th>Ghi chú</th>
+          <th>Tình trạng cam kết</th>
           <th>Người thực hiện</th>
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr><td colspan="16" class="empty-state">Chưa có dữ liệu. Vào "Cài đặt" để kết nối Google Sheet.</td></tr>
+        <tr><td colspan="17" class="empty-state">Chưa có dữ liệu. Vào "Cài đặt" để kết nối Google Sheet.</td></tr>
       </tbody>
     </table>
   </section>
@@ -375,9 +376,10 @@
         <option value="Đã bán/chuyển nhượng">Đã bán/chuyển nhượng</option>
         <option value="Đã liên hệ">Đã liên hệ</option>
         <option value="Đã xác minh">Đã xác minh</option>
-        <option value="Đã ký cam kết">Đã ký cam kết</option>
         <option value="Chưa liên hệ được">Chưa liên hệ được</option>
         <option value="Cần xác minh thêm">Cần xác minh thêm</option>
+        <option value="Đã thực hiện thu hồi">Đã thực hiện thu hồi</option>
+        <option value="Đã hoàn thành sang tên">Đã hoàn thành sang tên</option>
       </select>
       <label class="hint-label">Ghi chú thêm</label>
       <textarea id="bulkNoteText" class="tpl-textarea" rows="3" placeholder="Để trống nếu không muốn đổi ghi chú..."></textarea>
@@ -385,6 +387,13 @@
       <select id="bulkNoteMode" class="tpl-input">
         <option value="append">Nối thêm vào ghi chú hiện có của từng xe</option>
         <option value="replace">Thay thế hoàn toàn ghi chú hiện có</option>
+      </select>
+      <label class="hint-label">Tình trạng cam kết</label>
+      <select id="bulkCommitmentSelect" class="tpl-input">
+        <option value="">— Giữ nguyên Tình trạng cam kết —</option>
+        <option value="Đã ký cam kết">Đã ký cam kết</option>
+        <option value="Đã lập biên bản hướng dẫn">Đã lập biên bản hướng dẫn</option>
+        <option value="Chưa thu thập">Chưa thu thập</option>
       </select>
       <label class="hint-label">Người thực hiện</label>
       <select id="bulkAssigneeSelect" class="tpl-input">
