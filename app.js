@@ -48,6 +48,8 @@ const FIELD_MAP = [
 const COMMITMENT_OPTIONS = [
   'Đã ký cam kết', 'Đã lập biên bản hướng dẫn', 'Chưa thu thập',
 ];
+// Giá trị "Tình trạng cam kết" dùng cho bộ lọc "Loại bỏ đã ký cam kết".
+const COMMITMENT_SIGNED_VALUE = COMMITMENT_OPTIONS[0];
 // Cột dùng để khớp dòng khi ghi ngược về Sheet, theo thứ tự ưu tiên.
 const MATCH_KEY_PRIORITY = ['maId', 'motoId', 'bienSo'];
 // Tên cột trên Sheet dùng để đánh dấu đã xuất bản cam kết (tự tạo nếu Sheet chưa có).
@@ -178,6 +180,10 @@ const state = {
   page: 1,
   pageSize: 50,
   exportSelected: new Set(),
+  // Các xe được tích chọn TRONG panel Chi tiết chủ xe (Mục I-V). Chúng được
+  // "ghim" để không bị pruneSelectionToRows() tự bỏ chọn khi chúng nằm ngoài
+  // bộ lọc trang chủ — chỉ có hiệu lực khi panel còn mở (xem releaseDetailPins()).
+  detailPinnedSelection: new Set(),
   lastCsvUrl: null,
   gasUrl: null,
   mode: null, // 'gas' | 'csv'
@@ -189,7 +195,7 @@ const state = {
   // Yêu cầu 2B + Yêu cầu #6: các bộ lọc bổ sung (tích chọn).
   // excludeDone / excludeRecontact MẶC ĐỊNH BẬT (true) theo đúng yêu cầu: khi
   // mở trang, tự động loại người "đã thực hiện" và người "cần liên hệ lại".
-  extraFilters: { hasPhone: false, multiVehicle: false, excludeDone: true, excludeRecontact: true },
+  extraFilters: { hasPhone: false, multiVehicle: false, excludeDone: true, excludeRecontact: true, excludeSigned: false },
   // Yêu cầu (Lọc nhanh theo Địa bàn cũ): null = không lọc (hiện đầy đủ), hoặc
   // 1 trong các key của QUICK_DIA_BAN_OPTIONS ('tam_dan' | 'tam_thai' | 'phu_thinh').
   quickDiaBan: null,
@@ -276,6 +282,9 @@ async function runWithConcurrencyLimit(items, limit, worker) {
 function isRowDone(row) {
   return !!((row.nguoiThucHien || '').trim());
 }
+function isRowSigned(row) {
+  return normalizeName(row.tinhTrangCamKet) === normalizeName(COMMITMENT_SIGNED_VALUE);
+}
 function isRowNeedRecontact(row) {
   return normalizeName(row.trangThaiXe) === normalizeName(RECONTACT_STATUS);
 }
@@ -328,6 +337,7 @@ document.addEventListener('click', (e) => {
   const closeBtn = e.target.closest('[data-close]');
   if (closeBtn) closeModal(closeBtn.dataset.close);
   if (e.target.classList.contains('modal-overlay')) e.target.classList.add('hidden');
+  if ($('#detailOverlay').classList.contains('hidden')) releaseDetailPins();
 });
 
 function escapeHtml(s) {
@@ -971,6 +981,8 @@ function getFiltered(excludeField) {
     const hasAssigneeFilter = state.filters.nguoiThucHien && state.filters.nguoiThucHien.size > 0;
     if (state.extraFilters.excludeDone && !hasAssigneeFilter && isRowDone(row)) return false;
     if (state.extraFilters.excludeRecontact && isRowNeedRecontact(row)) return false;
+    // Bộ lọc mới: ẩn các xe đã có Tình trạng cam kết = "Đã ký cam kết".
+    if (state.extraFilters.excludeSigned && isRowSigned(row)) return false;
     // Yêu cầu (Lọc nhanh theo Địa bàn cũ): kết hợp AND với các bộ lọc khác.
     if (state.quickDiaBan && !rowMatchesQuickDiaBan(row, state.quickDiaBan)) return false;
     return true;
@@ -1284,6 +1296,7 @@ $('#btnClearFilters').addEventListener('click', () => {
   // thái mặc định của trang (BẬT — tự động loại khỏi danh sách), thay vì tắt hẳn.
   state.extraFilters.excludeDone = true;
   state.extraFilters.excludeRecontact = true;
+  state.extraFilters.excludeSigned = false;
   // Yêu cầu (Lọc nhanh theo Địa bàn cũ): "Xóa bộ lọc" cũng bỏ chọn địa bàn cũ.
   state.quickDiaBan = null;
   updateQuickDiaBanButtonsUI();
@@ -1294,6 +1307,7 @@ $('#btnClearFilters').addEventListener('click', () => {
   // được nữa (do state cũ không khớp với dòng dữ liệu hiển thị lại sau khi lọc
   // thay đổi). Nay chủ động reset hoàn toàn danh sách xe đã chọn để xuất.
   state.exportSelected.clear();
+  state.detailPinnedSelection.clear();
   refreshFilterUIs(); renderTable();
 });
 
@@ -1346,10 +1360,12 @@ function renderSortBar() {
   const chkMulti = $('#chkMultiVehicle');
   const chkDone = $('#chkExcludeDone');
   const chkRecontact = $('#chkExcludeRecontact');
+  const chkSigned = $('#chkExcludeSigned');
   if (chkPhone) chkPhone.checked = state.extraFilters.hasPhone;
   if (chkMulti) chkMulti.checked = state.extraFilters.multiVehicle;
   if (chkDone) chkDone.checked = state.extraFilters.excludeDone;
   if (chkRecontact) chkRecontact.checked = state.extraFilters.excludeRecontact;
+  if (chkSigned) chkSigned.checked = state.extraFilters.excludeSigned;
 }
 
 const sortBarEl = $('#sortBar');
@@ -1406,6 +1422,13 @@ if (sortBarEl) {
   const chkExcludeRecontactEl = $('#chkExcludeRecontact');
   if (chkExcludeRecontactEl) chkExcludeRecontactEl.addEventListener('change', (e) => {
     state.extraFilters.excludeRecontact = e.target.checked;
+    state.page = 1;
+    renderTable();
+  });
+
+  const chkExcludeSignedEl = $('#chkExcludeSigned');
+  if (chkExcludeSignedEl) chkExcludeSignedEl.addEventListener('change', (e) => {
+    state.extraFilters.excludeSigned = e.target.checked;
     state.page = 1;
     renderTable();
   });
@@ -1979,9 +2002,20 @@ function pruneSelectionToRows(visibleRows) {
   const visibleIds = new Set(visibleRows.map(r => r._rowId));
   let changed = false;
   state.exportSelected.forEach(id => {
+    // Xe được tích trong panel Chi tiết (đang mở) luôn được giữ lại, dù nằm
+    // ngoài bộ lọc trang chủ — để Bản cam kết xuất đúng các xe đã chọn.
+    if (state.detailPinnedSelection.has(id)) return;
     if (!visibleIds.has(id)) { state.exportSelected.delete(id); changed = true; }
   });
   return changed;
+}
+
+// Gọi khi panel Chi tiết đóng: bỏ ghim, rồi áp lại quy tắc "tự bỏ chọn xe không
+// còn nằm trong bộ lọc" để không còn xe chọn ẩn mà người dùng không thấy.
+function releaseDetailPins() {
+  if (!state.detailPinnedSelection.size) return;
+  state.detailPinnedSelection.clear();
+  renderTable();
 }
 
 function renderTable() {
@@ -2138,6 +2172,7 @@ $('#btnUnmarkPrinted').addEventListener('click', () => {
 $('#btnDeselectAll').addEventListener('click', () => {
   if (!state.exportSelected.size) return;
   state.exportSelected.clear();
+  state.detailPinnedSelection.clear();
   renderTable();
   // Nếu panel chi tiết đang mở, vẽ lại để đồng bộ checkbox trong các bảng mini.
   if (currentDetailRow && !$('#detailOverlay').classList.contains('hidden')) {
@@ -3039,7 +3074,8 @@ function renderDetailPanelFor(row) {
     chk.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = chk.dataset.rowid;
-      if (chk.checked) state.exportSelected.add(id); else state.exportSelected.delete(id);
+      if (chk.checked) { state.exportSelected.add(id); state.detailPinnedSelection.add(id); }
+      else { state.exportSelected.delete(id); state.detailPinnedSelection.delete(id); }
       updateSelectedCount();
       // Cập nhật lại số đếm hiển thị trên nút "Tạo Bản cam kết" trong panel.
       const btnPanel = $('#btnCreateCommitmentPanel');
@@ -3062,6 +3098,7 @@ function renderDetailPanelFor(row) {
     btnDeselectAllPanel.addEventListener('click', () => {
       if (!state.exportSelected.size) return;
       state.exportSelected.clear();
+      state.detailPinnedSelection.clear();
       renderTable();
       renderDetailPanelFor(row);
       toast('Đã bỏ chọn tất cả.');
@@ -3091,7 +3128,7 @@ function renderDetailPanelFor(row) {
       e.stopPropagation();
       const secId = btn.dataset.selectAll;
       const rows = sectionsById[secId] || [];
-      rows.forEach(r => state.exportSelected.add(r._rowId));
+      rows.forEach(r => { state.exportSelected.add(r._rowId); state.detailPinnedSelection.add(r._rowId); });
       renderDetailPanelFor(row);
       renderTable();
       toast(`Đã chọn tất cả ${rows.length} xe ở Mục ${secId} để xuất.`);
