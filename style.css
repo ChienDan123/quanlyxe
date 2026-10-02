@@ -70,6 +70,23 @@ input,select,textarea{font-family:inherit;font-size:14px;}
 .quick-diaban-btn{border:1px solid var(--border);}
 .quick-diaban-btn.active{background:var(--primary);color:#fff;border-color:var(--primary);}
 
+/* ---------- LỌC THEO vs LOẠI TRỪ ----------
+   Hai khối cùng dạng .filter-bar nhưng "Loại trừ" có viền/nền đỏ nhạt để phân biệt. */
+.filter-section-title{flex-basis:100%;font-size:13px;font-weight:700;color:var(--primary-dark);display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.filter-section-title > span:not(.exclude-summary){font-weight:400;color:var(--text-muted);font-size:12px;}
+.exclude-bar{background:#fff7f7;border-color:#f1c4c4;}
+.exclude-title{color:#9b1c1c;}
+.exclude-summary{margin-left:auto;font-size:12px;font-weight:600;color:#9b1c1c;}
+.exclude-fields{flex-basis:100%;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;}
+.exclude-field label.ex-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;color:#9b1c1c;}
+.exclude-field.ex-off > .ms-control,.exclude-field.ex-off > .addr-match-row{opacity:.45;}
+.exclude-field.ex-off label.ex-toggle span{text-decoration:line-through;}
+.exclude-bar .ms-chip{background:#fde8e8;color:#9b1c1c;}
+.exclude-bar .ms-chip-summary{background:var(--danger);color:#fff;}
+.exclude-bar .ms-input-box:focus-within{border-color:var(--danger);box-shadow:0 0 0 2px rgba(214,69,69,.15);}
+.exclude-field[data-field="diaChi"]{flex:0 1 260px;}
+.exclude-field[data-field="diaChi"] .ms-input-box{resize:horizontal;overflow:auto;width:100%;min-width:190px;max-width:900px;}
+
 /* multiselect control */
 .ms-control{position:relative;}
 .ms-input-box{

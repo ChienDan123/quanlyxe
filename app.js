@@ -174,6 +174,11 @@ const state = {
   rawData: [],
   filters: Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()])),
   msUI: Object.fromEntries(FILTER_FIELDS.map(f => [f, { search: '', open: false }])),
+  // LOẠI TRỪ (exclude): kết quả cuối = (các điều kiện "Lọc theo") TRỪ (các điều
+  // kiện loại trừ). Mỗi trường lọc có 1 tập giá trị loại trừ + 1 công tắc bật/tắt.
+  excludes: Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()])),
+  excludeOn: Object.fromEntries(FILTER_FIELDS.map(f => [f, true])),
+  msUIExclude: Object.fromEntries(FILTER_FIELDS.map(f => [f, { search: '', open: false }])),
   // Yêu cầu (Cách khớp khi tìm địa chỉ): xem ADDR_MATCH_MODES ở trên. Được lưu
   // lại cùng bộ nhớ bộ lọc (xem persistFilterState/restoreFilterState).
   addrMatchMode: ADDR_MATCH_MODE_DEFAULT,
@@ -880,6 +885,8 @@ function persistFilterState() {
   try {
     const data = {
       filters: Object.fromEntries(FILTER_FIELDS.map(f => [f, Array.from(state.filters[f] || [])])),
+      excludes: Object.fromEntries(FILTER_FIELDS.map(f => [f, Array.from(state.excludes[f] || [])])),
+      excludeOn: { ...state.excludeOn },
       extraFilters: { ...state.extraFilters },
       quickDiaBan: state.quickDiaBan,
       sortCriteria: state.sortCriteria,
@@ -896,6 +903,12 @@ function restoreFilterState() {
     if (data && data.filters) {
       FILTER_FIELDS.forEach(f => {
         state.filters[f] = new Set(Array.isArray(data.filters[f]) ? data.filters[f] : []);
+      });
+    }
+    if (data && data.excludes) {
+      FILTER_FIELDS.forEach(f => {
+        state.excludes[f] = new Set(Array.isArray(data.excludes[f]) ? data.excludes[f] : []);
+        state.excludeOn[f] = !data.excludeOn || data.excludeOn[f] !== false;
       });
     }
     if (data && data.extraFilters) Object.assign(state.extraFilters, data.extraFilters);
@@ -938,6 +951,8 @@ function processRows(rows) {
   reapplyPendingSyncToRawData();
 
   state.filters = Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()]));
+  state.excludes = Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()]));
+  state.excludeOn = Object.fromEntries(FILTER_FIELDS.map(f => [f, true]));
   // Yêu cầu (Lưu trạng thái bộ lọc đã chọn): khôi phục lại đúng các bộ lọc /
   // sắp xếp / lọc nhanh địa bàn cũ mà người dùng đã chọn ở phiên trước, thay vì
   // luôn bắt đầu từ danh sách trống mỗi lần tải dữ liệu (kể cả khi tải ngầm).
@@ -952,20 +967,33 @@ function processRows(rows) {
 }
 
 /* ---------------------------- 6. BỘ LỌC CASCADE ---------------------------- */
-function getFiltered(excludeField) {
+// Giá trị của 1 dòng có nằm trong tập `set` của trường `key` không? Dùng CHUNG
+// cho "Lọc theo" (giữ lại) và "Loại trừ" (loại bỏ) để 2 bên luôn khớp cùng quy tắc:
+//  - diaChi: khớp địa chỉ gốc HOẶC phường/xã mới;
+//  - nguoiThucHien: dòng chưa gán người được quy về UNASSIGNED_FILTER_VALUE.
+function rowValueInSet(row, key, set) {
+  if (key === 'diaChi') return set.has(row.diaChi) || set.has(row.phuongXaMoi);
+  if (key === 'nguoiThucHien') return set.has((row.nguoiThucHien || '').trim() || UNASSIGNED_FILTER_VALUE);
+  return set.has(row[key]);
+}
+
+// Kết quả = (các điều kiện "Lọc theo") TRỪ (các điều kiện "Loại trừ" đang bật).
+//  - skipIncludeField: bỏ qua điều kiện "Lọc theo" của trường này (dùng cho cascade).
+//  - skipExcludeField: bỏ qua điều kiện "Loại trừ" của trường này (dùng cho cascade).
+// Nếu 1 giá trị vừa được lọc vừa bị loại trừ thì LOẠI TRỪ thắng.
+function getFiltered(skipIncludeField, skipExcludeField) {
   return state.rawData.filter(row => {
     for (const key of FILTER_FIELDS) {
-      if (key === excludeField) continue;
+      if (key === skipIncludeField) continue;
       const set = state.filters[key];
       if (!set || set.size === 0) continue;
-      if (key === 'diaChi') {
-        if (!set.has(row.diaChi) && !set.has(row.phuongXaMoi)) return false;
-      } else if (key === 'nguoiThucHien') {
-        const val = (row.nguoiThucHien || '').trim();
-        if (!set.has(val || UNASSIGNED_FILTER_VALUE)) return false;
-      } else {
-        if (!set.has(row[key])) return false;
-      }
+      if (!rowValueInSet(row, key, set)) return false;
+    }
+    for (const key of FILTER_FIELDS) {
+      if (key === skipExcludeField) continue;
+      const set = state.excludes[key];
+      if (!state.excludeOn[key] || !set || set.size === 0) continue;
+      if (rowValueInSet(row, key, set)) return false;
     }
     // Yêu cầu 2B: bộ lọc bổ sung — chỉ giữ người có SĐT / người có nhiều xe.
     if (state.extraFilters.hasPhone && !(row.soDienThoai || '').trim()) return false;
@@ -989,8 +1017,20 @@ function getFiltered(excludeField) {
   });
 }
 
-function getOptionsFor(field) {
-  const data = getFiltered(field);
+// kind = 'include' (mặc định): các giá trị còn lại sau khi áp các điều kiện khác (cascade).
+// kind = 'exclude': các giá trị của những dòng đã qua "Lọc theo" + các loại trừ của
+// trường KHÁC — để thấy đúng những gì có thể loại trừ; luôn kèm các giá trị đang
+// bị loại trừ để người dùng còn bỏ tick được.
+function getOptionsFor(field, kind = 'include') {
+  const list = kind === 'exclude' ? collectOptions(field, getFiltered(null, field)) : collectOptions(field, getFiltered(field));
+  if (kind !== 'exclude') return list;
+  const merged = new Set(list);
+  state.excludes[field].forEach(v => merged.add(v));
+  const names = Array.from(merged).filter(v => v !== UNASSIGNED_FILTER_VALUE).sort((a, b) => a.localeCompare(b, 'vi'));
+  return merged.has(UNASSIGNED_FILTER_VALUE) ? [...names, UNASSIGNED_FILTER_VALUE] : names;
+}
+
+function collectOptions(field, data) {
   const set = new Set();
   // Bộ lọc "Người thực hiện": liệt kê đủ mọi người đang có trong danh sách
   // "Người thực hiện" (kể cả người vừa được thêm mới nhưng chưa gán cho xe
@@ -1116,12 +1156,25 @@ function compareBySortCriteria(a, b) {
 // vỡ giao diện khi chọn hàng chục/hàng trăm giá trị).
 const MS_COLLAPSE_THRESHOLD = 3;
 
-function renderMultiSelect(field) {
-  const container = $(`.ms-control[data-field="${field}"]`);
+// Ô chọn nhiều dùng chung cho 2 khối: "Lọc theo" (#filterBar) và "Loại trừ"
+// (#excludeBar). msContext() trả về đúng bộ state + vùng DOM theo `kind`; luôn
+// gọi lúc cần (không cache) vì state.filters/excludes bị gán lại khi tải dữ liệu.
+function msContext(kind) {
+  return kind === 'exclude'
+    ? { root: '#excludeBar', sets: state.excludes, ui: state.msUIExclude }
+    : { root: '#filterBar', sets: state.filters, ui: state.msUI };
+}
+function msControlEl(field, kind) {
+  return $(`${msContext(kind).root} .ms-control[data-field="${field}"]`);
+}
+
+function renderMultiSelect(field, kind = 'include') {
+  const container = msControlEl(field, kind);
   if (!container) return;
-  const ui = state.msUI[field];
-  const selected = state.filters[field];
-  const allOptions = getOptionsFor(field);
+  const ctx = msContext(kind);
+  const ui = ctx.ui[field];
+  const selected = ctx.sets[field];
+  const allOptions = getOptionsFor(field, kind);
   const searchLower = ui.search.trim().toLowerCase();
   const visibleOptions = searchLower
     ? allOptions.filter(o => optionMatchesSearch(field, filterOptionLabel(field, o), searchLower))
@@ -1163,7 +1216,7 @@ function renderMultiSelect(field) {
   // với chế độ khớp đang chọn (chỉ khác với trường 'diaChi').
   const placeholderText = field === 'diaChi'
     ? ((ADDR_MATCH_MODES.find(m => m.key === state.addrMatchMode) || {}).placeholder || 'Gõ để tìm...')
-    : 'Gõ để tìm...';
+    : (kind === 'exclude' ? 'Gõ để tìm giá trị cần loại trừ...' : 'Gõ để tìm...');
 
   container.innerHTML = `
     <div class="ms-input-box ${ui.open ? 'ms-input-box-expanded' : ''}">
@@ -1175,120 +1228,197 @@ function renderMultiSelect(field) {
 }
 
 function refreshFilterUIs() {
-  FILTER_FIELDS.forEach(renderMultiSelect);
+  FILTER_FIELDS.forEach(f => { renderMultiSelect(f, 'include'); renderMultiSelect(f, 'exclude'); });
   // Yêu cầu (Cách khớp khi tìm địa chỉ): đồng bộ lại <select> hiển thị đúng
   // chế độ đang lưu trong state (kể cả sau khi restoreFilterState() vừa nạp
-  // lại từ localStorage lúc tải dữ liệu).
-  const addrMatchModeEl = $('#addrMatchMode');
-  if (addrMatchModeEl) addrMatchModeEl.value = state.addrMatchMode;
+  // lại từ localStorage lúc tải dữ liệu). Có 2 ô chọn (Lọc theo + Loại trừ).
+  $all('.addr-match-select').forEach(el => { el.value = state.addrMatchMode; });
+  renderExcludeStatus();
 }
 
 const filterBar = $('#filterBar');
-// Yêu cầu (Cách khớp khi tìm địa chỉ): người dùng chủ động đổi chế độ bất cứ
-// lúc nào — lưu lại ngay (nhớ cho lần sau) và vẽ lại gợi ý/placeholder của ô
-// tìm địa chỉ theo chế độ mới. KHÔNG cần renderTable() vì chế độ khớp chỉ ảnh
-// hưởng tới việc TÌM/CHỌN giá trị trong ô lọc, không đổi các lựa chọn đã chọn.
-const addrMatchModeEl = $('#addrMatchMode');
-if (addrMatchModeEl) {
-  addrMatchModeEl.addEventListener('change', (e) => {
-    const val = e.target.value;
-    state.addrMatchMode = ADDR_MATCH_MODES.some(m => m.key === val) ? val : ADDR_MATCH_MODE_DEFAULT;
-    persistFilterState();
-    renderMultiSelect('diaChi');
+const excludeBar = $('#excludeBar');
+
+/* ---- Khối "Loại trừ": dựng ô cho từng trường lọc + trạng thái bật/tắt ---- */
+function buildExcludeBar() {
+  const wrap = $('#excludeFields');
+  if (!wrap) return;
+  wrap.innerHTML = FILTER_FIELDS.map(f => `
+    <div class="filter-field exclude-field" data-field="${f}">
+      <label class="ex-toggle" title="Bật/tắt điều kiện loại trừ này (giữ nguyên các giá trị đã chọn)">
+        <input type="checkbox" data-ex-toggle="${f}"> <span>Loại trừ ${escapeHtml(FILTER_LABELS[f])}</span>
+      </label>
+      ${f === 'diaChi' ? `<div class="addr-match-row">
+        <label class="addr-match-label">Cách khớp</label>
+        <select class="addr-match-select" id="addrMatchModeExclude" title="Chọn cách so khớp khi gõ tìm địa chỉ/phường-xã">
+          ${ADDR_MATCH_MODES.map(m => `<option value="${m.key}">${escapeHtml(m.label)}</option>`).join('')}
+        </select>
+      </div>` : ''}
+      <div class="ms-control${f === 'diaChi' ? ' ms-control-resizable' : ''}" data-field="${f}"></div>
+    </div>`).join('');
+}
+
+// Đồng bộ công tắc bật/tắt, kiểu hiển thị "đang tắt" và dòng tóm tắt số loại trừ.
+function renderExcludeStatus() {
+  let activeValues = 0, activeFields = 0;
+  FILTER_FIELDS.forEach(f => {
+    const on = state.excludeOn[f];
+    const n = state.excludes[f].size;
+    const field = $(`#excludeBar .exclude-field[data-field="${f}"]`);
+    if (field) {
+      field.classList.toggle('ex-off', !on);
+      field.classList.toggle('ex-has-values', n > 0);
+      const chk = field.querySelector('[data-ex-toggle]');
+      if (chk) chk.checked = on;
+    }
+    if (on && n > 0) { activeValues += n; activeFields += 1; }
+  });
+  const sum = $('#excludeSummary');
+  if (sum) sum.textContent = activeValues
+    ? `Đang loại trừ ${activeValues} giá trị ở ${activeFields} trường`
+    : 'Chưa loại trừ gì';
+  const clearBtn = $('#btnClearExcludes');
+  if (clearBtn) clearBtn.disabled = FILTER_FIELDS.every(f => state.excludes[f].size === 0);
+}
+
+// Đổi "Cách khớp" địa chỉ ở BẤT KỲ ô nào (Lọc theo / Loại trừ): dùng chung 1
+// chế độ, lưu lại và vẽ lại 2 ô địa chỉ. KHÔNG cần renderTable() vì chế độ khớp
+// chỉ ảnh hưởng việc TÌM/CHỌN giá trị, không đổi các lựa chọn đã chọn.
+document.addEventListener('change', (e) => {
+  const sel = e.target.closest && e.target.closest('.addr-match-select');
+  if (!sel) return;
+  state.addrMatchMode = ADDR_MATCH_MODES.some(m => m.key === sel.value) ? sel.value : ADDR_MATCH_MODE_DEFAULT;
+  persistFilterState();
+  $all('.addr-match-select').forEach(el => { el.value = state.addrMatchMode; });
+  renderMultiSelect('diaChi', 'include');
+  renderMultiSelect('diaChi', 'exclude');
+});
+
+/* ---- Sự kiện ô chọn nhiều: gắn cho cả "Lọc theo" và "Loại trừ" ---- */
+function bindMultiSelectEvents(rootEl, kind) {
+  const fieldOf = (el) => el.closest('.ms-control').dataset.field;
+
+  rootEl.addEventListener('focusin', (e) => {
+    const input = e.target.closest('[data-role="ms-search"]');
+    if (!input) return;
+    const field = fieldOf(input);
+    if (msContext(kind).ui[field].open) return; // đã mở sẵn -> khỏi render lại, tránh mất focus khi đang gõ
+    msContext(kind).ui[field].open = true;
+    refreshFilterUIs();
+    // refreshFilterUIs() thay mới toàn bộ DOM của các ô lọc nên ô input vừa
+    // focus bị thay bằng <input> mới và MẤT FOCUS -> phải focus lại đúng ô mới.
+    const newInput = msControlEl(field, kind).querySelector('[data-role="ms-search"]');
+    if (newInput) newInput.focus();
+  });
+  rootEl.addEventListener('input', (e) => {
+    const input = e.target.closest('[data-role="ms-search"]');
+    if (!input) return;
+    const field = fieldOf(input);
+    const ui = msContext(kind).ui[field];
+    ui.search = input.value;
+    ui.open = true;
+    renderMultiSelect(field, kind);
+    const newInput = msControlEl(field, kind).querySelector('[data-role="ms-search"]');
+    if (newInput) { newInput.focus(); newInput.selectionStart = newInput.selectionEnd = newInput.value.length; }
+  });
+  rootEl.addEventListener('keydown', (e) => {
+    const input = e.target.closest('[data-role="ms-search"]');
+    if (!input || e.key !== 'Enter') return;
+    e.preventDefault();
+    const field = fieldOf(input);
+    const ctx = msContext(kind);
+    const search = ctx.ui[field].search.trim().toLowerCase();
+    if (!search) return;
+    const matches = getOptionsFor(field, kind).filter(o => optionMatchesSearch(field, filterOptionLabel(field, o), search));
+    matches.forEach(m => ctx.sets[field].add(m));
+    ctx.ui[field].search = '';
+    state.page = 1;
+    refreshFilterUIs();
+    renderTable();
+  });
+  rootEl.addEventListener('click', (e) => {
+    const clearAllBtn = e.target.closest('[data-clear-all]');
+    const removeBtn = e.target.closest('[data-remove]');
+    const option = e.target.closest('.ms-option');
+    const control = e.target.closest('.ms-control');
+    if (!control) return;
+    const field = control.dataset.field;
+    const ctx = msContext(kind);
+    const set = ctx.sets[field];
+
+    if (clearAllBtn) {
+      e.stopPropagation();
+      set.clear();
+      state.page = 1;
+      refreshFilterUIs(); renderTable();
+      return;
+    }
+    const summaryChip = e.target.closest('[data-role="ms-summary"]');
+    if (summaryChip) {
+      const input = control.querySelector('[data-role="ms-search"]');
+      if (input) input.focus();
+      return;
+    }
+    if (removeBtn) {
+      set.delete(removeBtn.dataset.remove);
+      state.page = 1;
+      refreshFilterUIs(); renderTable();
+      return;
+    }
+    if (option) {
+      if (option.dataset.toggleAll) {
+        const toggleAllSearchLower = ctx.ui[field].search.trim().toLowerCase();
+        const visible = getOptionsFor(field, kind).filter(o => optionMatchesSearch(field, filterOptionLabel(field, o), toggleAllSearchLower));
+        const allSelected = visible.every(o => set.has(o));
+        if (allSelected) visible.forEach(o => set.delete(o));
+        else visible.forEach(o => set.add(o));
+      } else {
+        const val = option.dataset.value;
+        if (set.has(val)) set.delete(val);
+        else set.add(val);
+      }
+      state.page = 1;
+      refreshFilterUIs(); renderTable();
+    }
   });
 }
-filterBar.addEventListener('focusin', (e) => {
-  const input = e.target.closest('[data-role="ms-search"]');
-  if (!input) return;
-  const field = input.closest('.ms-control').dataset.field;
-  if (state.msUI[field].open) return; // đã mở sẵn -> khỏi render lại, tránh mất focus khi đang gõ
-  state.msUI[field].open = true;
-  refreshFilterUIs();
-  // BUG CŨ: refreshFilterUIs() thay mới toàn bộ DOM của các ô lọc (innerHTML=...),
-  // nên ô input vừa được click/focus cũng bị thay bằng 1 <input> mới hoàn toàn
-  // và MẤT FOCUS ngay lập tức -> gõ chữ vào không có tác dụng. Phải focus lại
-  // đúng ô input mới được tạo ra cho field này thì mới gõ được.
-  const newInput = $(`.ms-control[data-field="${field}"] [data-role="ms-search"]`);
-  if (newInput) newInput.focus();
-});
-filterBar.addEventListener('input', (e) => {
-  const input = e.target.closest('[data-role="ms-search"]');
-  if (!input) return;
-  const field = input.closest('.ms-control').dataset.field;
-  state.msUI[field].search = input.value;
-  state.msUI[field].open = true;
-  renderMultiSelect(field);
-  const newInput = $(`.ms-control[data-field="${field}"] [data-role="ms-search"]`);
-  if (newInput) { newInput.focus(); newInput.selectionStart = newInput.selectionEnd = newInput.value.length; }
-});
-filterBar.addEventListener('keydown', (e) => {
-  const input = e.target.closest('[data-role="ms-search"]');
-  if (!input || e.key !== 'Enter') return;
-  e.preventDefault();
-  const field = input.closest('.ms-control').dataset.field;
-  const search = state.msUI[field].search.trim().toLowerCase();
-  if (!search) return;
-  const matches = getOptionsFor(field).filter(o => optionMatchesSearch(field, filterOptionLabel(field, o), search));
-  matches.forEach(m => state.filters[field].add(m));
-  state.msUI[field].search = '';
-  state.page = 1;
-  refreshFilterUIs();
-  renderTable();
-});
-filterBar.addEventListener('click', (e) => {
-  const clearAllBtn = e.target.closest('[data-clear-all]');
-  const removeBtn = e.target.closest('[data-remove]');
-  const option = e.target.closest('.ms-option');
-  const control = e.target.closest('.ms-control');
-  if (!control) return;
-  const field = control.dataset.field;
+bindMultiSelectEvents(filterBar, 'include');
+if (excludeBar) {
+  buildExcludeBar();
+  bindMultiSelectEvents(excludeBar, 'exclude');
 
-  if (clearAllBtn) {
-    e.stopPropagation();
-    state.filters[field].clear();
+  // Bật/tắt từng điều kiện loại trừ (giữ nguyên các giá trị đã chọn).
+  excludeBar.addEventListener('change', (e) => {
+    const chk = e.target.closest('[data-ex-toggle]');
+    if (!chk) return;
+    state.excludeOn[chk.dataset.exToggle] = chk.checked;
     state.page = 1;
     refreshFilterUIs(); renderTable();
-    return;
-  }
-  const summaryChip = e.target.closest('[data-role="ms-summary"]');
-  if (summaryChip) {
-    const input = control.querySelector('[data-role="ms-search"]');
-    if (input) input.focus();
-    return;
-  }
-  if (removeBtn) {
-    state.filters[field].delete(removeBtn.dataset.remove);
+  });
+  // Xóa riêng các điều kiện loại trừ (không đụng tới "Lọc theo").
+  $('#btnClearExcludes').addEventListener('click', () => {
+    FILTER_FIELDS.forEach(f => { state.excludes[f].clear(); state.excludeOn[f] = true; state.msUIExclude[f].search = ''; });
     state.page = 1;
     refreshFilterUIs(); renderTable();
-    return;
-  }
-  if (option) {
-    if (option.dataset.toggleAll) {
-      const toggleAllSearchLower = state.msUI[field].search.trim().toLowerCase();
-      const visible = getOptionsFor(field).filter(o => optionMatchesSearch(field, o, toggleAllSearchLower));
-      const allSelected = visible.every(o => state.filters[field].has(o));
-      if (allSelected) visible.forEach(o => state.filters[field].delete(o));
-      else visible.forEach(o => state.filters[field].add(o));
-    } else {
-      const val = option.dataset.value;
-      if (state.filters[field].has(val)) state.filters[field].delete(val);
-      else state.filters[field].add(val);
-    }
-    state.page = 1;
-    refreshFilterUIs(); renderTable();
-  }
-});
+  });
+}
+// Bấm ra ngoài ô nào thì đóng dropdown của ô đó (cả "Lọc theo" lẫn "Loại trừ").
 document.addEventListener('click', (e) => {
-  FILTER_FIELDS.forEach(field => {
-    const control = $(`.ms-control[data-field="${field}"]`);
-    if (control && !control.contains(e.target) && state.msUI[field].open) {
-      state.msUI[field].open = false;
-      renderMultiSelect(field);
-    }
+  ['include', 'exclude'].forEach(kind => {
+    FILTER_FIELDS.forEach(field => {
+      const control = msControlEl(field, kind);
+      const ui = msContext(kind).ui[field];
+      if (control && !control.contains(e.target) && ui.open) {
+        ui.open = false;
+        renderMultiSelect(field, kind);
+      }
+    });
   });
 });
 $('#btnClearFilters').addEventListener('click', () => {
   FILTER_FIELDS.forEach(f => { state.filters[f].clear(); state.msUI[f].search = ''; });
+  // "Xóa bộ lọc" cũng xóa luôn các điều kiện Loại trừ và bật lại công tắc của chúng.
+  FILTER_FIELDS.forEach(f => { state.excludes[f].clear(); state.excludeOn[f] = true; state.msUIExclude[f].search = ''; });
   // Yêu cầu 2B: "Xóa bộ lọc" cũng bỏ tích 2 bộ lọc bổ sung (SĐT / nhiều xe).
   state.extraFilters.hasPhone = false;
   state.extraFilters.multiVehicle = false;

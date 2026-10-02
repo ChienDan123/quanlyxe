@@ -128,6 +128,7 @@
 
   <!-- ---- FILTER BAR ---- -->
   <section class="filter-bar" id="filterBar">
+    <div class="filter-section-title include-title">🔎 Lọc theo <span>(chỉ giữ lại các dòng khớp)</span></div>
     <div class="filter-field" data-field="bienSo">
       <label>Biển số</label>
       <div class="ms-control" data-field="bienSo"></div>
@@ -178,6 +179,19 @@
     <div class="filter-actions">
       <span id="filteredCount" class="filtered-count">0 / 0 dòng</span>
       <button id="btnClearFilters" class="btn btn-ghost">Xóa bộ lọc</button>
+    </div>
+  </section>
+
+  <!-- ---- LOẠI TRỪ: Kết quả = (Lọc theo) TRỪ (Loại trừ). Ô được dựng bằng
+       buildExcludeBar() trong app.js từ FILTER_FIELDS; mỗi trường có công tắc
+       bật/tắt riêng. ---- -->
+  <section class="filter-bar exclude-bar" id="excludeBar">
+    <div class="filter-section-title exclude-title">🚫 Loại trừ <span>(ẩn các dòng khớp khỏi kết quả — thắng cả "Lọc theo")</span>
+      <span id="excludeSummary" class="exclude-summary">Chưa loại trừ gì</span>
+    </div>
+    <div id="excludeFields" class="exclude-fields"></div>
+    <div class="filter-actions">
+      <button id="btnClearExcludes" type="button" class="btn btn-ghost" disabled>Xóa loại trừ</button>
     </div>
   </section>
 
