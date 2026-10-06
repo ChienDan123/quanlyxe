@@ -21,6 +21,7 @@
     <span id="syncStatusBadge" class="badge badge-mode hidden"></span>
   </div>
   <div class="header-right">
+    <button id="btnScan" class="btn btn-ghost" title="Quét phiếu hàng loạt (Gemini OCR)">📷 Quét phiếu</button>
     <button id="btnSettings" class="btn btn-ghost" title="Cài đặt mẫu Bản cam kết">⚙️ Cài đặt</button>
     <button id="btnReload" class="btn btn-ghost" title="Tải lại dữ liệu">⟳ Tải lại</button>
   </div>
@@ -94,6 +95,25 @@
       <p class="hint">Kết nối hoặc đổi nguồn dữ liệu Google Sheet (Apps Script đọc/ghi 2 chiều, hoặc CSV công khai chỉ đọc).</p>
       <button id="btnConnect" class="btn btn-secondary" style="margin-bottom:18px;">🔗 Kết nối Google Sheet</button>
 
+      <div class="section-title">🤖 Gemini API — Quét phiếu</div>
+      <p class="hint">Thêm <b>nhiều key</b> để xoay vòng khi một key hết quota. Key chỉ lưu trong trình duyệt này (IndexedDB), không gửi đi đâu ngoài Google và không nằm trong mã nguồn.</p>
+      <div id="geminiKeyList" class="scan-key-list"></div>
+      <div class="scan-key-add">
+        <input id="geminiKeyLabel" type="text" class="tpl-input" placeholder="Tên (VD: Key1)" autocomplete="off">
+        <input id="geminiKeyValue" type="password" class="tpl-input" placeholder="Dán API key (AIza…)" autocomplete="off">
+        <button id="btnAddGeminiKey" type="button" class="btn btn-secondary">+ Thêm key</button>
+      </div>
+      <div class="scan-params">
+        <div><label class="hint-label" for="geminiModel">Model</label>
+          <input id="geminiModel" type="text" class="tpl-input" list="geminiModelList">
+          <datalist id="geminiModelList"><option value="gemini-2.5-flash"><option value="gemini-2.5-flash-lite"><option value="gemini-2.5-pro"><option value="gemini-2.0-flash"></datalist></div>
+        <div><label class="hint-label" for="geminiTimeout">Timeout (giây)</label>
+          <input id="geminiTimeout" type="number" min="10" class="tpl-input"></div>
+        <div><label class="hint-label" for="geminiMaxWait">Số lần chờ quota tối đa</label>
+          <input id="geminiMaxWait" type="number" min="0" class="tpl-input"></div>
+      </div>
+
+      <div class="section-title">📝 Mẫu Bản cam kết</div>
       <p class="hint">Nội dung bên dưới sẽ được dùng làm mẫu mặc định mỗi khi tạo Bản cam kết mới. Thay đổi sẽ được lưu lại (trình duyệt này, và về Google Sheet nếu đã kết nối Apps Script) để lần sau không phải chỉnh lại.</p>
 
       <label class="hint-label">Nơi nhận (Kính gửi)</label>
@@ -119,6 +139,55 @@
       <div class="footer-btns">
         <button id="btnSaveTemplate" class="btn btn-primary">💾 Lưu mẫu</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL QUÉT PHIẾU (Sprint 1: thử 1 phiếu → Gemini → JSON) ============ -->
+<div id="scanModal" class="modal-overlay hidden">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2>📷 Quét phiếu</h2>
+      <button class="modal-close" data-close="scanModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="scan-topbar">
+        <span id="scanKeySummary" class="badge">Gemini: …</span>
+        <button id="scanOpenSettings" type="button" class="btn btn-ghost btn-sm">⚙️ Quản lý key</button>
+        <span id="scanDbCount" class="hint" style="margin:0"></span>
+      </div>
+
+      <div class="section-title">🧪 Thử 1 phiếu (thủ công)</div>
+      <p class="hint">Chọn ảnh JPG/PNG/WebP hoặc PDF. Mặt 2 là tuỳ chọn. Kết quả hiện ở panel debug bên dưới. (Hàng đợi batch + thư mục scan: Sprint 2.)</p>
+      <div class="scan-upload">
+        <div>
+          <label class="hint-label">Mặt 1 (bắt buộc)</label>
+          <input id="scanFileFront" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+          <div id="scanPreviewFront" class="scan-preview"></div>
+        </div>
+        <div>
+          <label class="hint-label">Mặt 2 (tuỳ chọn) <button id="btnScanClearBack" type="button" class="btn btn-ghost btn-sm">bỏ</button></label>
+          <input id="scanFileBack" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+          <div id="scanPreviewBack" class="scan-preview"></div>
+        </div>
+      </div>
+      <div class="scan-run-row">
+        <label class="chk-inline"><input type="checkbox" id="chkScanSave" checked> Lưu kết quả vào IndexedDB (đánh dấu bản ghi thử)</label>
+        <button id="btnScanRun" type="button" class="btn btn-primary">🚀 Gửi Gemini</button>
+        <button id="btnScanCancel" type="button" class="btn btn-ghost hidden">⏹ Hủy</button>
+        <span id="scanStatusText" class="hint" style="margin:0"></span>
+      </div>
+
+      <div class="section-title">🐞 Panel debug</div>
+      <div id="scanResultView" class="scan-result"></div>
+      <div class="scan-debug-head"><b>JSON thô</b> <button id="btnScanCopyJson" type="button" class="btn btn-ghost btn-sm">Copy</button></div>
+      <pre id="scanJsonRaw" class="scan-pre"></pre>
+      <div class="scan-debug-head"><b>Nhật ký</b> <button id="btnScanClearLog" type="button" class="btn btn-ghost btn-sm">Xóa log</button></div>
+      <div id="scanLog" class="scan-pre scan-log"></div>
+    </div>
+    <div class="modal-footer">
+      <button id="btnScanDeleteTests" type="button" class="btn btn-ghost btn-sm">🗑️ Xóa dữ liệu scan thử</button>
+      <span class="hint">Ảnh chứa thông tin cá nhân — chỉ lưu trên máy này.</span>
     </div>
   </div>
 </div>
@@ -454,5 +523,6 @@
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <!-- Thư viện docx (xuất Word) được nạp theo yêu cầu bởi ensureDocxLib() trong app.js: ưu tiên lib/docx.umd.js, dự phòng CDN. -->
 <script src="app.js"></script>
+<script src="scan.js"></script>
 </body>
 </html>
