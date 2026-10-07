@@ -2,9 +2,12 @@
    AppsScript_StorageOnly.gs — Apps Script RIÊNG chỉ để lưu ảnh / PDF phiếu scan (không đụng Google Sheet).
    Dùng khi chọn «Apps Script RIÊNG» ở Cài đặt → Lưu trữ. Dán toàn bộ file này vào dự án mới tại script.google.com,
    chạy hàm authorizeOnce 1 lần để cấp quyền, rồi Triển khai → Ứng dụng web (Thực thi: Tôi · Ai có quyền truy cập: Bất kỳ ai) → copy URL /exec dán vào web.
+   PHIÊN BẢN 3 (tăng tốc đa thiết bị): thêm scanGetBatch (tải nhiều ảnh 1 lượt), scanList có tham số since (chỉ liệt kê phiếu mới/đổi),
+   scanMetaBatch trả thêm mốc cập nhật (để web gộp trước khi ghi đè). Bản web mới VẪN chạy được với bản Apps Script cũ (tự lùi về cách chậm),
+   nhưng nên dán lại file này rồi Triển khai → Quản lý bản triển khai → Phiên bản mới (URL giữ nguyên) để nhanh hơn.
    ========================================================================= */
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
-function doGet() { return json_({ ok: true, service: 'QuanLyXe-PhieuScan-Storage' }); }
+function doGet() { return json_({ ok: true, service: 'QuanLyXe-PhieuScan-Storage', version: 3 }); }
 // CHẠY HÀM NÀY 1 LẦN trong trình soạn thảo (chọn «authorizeOnce» → Chạy) để cấp quyền Drive trước khi Triển khai.
 // Hàm tạo sẵn thư mục lưu ảnh và ghi log đường dẫn thư mục (xem ở Nhật ký thực thi).
 function authorizeOnce() {
@@ -19,7 +22,8 @@ function doPost(e) {
     switch (data.action) {
       case 'scanPut':       return json_(scanPut_(data));
       case 'scanGet':       return json_(scanGet_(data));
-      case 'scanList':      return json_(scanList_());
+      case 'scanGetBatch':  return json_(scanGetBatch_(data));
+      case 'scanList':      return json_(scanList_(data));
       case 'scanMetaBatch': return json_(scanMetaBatch_(data.ids));
       case 'scanInventory': return json_(scanInventory_());
       case 'scanDelete':    return json_(scanDelete_(data));
@@ -66,19 +70,46 @@ function scanGet_(p) {
   return { ok: true, mime: f.getMimeType(), b64: Utilities.base64Encode(f.getBlob().getBytes()) };
 }
 // Danh sách phiếu đã có online + thời điểm cập nhật (để máy khác biết phiếu nào mới) + danh sách phiếu ĐÃ XÓA (để máy khác dọn theo)
-function scanList_() {
-  var it = scanFolder_().getFiles(), list = [], gone = [], m;
+// p.since (ms, tùy chọn): chỉ liệt kê phiếu có meta đổi SAU mốc này -> lần đồng bộ định kỳ rất nhẹ dù kho có hàng nghìn file.
+// Trả thêm serverNow để client dùng làm mốc since lần sau (không phụ thuộc đồng hồ máy khách).
+function scanList_(p) {
+  var folder = scanFolder_(), since = Number(p && p.since) || 0, now = Date.now(), list = [], gone = [], m, it, f;
+  if (since > 0) {
+    try {
+      var iso = Utilities.formatDate(new Date(since), 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'");
+      it = folder.searchFiles("title contains '__meta' and modifiedDate > '" + iso + "'");
+      while (it.hasNext()) { f = it.next(); m = /^(.+)__meta$/.exec(f.getName()); if (m) list.push({ scanId: m[1], updated: f.getLastUpdated().getTime() }); }
+      it = folder.searchFiles("title contains '__gone'");     // danh sách đã xóa luôn trả đủ (rất nhỏ)
+      while (it.hasNext()) { m = /^(.+)__gone$/.exec(it.next().getName()); if (m) gone.push(m[1]); }
+      return { ok: true, list: list, gone: gone, serverNow: now, incremental: true };
+    } catch (e) { list = []; gone = []; /* cú pháp tìm kiếm lỗi -> lùi về duyệt toàn bộ bên dưới */ }
+  }
+  it = folder.getFiles();
   while (it.hasNext()) {
-    var f = it.next(); m = /^(.+)__(meta|gone)$/.exec(f.getName()); if (!m) continue;
+    f = it.next(); m = /^(.+)__(meta|gone)$/.exec(f.getName()); if (!m) continue;
     if (m[2] === 'meta') list.push({ scanId: m[1], updated: f.getLastUpdated().getTime() }); else gone.push(m[1]);
   }
-  return { ok: true, list: list, gone: gone };
+  return { ok: true, list: list, gone: gone, serverNow: now };
 }
-// Lấy nội dung meta của nhiều phiếu 1 lượt (client gọi từng nhóm ~15 phiếu)
+// Lấy nội dung meta của nhiều phiếu 1 lượt (client gọi từng nhóm ~15 phiếu). Trả thêm updated{id: ms} để client biết bản online mới tới đâu.
 function scanMetaBatch_(ids) {
-  var folder = scanFolder_(), metas = {};
-  (ids || []).forEach(function (id) { var f = scanFile_(folder, scanName_(id, 'meta')); if (f) metas[id] = f.getBlob().getDataAsString(); });
-  return { ok: true, metas: metas };
+  var folder = scanFolder_(), metas = {}, updated = {};
+  (ids || []).forEach(function (id) { var f = scanFile_(folder, scanName_(id, 'meta')); if (f) { metas[id] = f.getBlob().getDataAsString(); updated[id] = f.getLastUpdated().getTime(); } });
+  return { ok: true, metas: metas, updated: updated };
+}
+// Tải NHIỀU ảnh trong 1 request (tiết kiệm thời gian khởi động + độ trễ mỗi lần gọi Apps Script).
+// p.items = [{scanId, kind:'front'|'back'}]. Dừng khi tổng base64 vượt ~6 triệu ký tự -> client tự xin phần còn lại (phần chưa xử lý không có trong files).
+function scanGetBatch_(p) {
+  var folder = scanFolder_(), out = [], total = 0, LIMIT = 6e6;
+  (p.items || []).forEach(function (x) {
+    if (out.length && total > LIMIT) return;
+    if (!x || !/^(front|back)$/.test(x.kind)) return;
+    var f = scanFile_(folder, scanName_(x.scanId, x.kind));
+    if (!f) { out.push({ scanId: x.scanId, kind: x.kind, ok: false, error: 'Không thấy file trên Drive' }); return; }
+    var b64 = Utilities.base64Encode(f.getBlob().getBytes()); total += b64.length;
+    out.push({ scanId: x.scanId, kind: x.kind, ok: true, mime: f.getMimeType(), b64: b64 });
+  });
+  return { ok: true, files: out };
 }
 
 
