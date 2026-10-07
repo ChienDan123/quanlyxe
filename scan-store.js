@@ -19,13 +19,22 @@ const ScanStore = (() => {
   /* ====================================================================== */
   const setMsg = (id, html, isErr) => { const el = q(id); if (!el) return; el.innerHTML = html; el.classList.toggle('error-text', !!isErr); };
 
-  function syncSettingsUi() {
-    const c = Y.config();
-    document.querySelectorAll('input[name="scanStoreMode"]').forEach(r => { r.checked = r.value === c.mode; });
-    const u2 = q('#scanStoreUrl2'); if (u2) u2.value = c.url2 || '';
-    q('#scanStoreUrl2Row').classList.toggle('hidden', pickedMode() !== 'gas2');
-  }
   const pickedMode = () => (document.querySelector('input[name="scanStoreMode"]:checked') || {}).value || 'gas';
+  // Chỉ hiện/ẩn ô nhập URL theo lựa chọn ĐANG CHỌN trên màn hình (gọi mỗi khi bấm đổi radio).
+  // LỖI CŨ: hàm này vừa gán lại radio theo cấu hình đã lưu vừa được gắn vào sự kiện 'change' -> bấm «Apps Script RIÊNG» bị ép về lựa chọn cũ.
+  function toggleUrlRow() {
+    const m = pickedMode();
+    q('#scanStoreUrl2Row').classList.toggle('hidden', m !== 'gas2');
+    const g = q('#scanStoreGuide'); if (g) g.classList.toggle('hidden', m !== 'gas2');
+  }
+  // Nạp cấu hình ĐÃ LƯU lên màn hình — chỉ gọi lúc khởi tạo / khi mở hộp thoại, KHÔNG gắn vào sự kiện change.
+  function loadSettingsUi() {
+    const c = Y.config();
+    document.querySelectorAll('input[name="scanStoreMode"]').forEach(r => { r.disabled = false; r.checked = r.value === c.mode; });
+    const u2 = q('#scanStoreUrl2'); if (u2) { u2.value = c.url2 || ''; u2.disabled = false; u2.readOnly = false; }
+    const af = q('#scanStoreAutoFree'); if (af) af.checked = !!c.autoFree;
+    toggleUrlRow(); refreshFreeInfo();
+  }
 
   // Đổi nơi lưu: các phiếu đã lên nơi cũ KHÔNG tự sang nơi mới -> nếu người dùng đồng ý thì xóa cờ "đã lên" để lần đồng bộ sau đẩy lại toàn bộ
   async function resetCloudFlags() {
@@ -40,26 +49,86 @@ const ScanStore = (() => {
   }
 
   async function saveSettings() {
-    const mode = pickedMode(), url2 = (q('#scanStoreUrl2').value || '').trim();
-    if (mode === 'gas2' && !Y.validUrl(url2)) { setMsg('#scanStoreMsg', '❌ URL chưa đúng dạng <code>https://script.google.com/macros/s/…/exec</code>', true); return; }
+    const mode = pickedMode(), url2 = (q('#scanStoreUrl2').value || '').trim(), autoFree = !!(q('#scanStoreAutoFree') || {}).checked;
+    if (mode === 'gas2' && !Y.validUrl(url2)) { setMsg('#scanStoreMsg', '❌ URL chưa đúng dạng <code>https://script.google.com/macros/s/…/exec</code> (phải kết thúc bằng <code>/exec</code>)', true); return; }
     const before = Y.config(), oldKey = before.mode + '|' + (before.mode === 'gas2' ? before.url2 : '');
     const newKey = mode + '|' + (mode === 'gas2' ? url2 : '');
-    Y.setConfig({ mode, url2 });
+    Y.setConfig({ mode, url2, autoFree });
     let msg = '✅ Đã lưu cách lưu trữ.';
-    if (oldKey !== newKey && mode !== 'off') {
-      if (confirm('Bạn vừa đổi nơi lưu ảnh.\n\nĐẩy lại TOÀN BỘ ảnh đang có trên máy này sang nơi mới? (nên chọn OK; ảnh ở nơi cũ không bị xóa)')) {
-        const n = await resetCloudFlags(); msg += ` Sẽ đẩy lại ${n} phiếu sang nơi mới.`;
-      }
-    }
+    // Đổi nơi lưu -> TỰ đẩy lại toàn bộ ảnh đang có trên máy sang nơi mới (không hỏi; ảnh ở nơi cũ không bị xóa)
+    if (oldKey !== newKey && mode !== 'off') { const n = await resetCloudFlags(); msg += ` Đang tự đẩy ${n} phiếu sang nơi mới (chạy ngầm, không cần chờ).`; }
+    else if (mode !== 'off') msg += ' Ảnh chưa lên Drive sẽ tự được đẩy lên.';
     setMsg('#scanStoreMsg', msg); Y.refreshStatus(); if (mode !== 'off') Y.run();
   }
   async function testSettings() {
-    // Dùng đúng lựa chọn đang hiện trên màn hình (chưa cần bấm Lưu)
-    const mode = pickedMode(), url2 = (q('#scanStoreUrl2').value || '').trim(), prev = Y.config();
-    Y.setConfig({ mode, url2 }); setMsg('#scanStoreMsg', '⏳ Đang kiểm tra…');
-    const r = await Y.testConnection();
-    Y.setConfig(prev);                 // khôi phục: chỉ nút «Lưu» mới đổi cấu hình thật
-    setMsg('#scanStoreMsg', r.ok ? `✅ Kết nối được. Đang có ${r.count} phiếu online.` : '❌ ' + esc(r.error) + (/Apps Script chưa hỗ trợ|scan/i.test(r.error) ? '<br>Gợi ý: dán PHẦN 2 + 3 trong AppsScript_ScanPatch.gs rồi Deploy → New version.' : ''), !r.ok);
+    // Dùng đúng lựa chọn đang hiện trên màn hình (chưa cần bấm Lưu) — truyền thẳng vào testConnection, không đụng cấu hình đã lưu
+    const mode = pickedMode(), url2 = (q('#scanStoreUrl2').value || '').trim();
+    setMsg('#scanStoreMsg', '⏳ Đang kiểm tra…');
+    const r = await Y.testConnection({ mode, url2 });
+    setMsg('#scanStoreMsg', r.ok ? `✅ Kết nối được. Đang có ${r.count} phiếu online. Nhớ bấm «Lưu» để dùng.` : '❌ ' + esc(r.error) + (/Apps Script chưa hỗ trợ|scan|Action/i.test(r.error) ? '<br>Gợi ý: kiểm tra đã dán ĐÚNG file Apps Script và Triển khai → Phiên bản mới (xem hướng dẫn bên dưới).' : ''), !r.ok);
+  }
+
+  /* ---- Giải phóng bộ nhớ máy (xóa ảnh đã lên Drive) ---- */
+  async function refreshFreeInfo() {
+    const el = q('#scanFreeInfo'); if (!el) return;
+    try { const i = await Y.localImageBytes(); el.textContent = i.n ? `Có thể giải phóng khoảng ${fmtSize(i.bytes)} (${i.n} phiếu đã lên Drive).` : 'Chưa có phiếu nào đã lên Drive còn ảnh trên máy.'; } catch (e) { el.textContent = ''; }
+  }
+  async function freeNow() {
+    if (!Y.online()) { setMsg('#scanFreeMsg', '❌ Cần kết nối nơi lưu online để xác nhận ảnh đã lên Drive.', true); return; }
+    setMsg('#scanFreeMsg', '⏳ Đang đối chiếu với Drive…');
+    try {
+      await Y.syncNow();                                          // đẩy nốt phần còn thiếu trước
+      const dry = await Y.freeLocal({ dryRun: true });
+      if (!dry.n) { setMsg('#scanFreeMsg', `Không có phiếu nào đủ điều kiện xóa${dry.skipped ? ` (${dry.skipped} phiếu chưa xác nhận được trên Drive — giữ lại cho an toàn)` : ''}.`); return; }
+      if (!confirm(`Xóa ảnh trên máy của ${dry.n} phiếu (giải phóng ~${fmtSize(dry.bytes)})?\n\n• Chỉ xóa phiếu đã xác nhận có đủ ảnh trên Drive.\n• Dữ liệu đối chiếu vẫn giữ; mở xem lại sẽ tự tải ảnh từ Drive (cần mạng).`)) { setMsg('#scanFreeMsg', 'Đã hủy.'); return; }
+      const r = await Y.freeLocal();
+      setMsg('#scanFreeMsg', `✅ Đã giải phóng ~${fmtSize(r.bytes)} (${r.n} phiếu).${r.skipped ? ` Giữ lại ${r.skipped} phiếu chưa xác nhận được.` : ''}`);
+    } catch (e) { setMsg('#scanFreeMsg', '❌ ' + esc(e.message || e), true); }
+    refreshFreeInfo();
+  }
+
+  /* ---- Khối giao diện chèn bằng JS (hướng dẫn từng bước + giải phóng bộ nhớ) — không cần sửa index.html ---- */
+  function injectSettingsExtras() {
+    const btns = q('#btnScanStoreTest') && q('#btnScanStoreTest').parentElement;
+    const host = btns || q('#scanStoreMsg');
+    if (!host || q('#scanStoreGuide')) return;
+    const guide = document.createElement('details');
+    guide.id = 'scanStoreGuide'; guide.className = 'ss-guide'; guide.open = true;
+    guide.innerHTML = `<summary>📖 Hướng dẫn tạo «Apps Script RIÊNG» (làm 1 lần, khoảng 5 phút)</summary>
+<ol>
+<li><b>Đăng nhập Google bằng tài khoản có nhiều dung lượng Drive</b> (ảnh sẽ nằm trong Drive của tài khoản này).</li>
+<li>Mở <a href="https://script.google.com" target="_blank" rel="noopener">script.google.com</a> → bấm <b>Dự án mới</b> (New project).</li>
+<li>Xóa hết đoạn code mẫu <code>function myFunction() {}</code>.</li>
+<li>Lấy mã: bấm nút <button type="button" class="btn btn-ghost btn-sm" id="btnCopyGs">📋 Sao chép mã Apps Script</button> rồi <b>dán (Ctrl+V)</b> vào khung code. <span class="hint">(Nếu nút báo lỗi: mở file <code>AppsScript_StorageOnly.gs</code> trong repo, chọn tất cả, sao chép.)</span></li>
+<li>Bấm biểu tượng 💾 <b>Lưu</b> (hoặc Ctrl+S), đặt tên dự án tùy ý, ví dụ «LuuAnhPhieu».</li>
+<li><b>Cấp quyền:</b> ở thanh trên, chọn hàm <code>authorizeOnce</code> trong ô danh sách → bấm <b>Chạy</b> (Run) → <b>Xem lại quyền</b> → chọn tài khoản → <b>Nâng cao</b> → <b>Đi tới … (không an toàn)</b> → <b>Cho phép</b>. <span class="hint">(Google hiện cảnh báo vì script do chính bạn viết, chưa qua kiểm duyệt — bình thường.)</span></li>
+<li>Bấm <b>Triển khai</b> (Deploy) → <b>Tùy chọn triển khai mới</b> → bánh răng ⚙ chọn <b>Ứng dụng web</b>. Đặt <b>Thực thi với tư cách: Tôi</b> · <b>Ai có quyền truy cập: Bất kỳ ai</b> → <b>Triển khai</b>.</li>
+<li>Sao chép <b>URL ứng dụng web</b> (kết thúc bằng <code>/exec</code>).</li>
+<li>Quay lại đây: chọn <b>«Apps Script RIÊNG»</b> ở trên, <b>dán URL</b> vào ô → bấm <b>Kiểm tra kết nối</b> (phải hiện ✅) → bấm <b>Lưu</b>. Ảnh cũ trên máy sẽ <b>tự động</b> được đẩy lên.</li>
+</ol>
+<p class="hint">• Ảnh nằm trong thư mục <b>QuanLyXe_PhieuScan</b> trên Drive của tài khoản chủ script, ở chế độ riêng tư.<br>
+• Sau này nếu sửa code Apps Script: Triển khai → <b>Quản lý bản triển khai</b> → ✏ → Phiên bản: <b>Phiên bản mới</b> → Triển khai (URL giữ nguyên).<br>
+• Tên nút trên giao diện Google có thể khác đôi chút tùy ngôn ngữ/phiên bản.</p>`;
+    host.insertAdjacentElement('beforebegin', guide);
+
+    const free = document.createElement('div');
+    free.className = 'ss-free';
+    free.innerHTML = `<label class="ss-check"><input type="checkbox" id="scanStoreAutoFree"> Tự động xóa ảnh trên máy sau khi đã lưu lên Drive thành công <span class="hint">(giữ lại phiếu mới quét trong 1 giờ; mở xem lại sẽ tự tải từ Drive)</span></label>
+<div class="sv-actions"><button type="button" class="btn btn-ghost btn-sm" id="btnFreeLocal">🧹 Giải phóng bộ nhớ máy ngay</button><span class="hint" id="scanFreeInfo"></span></div>
+<div class="hint" id="scanFreeMsg"></div>`;
+    host.insertAdjacentElement('afterend', free);
+    q('#btnFreeLocal').addEventListener('click', freeNow);
+    q('#btnCopyGs').addEventListener('click', copyGs);
+  }
+  // Sao chép mã Apps Script riêng vào clipboard (file nằm cùng repo GitHub Pages)
+  async function copyGs() {
+    try {
+      const res = await fetch(new URL('AppsScript_StorageOnly.gs', document.baseURI).href, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const txt = await res.text();
+      await navigator.clipboard.writeText(txt);
+      toast('Đã sao chép mã Apps Script — sang trang Apps Script và dán (Ctrl+V).');
+    } catch (e) { toast('Không tự sao chép được. Hãy mở file AppsScript_StorageOnly.gs trong repo và sao chép thủ công.', true); }
   }
 
   /* ====================================================================== */
@@ -74,34 +143,99 @@ const ScanStore = (() => {
   }
   const vaultPass = () => (q('#scanVaultPass').value || '').trim();
 
-  async function vaultPush() {
-    if (!window.crypto || !crypto.subtle) { setMsg('#scanVaultMsg', '❌ Trình duyệt không hỗ trợ mã hóa (cần HTTPS).', true); return; }
-    const pass = vaultPass(); if (pass.length < 6) { setMsg('#scanVaultMsg', '❌ Mật khẩu tối thiểu 6 ký tự.', true); return; }
-    if (!Y.online()) { setMsg('#scanVaultMsg', '❌ Chưa kết nối nơi lưu online (xem mục Lưu trữ phía trên).', true); return; }
+  // Lấy + giải mã kho khóa trên Drive. Trả { exists:false } nếu chưa có; ném lỗi nếu sai mật khẩu / lỗi mạng.
+  async function vaultFetch(pass) {
+    let r;
+    try { r = await Y.call({ action: 'scanTextGet', ...VAULT }); }
+    catch (e) { if (/Chưa có trên Drive/i.test(String(e.message || e))) return { exists: false }; throw e; }
+    const box = JSON.parse(r.text);
+    let plain;
+    try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(box.iv) }, await deriveKey(pass, unb64(box.salt)), unb64(box.data)); }
+    catch (e) { throw new Error('Sai mật khẩu hoặc dữ liệu kho khóa bị hỏng.'); }
+    return { exists: true, keys: JSON.parse(new TextDecoder().decode(plain)).keys || [] };
+  }
+  // Thêm vào máy này các key còn thiếu; trả số key mới
+  async function addMissingKeys(incoming) {
+    const have = new Set((await S.keys.listKeys()).map(k => k.key)); let added = 0;
+    for (const k of incoming) { if (!k.key || have.has(k.key)) continue; const rec = await S.keys.addKey(k.label, k.key); if (k.enabled === false) await S.keys.patchKey(rec.id, { enabled: false }); have.add(k.key); added++; }
+    if (added) S.keys.refreshUi();
+    return added;
+  }
+  // GỘP rồi đẩy: lấy key từ Drive về trước (không mất key của máy khác) rồi đẩy bản đầy đủ lên. Sai mật khẩu -> dừng, KHÔNG ghi đè kho.
+  async function vaultMerge(pass) {
+    const got = await vaultFetch(pass);
+    const added = got.exists ? await addMissingKeys(got.keys) : 0;
     const keys = (await S.keys.listKeys()).map(k => ({ label: k.label, key: k.key, enabled: k.enabled }));
-    if (!keys.length) { setMsg('#scanVaultMsg', '❌ Máy này chưa có key nào để đẩy lên.', true); return; }
+    if (!keys.length) return { added, pushed: 0 };
+    const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+    const enc = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await deriveKey(pass, salt), new TextEncoder().encode(JSON.stringify({ keys })));
+    await Y.call({ action: 'scanPut', scanId: VAULT.scanId, kind: VAULT.kind, mime: 'application/json', plates: '', text: JSON.stringify({ v: 1, salt: b64(salt), iv: b64(iv), data: b64(new Uint8Array(enc)) }) });
+    return { added, pushed: keys.length };
+  }
+  const vaultReady = (msgId) => {
+    if (!window.crypto || !crypto.subtle) { setMsg(msgId, '❌ Trình duyệt không hỗ trợ mã hóa (cần HTTPS).', true); return false; }
+    if (!Y.online()) { setMsg(msgId, '❌ Chưa kết nối nơi lưu online (xem mục Lưu trữ phía trên).', true); return false; }
+    return true;
+  };
+  async function vaultPush() {
+    if (!vaultReady('#scanVaultMsg')) return;
+    const pass = vaultPass(); if (pass.length < 6) { setMsg('#scanVaultMsg', '❌ Mật khẩu tối thiểu 6 ký tự.', true); return; }
     try {
-      const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
-      const enc = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await deriveKey(pass, salt), new TextEncoder().encode(JSON.stringify({ keys })));
-      await Y.call({ action: 'scanPut', scanId: VAULT.scanId, kind: VAULT.kind, mime: 'application/json', plates: '', text: JSON.stringify({ v: 1, salt: b64(salt), iv: b64(iv), data: b64(new Uint8Array(enc)) }) });
-      setMsg('#scanVaultMsg', `✅ Đã đẩy ${keys.length} key lên (đã mã hóa). Nhớ mật khẩu — quên là KHÔNG khôi phục được.`);
+      const r = await vaultMerge(pass);
+      if (!r.pushed) { setMsg('#scanVaultMsg', '❌ Máy này chưa có key nào để đẩy lên.', true); return; }
+      rememberVault(pass); await vaultFingerprintSave();
+      setMsg('#scanVaultMsg', `✅ Đã đẩy ${r.pushed} key lên (đã mã hóa)${r.added ? `, đồng thời lấy về ${r.added} key mới từ Drive` : ''}. Nhớ mật khẩu — quên là KHÔNG khôi phục được.`);
     } catch (e) { setMsg('#scanVaultMsg', '❌ ' + esc(e.message || e), true); }
   }
   async function vaultPull() {
-    if (!window.crypto || !crypto.subtle) { setMsg('#scanVaultMsg', '❌ Trình duyệt không hỗ trợ mã hóa (cần HTTPS).', true); return; }
+    if (!vaultReady('#scanVaultMsg')) return;
     const pass = vaultPass(); if (!pass) { setMsg('#scanVaultMsg', '❌ Nhập mật khẩu đã dùng khi đẩy key lên.', true); return; }
-    if (!Y.online()) { setMsg('#scanVaultMsg', '❌ Chưa kết nối nơi lưu online.', true); return; }
     try {
-      const r = await Y.call({ action: 'scanTextGet', ...VAULT }), box = JSON.parse(r.text);
-      let plain;
-      try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(box.iv) }, await deriveKey(pass, unb64(box.salt)), unb64(box.data)); }
-      catch (e) { throw new Error('Sai mật khẩu hoặc dữ liệu kho khóa bị hỏng.'); }
-      const incoming = JSON.parse(new TextDecoder().decode(plain)).keys || [], have = new Set((await S.keys.listKeys()).map(k => k.key));
-      let added = 0;
-      for (const k of incoming) { if (!k.key || have.has(k.key)) continue; const rec = await S.keys.addKey(k.label, k.key); if (k.enabled === false) await S.keys.patchKey(rec.id, { enabled: false }); added++; }
-      S.keys.refreshUi();
-      setMsg('#scanVaultMsg', `✅ Đã lấy về ${added} key mới (bỏ qua ${incoming.length - added} key đã có).`);
+      const got = await vaultFetch(pass);
+      if (!got.exists) throw new Error('Chưa có kho khóa trên Drive — hãy đẩy key lên từ máy đã có key.');
+      const added = await addMissingKeys(got.keys);
+      rememberVault(pass); await vaultFingerprintSave();
+      setMsg('#scanVaultMsg', `✅ Đã lấy về ${added} key mới (bỏ qua ${got.keys.length - added} key đã có).`);
     } catch (e) { setMsg('#scanVaultMsg', '❌ ' + esc(e.message || e), true); }
+  }
+
+  /* ---- Tự động đồng bộ key (tùy chọn): ghi nhớ mật khẩu kho khóa TRÊN MÁY NÀY để key luôn được sao lưu / khôi phục như ảnh ---- */
+  const PASS_KEY = 'vehicleScanVaultPassV1', FP_KEY = 'vehicleScanVaultFpV1';
+  const rememberOn = () => !!localStorage.getItem(PASS_KEY);
+  function rememberVault(pass) {
+    const cb = q('#scanVaultRemember'); if (!cb) return;
+    try { if (cb.checked) localStorage.setItem(PASS_KEY, pass); else { localStorage.removeItem(PASS_KEY); localStorage.removeItem(FP_KEY); } } catch (e) { /* bỏ qua */ }
+  }
+  // Dấu vân tay danh sách key (SHA-256) để biết key có thay đổi hay chưa mà không lưu key ra chỗ khác
+  async function vaultFingerprint() {
+    const list = (await S.keys.listKeys()).map(k => k.key + '|' + (k.enabled !== false)).sort().join('\n');
+    const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(list));
+    return Array.from(new Uint8Array(h)).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  async function vaultFingerprintSave() { try { if (rememberOn()) localStorage.setItem(FP_KEY, await vaultFingerprint()); } catch (e) { /* bỏ qua */ } }
+  let vaultAutoBusy = false, vaultTriedEmpty = false;
+  async function vaultAuto() {
+    const pass = localStorage.getItem(PASS_KEY);
+    if (!pass || vaultAutoBusy || !window.crypto || !crypto.subtle || !Y.online() || !S.keys) return;
+    vaultAutoBusy = true;
+    try {
+      const fp = await vaultFingerprint(), empty = !(await S.keys.listKeys()).length;
+      // Key đổi (thêm/xóa/bật/tắt) -> gộp + đẩy; máy chưa có key nào -> thử kéo từ Drive 1 lần mỗi phiên
+      if (fp !== localStorage.getItem(FP_KEY) || (empty && !vaultTriedEmpty)) {
+        if (empty) vaultTriedEmpty = true;
+        await vaultMerge(pass); localStorage.setItem(FP_KEY, await vaultFingerprint());
+      }
+    } catch (e) { console.warn('[scan-store] tự đồng bộ key:', e.message || e); }   // lỗi mạng/Drive: lần kiểm tra sau (30 giây) tự thử lại
+    finally { vaultAutoBusy = false; }
+  }
+  function injectVaultExtras() {
+    const pw = q('#scanVaultPass'); if (!pw || q('#scanVaultRemember')) return;
+    const lab = document.createElement('label'); lab.className = 'ss-check';
+    lab.innerHTML = '<input type="checkbox" id="scanVaultRemember"> Tự động sao lưu / khôi phục key (ghi nhớ mật khẩu trên máy này) <span class="hint">— chỉ bật trên máy cá nhân; mật khẩu lưu trong trình duyệt của máy này</span>';
+    pw.insertAdjacentElement('afterend', lab);
+    lab.querySelector('input').checked = rememberOn();
+    if (rememberOn()) pw.value = localStorage.getItem(PASS_KEY) || '';
+    lab.querySelector('input').addEventListener('change', (e) => { if (e.target.checked) { if (vaultPass().length < 6) { e.target.checked = false; setMsg('#scanVaultMsg', '❌ Nhập mật khẩu (≥ 6 ký tự) trước khi bật.', true); return; } rememberVault(vaultPass()); vaultAuto(); } else rememberVault(''); });
   }
 
   /* ====================================================================== */
@@ -279,17 +413,18 @@ const ScanStore = (() => {
       } catch (err) { toast(err.message || String(err), true); }
     });
     // Cài đặt nơi lưu + kho khóa
-    document.querySelectorAll('input[name="scanStoreMode"]').forEach(r => r.addEventListener('change', syncSettingsUi));
+    document.querySelectorAll('input[name="scanStoreMode"]').forEach(r => r.addEventListener('change', toggleUrlRow));   // KHÔNG gọi loadSettingsUi ở đây (sẽ ghi đè lựa chọn)
     q('#btnScanStoreSave').addEventListener('click', saveSettings);
     q('#btnScanStoreTest').addEventListener('click', testSettings);
     q('#btnVaultPush').addEventListener('click', vaultPush);
     q('#btnVaultPull').addEventListener('click', vaultPull);
     document.querySelectorAll('[data-open-scanstore]').forEach(b => b.addEventListener('click', open));
-    syncSettingsUi();
+    injectSettingsExtras(); injectVaultExtras(); loadSettingsUi();
   }
 
-  async function open() { K.limit = 50; openModal('scanStoreModal'); await reload(); }
+  async function open() { K.limit = 50; openModal('scanStoreModal'); loadSettingsUi(); await reload(); }
   bind();
+  setInterval(vaultAuto, 30000); setTimeout(vaultAuto, 5000);   // chạy ngầm; lỗi thì 30 giây sau tự thử lại
   return { open, reload, removeScan, removeBack };
 })();
 window.ScanStore = ScanStore;

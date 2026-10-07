@@ -18,3 +18,13 @@
 .ss-ok { background: #dcfce7; color: #166534; } .ss-warn { background: #fef3c7; color: #92400e; }
 .ss-err { background: #fee2e2; color: #991b1b; } .ss-info { background: #dbeafe; color: #1e40af; }
 @media (max-width: 800px) { .ss-plates { max-width: 160px; } .ss-table th:nth-child(4), .ss-table td:nth-child(4) { display: none; } }
+
+/* Hướng dẫn Apps Script riêng + khối giải phóng bộ nhớ */
+.ss-guide { border: 1px solid #c7d2fe; background: #f5f7ff; border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+.ss-guide summary { cursor: pointer; font-weight: 600; }
+.ss-guide ol { margin: 8px 0 4px 18px; padding: 0; line-height: 1.6; }
+.ss-guide li { margin-bottom: 4px; }
+.ss-guide code { background: #e5e7eb; padding: 0 4px; border-radius: 4px; word-break: break-all; }
+.ss-free { border-top: 1px dashed #d1d5db; margin-top: 10px; padding-top: 8px; }
+.ss-check { display: flex; gap: 6px; align-items: flex-start; margin: 6px 0; cursor: pointer; }
+.ss-check input { margin-top: 3px; }

@@ -19,22 +19,26 @@ const ScanSync = (() => {
 
   /* ---- NƠI LƯU ẢNH (chọn ở Cài đặt): nhớ trên máy; ảnh luôn lưu IndexedDB trước, "nơi lưu online" chỉ là bản sao dùng chung ---- */
   const STORE_KEY = 'vehicleScanStoreV1';
-  const cfg = { mode: 'gas', url2: '' };
+  const cfg = { mode: 'gas', url2: '', autoFree: false };   // autoFree: tự xóa ảnh trên máy sau khi đã lên Drive (mặc định TẮT)
   try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch (e) { /* bỏ qua */ }
   const validUrl = (u) => /^https:\/\/script\.google(usercontent)?\.com\/.+\/exec/.test(String(u || '').trim());
   function setConfig(c) {
     Object.assign(cfg, c);
     try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (e) { /* bỏ qua */ }
-    Y.errUntil = 0; Y.pulled = false; Y.lastError = ''; refreshStatus();
+    Y.errUntil = 0; Y.pulled = false; Y.lastError = ''; Y.gone = new Set();   // đổi nơi lưu -> danh sách «đã xóa» của nơi cũ không còn đúng, sẽ kéo lại từ nơi mới
+    refreshStatus();
   }
   // URL Apps Script dùng để lưu ảnh: 'gas' = cái đang nối Sheet; 'gas2' = cái riêng; 'off' = không dùng
-  const storeUrl = () => cfg.mode === 'gas2' ? String(cfg.url2 || '').trim() : (cfg.mode === 'gas' ? ((typeof state !== 'undefined' && state.gasUrl) || '') : '');
-  const online = () => cfg.mode === 'gas2' ? validUrl(cfg.url2) : (cfg.mode === 'gas' && typeof isWriteConnected === 'function' && isWriteConnected());
-  async function call(payload) {
-    const r = await gasRequest(storeUrl(), payload);
-    if (!r || r.ok === false) throw new Error((r && r.error) || 'Apps Script chưa hỗ trợ lưu ảnh online (dán phần 2 + 3 của AppsScript_ScanPatch.gs và Deploy lại).');
+  const urlOf = (c) => c.mode === 'gas2' ? String(c.url2 || '').trim() : (c.mode === 'gas' ? ((typeof state !== 'undefined' && state.gasUrl) || '') : '');
+  const onlineOf = (c) => c.mode === 'gas2' ? validUrl(c.url2) : (c.mode === 'gas' && typeof isWriteConnected === 'function' && isWriteConnected());
+  const storeUrl = () => urlOf(cfg);
+  const online = () => onlineOf(cfg);
+  async function callWith(c, payload) {
+    const r = await gasRequest(urlOf(c), payload);
+    if (!r || r.ok === false) throw new Error((r && r.error) || 'Apps Script chưa hỗ trợ lưu ảnh online (dán đúng file Apps Script rồi Deploy → Phiên bản mới).');
     return r;
   }
+  const call = (payload) => callWith(cfg, payload);
   const blobToB64 = (blob) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
   const b64ToBlob = async (b64, mime) => (await fetch(`data:${mime || 'application/octet-stream'};base64,${b64}`)).blob();
   const itemsOf = async (scanId) => (await DB.tx(ST_ITEMS, 'readonly', os => os.index('scanId').getAll(scanId))) || [];
@@ -110,6 +114,8 @@ const ScanSync = (() => {
         await pushScan(cur); Y.touched.delete(cur); refreshStatus();
       }
       Y.lastError = ''; Y.errUntil = 0;
+      // Tự xóa ảnh trên máy (nếu bật): chỉ phiếu đã lên Drive + kiểm tra khớp dung lượng, và giữ lại phiếu mới quét trong 1 giờ
+      if (cfg.autoFree) { try { await freeLocal({ keepRecentMs: 3600e3 }); } catch (e) { console.warn('[scan-sync] tự giải phóng lỗi', e); } }
     } catch (e) {
       Y.lastError = String((e && e.message) || e).slice(0, 160); Y.errUntil = Date.now() + RETRY_MS;
       console.warn('[scan-sync]', e);
@@ -202,20 +208,65 @@ const ScanSync = (() => {
     toast(Y.lastError ? 'Lỗi lưu online: ' + Y.lastError : 'Đã đồng bộ ảnh & trạng thái phiếu với Google Drive.', !!Y.lastError);
   }
   const syncNow = async () => { Y.errUntil = 0; Y.pulled = false; await run(); return !Y.lastError; };
-  // Thử kết nối nơi lưu đang chọn (dùng ở Cài đặt): trả { ok, count } hoặc { ok:false, error }
-  async function testConnection() {
-    if (cfg.mode === 'off') return { ok: false, error: 'Đang chọn «Chỉ lưu trên máy này».' };
-    if (!online()) return { ok: false, error: cfg.mode === 'gas2' ? 'URL chưa đúng dạng https://script.google.com/macros/s/…/exec' : 'Chưa kết nối Google Sheet bằng Apps Script 2 chiều.' };
-    try { const r = await call({ action: 'scanList' }); return { ok: true, count: (r.list || []).length }; }
+  // Thử kết nối nơi lưu (dùng ở Cài đặt). override = lựa chọn đang hiện trên màn hình (chưa Lưu) -> không đụng cấu hình thật
+  async function testConnection(override) {
+    const c = Object.assign({}, cfg, override || {});
+    if (c.mode === 'off') return { ok: false, error: 'Đang chọn «Chỉ lưu trên máy này».' };
+    if (!onlineOf(c)) return { ok: false, error: c.mode === 'gas2' ? 'URL chưa đúng dạng https://script.google.com/macros/s/…/exec' : 'Chưa kết nối Google Sheet bằng Apps Script 2 chiều.' };
+    try { const r = await callWith(c, { action: 'scanList' }); return { ok: true, count: (r.list || []).length }; }
     catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
   }
+
+  /* ---------------- GIẢI PHÓNG BỘ NHỚ MÁY SAU KHI ĐÃ LÊN DRIVE ---------------- */
+  // Xóa ảnh (blob) trên máy của các phiếu ĐÃ LÊN DRIVE. An toàn 3 lớp: (1) hỏi lại Drive bằng scanInventory, ảnh + meta phải có thật và dung lượng khớp;
+  // (2) bỏ qua phiếu còn thay đổi chưa đẩy; (3) dữ liệu đối chiếu vẫn giữ trên máy — chỉ bỏ ảnh. Mở xem lại sẽ tự tải từ Drive (ensureBlobs).
+  // opts: { dryRun, keepRecentMs } -> trả { n phiếu, bytes giải phóng, skipped phiếu bỏ qua }
+  async function freeLocal(opts) {
+    opts = opts || {};
+    if (!online()) throw new Error('Cần kết nối nơi lưu online để xác nhận ảnh đã lên Drive.');
+    const inv = await call({ action: 'scanInventory' }), size = new Map();
+    (inv.files || []).forEach(f => size.set(f.scanId + '|' + f.kind, f.size || 0));
+    const ids = await forEachScan(r => (r.status === 'done' && !r.isTest && (r.frontBlob || r.backBlob) && r.cloud && r.cloud.frontId && r.cloud.frontId !== 'remote') ? r.id : null);
+    let n = 0, bytes = 0, skipped = 0;
+    for (const id of ids) {
+      const rec = await DB.dbGet(ST_SCANS, id); if (!rec) continue;
+      const t = new Date(rec.timestamp).getTime();
+      const tooNew = opts.keepRecentMs && isFinite(t) && Date.now() - t < opts.keepRecentMs;
+      const sides = ['front', 'back'].filter(sd => rec[sd + 'Blob']);
+      // mỗi mặt đang có ảnh phải: có id thật trên Drive + file tồn tại + dung lượng online ≥ 98% bản trên máy
+      const good = !tooNew && !Y.touched.has(id) && size.has(id + '|meta') && sides.every(sd => {
+        const cid = rec.cloud[sd + 'Id'], on = size.get(id + '|' + sd) || 0;
+        return cid && cid !== 'remote' && on > 0 && on >= rec[sd + 'Blob'].size * 0.98;
+      });
+      if (!good) { skipped++; continue; }
+      if (!opts.dryRun) {
+        sides.forEach(sd => { bytes += rec[sd + 'Blob'].size; rec[sd + 'Blob'] = null; });
+        await DB.dbPut(ST_SCANS, rec);
+      } else sides.forEach(sd => { bytes += rec[sd + 'Blob'].size; });
+      n++;
+    }
+    refreshStatus();
+    return { n, bytes, skipped };
+  }
+  // Dung lượng ảnh còn trên máy của phiếu ĐÃ lên Drive (để hiện «có thể giải phóng ~X MB»)
+  async function localImageBytes() {
+    let b = 0, n = 0;
+    await forEachScan(r => { if (r.status === 'done' && !r.isTest && r.cloud && r.cloud.frontId && r.cloud.frontId !== 'remote' && (r.frontBlob || r.backBlob)) { n++; b += (r.frontBlob ? r.frontBlob.size : 0) + (r.backBlob ? r.backBlob.size : 0); } return null; });
+    return { n, bytes: b };
+  }
+
   S.on('sheetDone', (d) => touch(d.scanId));          // phiếu vừa quét xong -> lên Drive
   S.on('itemsChanged', (d) => touch(d.scanId));       // đối chiếu / chỉnh sửa -> cập nhật meta
   S.on('queueFinished', () => run());
   const btn = document.getElementById('btnScanCloud'); if (btn) btn.addEventListener('click', manual);
+  // Tự tiếp tục việc dang dở: có mạng trở lại / quay lại tab / mở lại trang -> bỏ thời gian chờ lỗi và chạy ngay
+  const resume = () => { Y.errUntil = 0; run(); };
+  window.addEventListener('online', resume);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resume(); });
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* bỏ qua */ }   // tránh trình duyệt tự dọn IndexedDB khi đầy bộ nhớ
   setInterval(run, 20000);                            // kết nối Sheet có thể xong SAU khi trang nạp -> kiểm tra định kỳ
   setTimeout(run, 3000);
 
-  return { run, pull, touch, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id) };
+  return { run, pull, touch, freeLocal, localImageBytes, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id) };
 })();
 window.ScanSync = ScanSync;

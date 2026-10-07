@@ -1,10 +1,18 @@
 /* =========================================================================
    AppsScript_StorageOnly.gs — Apps Script RIÊNG chỉ để lưu ảnh / PDF phiếu scan (không đụng Google Sheet).
    Dùng khi chọn «Apps Script RIÊNG» ở Cài đặt → Lưu trữ. Dán toàn bộ file này vào dự án mới tại script.google.com,
-   rồi Triển khai → Ứng dụng web (Thực thi: Tôi · Ai có quyền truy cập: Bất kỳ ai) → copy URL /exec dán vào web.
+   chạy hàm authorizeOnce 1 lần để cấp quyền, rồi Triển khai → Ứng dụng web (Thực thi: Tôi · Ai có quyền truy cập: Bất kỳ ai) → copy URL /exec dán vào web.
    ========================================================================= */
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 function doGet() { return json_({ ok: true, service: 'QuanLyXe-PhieuScan-Storage' }); }
+// CHẠY HÀM NÀY 1 LẦN trong trình soạn thảo (chọn «authorizeOnce» → Chạy) để cấp quyền Drive trước khi Triển khai.
+// Hàm tạo sẵn thư mục lưu ảnh và ghi log đường dẫn thư mục (xem ở Nhật ký thực thi).
+function authorizeOnce() {
+  LockService.getScriptLock();
+  var f = scanFolder_();
+  Logger.log('Đã cấp quyền. Thư mục lưu ảnh: ' + f.getUrl());
+  return f.getUrl();
+}
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
