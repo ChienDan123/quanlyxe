@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quản lý Phương tiện &amp; Bản cam kết</title>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="scan-review.css"><!-- giao diện màn so sánh & xem phiếu scan -->
 </head>
 <body>
 
@@ -19,9 +20,12 @@
          xong). Ẩn hoàn toàn khi không có gì cần đồng bộ. Xem updateSyncStatusBadge()
          trong app.js. -->
     <span id="syncStatusBadge" class="badge badge-mode hidden"></span>
+    <!-- Chip tiến độ quét chạy NGẦM (hiện khi hàng đợi quét đang chạy/tạm dừng; bấm để mở lại cửa sổ Quét phiếu) -->
+    <button id="scanBgChip" type="button" class="badge badge-mode scan-bg-chip hidden" title="Bấm để mở cửa sổ Quét phiếu"></button>
   </div>
   <div class="header-right">
     <button id="btnScan" class="btn btn-ghost" title="Quét phiếu hàng loạt (Gemini OCR)">📷 Quét phiếu</button>
+    <button id="btnScanOpenReview" class="btn btn-ghost" title="So sánh dữ liệu phiếu scan với Google Sheet và xác nhận cập nhật">🔍 So sánh phiếu</button>
     <button id="btnSettings" class="btn btn-ghost" title="Cài đặt mẫu Bản cam kết">⚙️ Cài đặt</button>
     <button id="btnReload" class="btn btn-ghost" title="Tải lại dữ liệu">⟳ Tải lại</button>
   </div>
@@ -261,6 +265,13 @@
       <div class="ms-control" data-field="nguoiThucHien"></div>
     </div>
     <div class="filter-actions">
+      <!-- Lọc theo phiếu scan (xử lý bởi scan-review.js -> ScanHooks.rowPassesFilter) -->
+      <label class="chk-inline" title="Chỉ hiện xe đã có phiếu scan"><input type="checkbox" id="chkHasScan"> 📷 Có phiếu scan</label>
+      <select id="selScanReview" class="row-inline-select" title="Lọc theo trạng thái kiểm phiếu">
+        <option value="">Kiểm phiếu: tất cả</option>
+        <option value="chua_kiem">Chưa kiểm</option>
+        <option value="da_kiem">Đã kiểm</option>
+      </select>
       <span id="filteredCount" class="filtered-count">0 / 0 dòng</span>
       <button id="btnClearFilters" class="btn btn-ghost">Xóa bộ lọc</button>
     </div>
@@ -534,12 +545,70 @@
   </div>
 </div>
 
+<!-- ============ MODAL SO SÁNH & XÁC NHẬN CẬP NHẬT TỪ PHIẾU SCAN (scan-review.js) ============ -->
+<div id="scanReviewModal" class="modal-overlay hidden">
+  <div class="modal modal-xl rv-modal">
+    <div class="modal-header">
+      <h2>🔍 So sánh phiếu scan ↔ Google Sheet</h2>
+      <button class="modal-close" data-close="scanReviewModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="rvWarn" class="rv-warn hidden"></div>
+      <div id="rvStats" class="rv-stats"></div>
+      <div class="rv-toolbar">
+        <select id="rvFilter" class="tpl-input" style="width:auto">
+          <option value="review">Cần xem xét (mặc định)</option>
+          <option value="diff">Có khác biệt</option>
+          <option value="orphan">Phiếu lạ (chưa có trong DS)</option>
+          <option value="match">Khớp hoàn toàn</option>
+          <option value="chua_kiem">Chưa kiểm</option>
+          <option value="da_kiem">Đã kiểm</option>
+          <option value="all">Tất cả</option>
+        </select>
+        <input id="rvSearch" class="tpl-input" type="search" placeholder="Tìm biển số / chủ xe…" style="max-width:260px">
+        <span id="rvPager" class="rv-pager"></span>
+      </div>
+      <div id="rvList" class="rv-list"></div>
+      <details class="hint-details" open>
+        <summary>📝 Xem trước những gì SẼ ghi lên Google Sheet</summary>
+        <div id="rvPreview" class="rv-preview"></div>
+      </details>
+    </div>
+    <div class="modal-footer">
+      <span id="rvFooterSummary" class="hint"></span>
+      <div class="footer-btns">
+        <button id="btnRvApplyAll" type="button" class="btn btn-primary" disabled>✅ Áp dụng tất cả</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL XEM ẢNH / PDF PHIẾU SCAN (mặt 1 + mặt 2 = trọn 1 phiếu đến chữ ký xác nhận) ============ -->
+<div id="scanViewerModal" class="modal-overlay hidden">
+  <div class="modal modal-xl">
+    <div class="modal-header">
+      <h2 id="svTitle">📷 Phiếu scan</h2>
+      <button class="modal-close" data-close="scanViewerModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="svTabs" class="sv-tabs"></div>
+      <div id="svInfo" class="hint"></div>
+      <div class="sv-split">
+        <div><h4>Mặt 1</h4><div id="svFront" class="sv-pane"></div></div>
+        <div><h4>Mặt 2 (xác nhận / chữ ký)</h4><div id="svBack" class="sv-pane"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <!-- Thư viện docx (xuất Word) được nạp theo yêu cầu bởi ensureDocxLib() trong app.js: ưu tiên lib/docx.umd.js, dự phòng CDN. -->
 <script src="app.js"></script>
 <script src="scan.js"></script>
+<script src="scan-compare.js"></script><!-- hàm so sánh thuần (phải nạp trước scan-review.js) -->
+<script src="scan-review.js"></script>
 <script src="layout.js"></script>
 </body>
 </html>

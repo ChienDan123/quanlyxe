@@ -27,10 +27,12 @@ const ScanApp = (() => {
 
   /* ---------------------------- 1. SCHEMA INDEXEDDB ---------------------------- */
   const DB_NAME = 'vehicleScanDBV1';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2; // v2: thêm store scanItems + plateLinks (màn so sánh & xác nhận)
   const ST_SCANS = 'scans';       // 1 record / 1 tờ vật lý
   const ST_KEYS = 'apiKeys';      // danh sách key Gemini
   const ST_SETTINGS = 'settings'; // cấu hình module (model, timeout...)
+  const ST_ITEMS = 'scanItems';   // v2: 1 mục so sánh / 1 xe trên 1 phiếu (KHÔNG chứa ảnh) — do scan-review.js quản lý
+  const ST_LINKS = 'plateLinks';  // v2: biển số -> danh sách phiếu + trạng thái Đã kiểm/Chưa kiểm
 
   /* Schema record (ghi chú cho các sprint sau):
      scans: {
@@ -68,6 +70,13 @@ const ScanApp = (() => {
         }
         if (!db.objectStoreNames.contains(ST_KEYS)) db.createObjectStore(ST_KEYS, { keyPath: 'id' });
         if (!db.objectStoreNames.contains(ST_SETTINGS)) db.createObjectStore(ST_SETTINGS, { keyPath: 'name' });
+        // Nâng cấp v1 -> v2: chỉ THÊM store mới, giữ nguyên toàn bộ ảnh/phiếu đã quét.
+        if (!db.objectStoreNames.contains(ST_ITEMS)) {
+          const si = db.createObjectStore(ST_ITEMS, { keyPath: 'id' });
+          si.createIndex('bienSo', 'bienSo');
+          si.createIndex('scanId', 'scanId');
+        }
+        if (!db.objectStoreNames.contains(ST_LINKS)) db.createObjectStore(ST_LINKS, { keyPath: 'bienSo' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error || new Error('Không mở được IndexedDB'));
@@ -100,6 +109,16 @@ const ScanApp = (() => {
     return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
   }
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  // Nhường luồng giao diện: các vòng lặp dài (áp dụng hàng trăm mục) gọi hàm này
+  // định kỳ để trang vẫn mượt, người dùng làm việc khác được (chạy ngầm).
+  const yieldToUi = () => new Promise(r => (window.requestIdleCallback ? requestIdleCallback(() => r(), { timeout: 50 }) : setTimeout(r, 0)));
+  // Bus sự kiện nhỏ: scan-review.js đăng ký 'sheetDone' / 'queueFinished'.
+  // Handler chạy KHÔNG chờ (fire-and-forget) và lỗi của handler không làm hỏng hàng đợi quét.
+  const _handlers = {};
+  const on = (evt, fn) => { (_handlers[evt] = _handlers[evt] || []).push(fn); };
+  const emit = (evt, data) => (_handlers[evt] || []).forEach(fn => {
+    try { Promise.resolve(fn(data)).catch(e => console.warn('[scan] handler ' + evt, e)); } catch (e) { console.warn('[scan] handler ' + evt, e); }
+  });
 
   // Chuẩn hóa biển số: UPPERCASE, bỏ khoảng trắng / chấm / gạch (Sprint 3 sẽ dùng để khớp).
   function normalizeBienSo(s) {
@@ -770,6 +789,8 @@ ${hasBack
         if (ex) {
           job.status = 'dup'; job.scanId = ex.id; job.extracted = ex.extracted; job.match = ex.match || null;
           dbgLog(`  tờ trùng với bản đã quét → bỏ qua.`, 'warn');
+          // Tờ trùng: phát lại sự kiện để tạo mục so sánh nếu chưa có (createItemsForScan không ghi đè mục cũ)
+          if (ex.extracted) emit('sheetDone', { scanId: ex.id, extracted: ex.extracted, label: `${job.entry.name} · ${job.pagesDesc}` });
           return;
         }
       }
@@ -790,6 +811,8 @@ ${hasBack
       });
       await dbPut(ST_SCANS, rec);
       job.extracted = res.extracted; job.json = res.json; job.match = match; job.status = 'done';
+      // Báo cho màn so sánh tạo mục cho từng xe trên phiếu (không chặn hàng đợi quét)
+      emit('sheetDone', { scanId: rec.id, extracted: res.extracted, label: `${job.entry.name} · ${job.pagesDesc}` });
       const tt = res.extracted.tinhTrang.map(t => TINH_TRANG_LABEL[t] || t).join(' / ');
       dbgLog(`  ✔ ${platesText(job) || '(không đọc được biển số)'} — ${tt || '—'}` + (match ? ` — ${match.filter(m => m.found).length}/${match.length} biển khớp DS` : ' — chưa tải DS xe'), 'ok');
     } catch (e) {
@@ -846,6 +869,8 @@ ${hasBack
       updateAll();
       const left = allJobs().some(j => j.status === 'wait') || Q.entries.some(e => !e.jobs && e.status !== 'error');
       dbgLog(Q.paused ? 'Hàng đợi đang tạm dừng.' : (left ? 'Dừng.' : '🏁 Hoàn tất toàn bộ hàng đợi.'), left || Q.paused ? 'warn' : 'ok');
+      // Xong hẳn -> báo để mở bước SO SÁNH & XÁC NHẬN (chưa ghi gì lên Sheet cho đến khi người dùng bấm Áp dụng)
+      if (!Q.paused && !left) emit('queueFinished', { jobs: allJobs().length });
     }
   }
 
@@ -930,6 +955,13 @@ ${hasBack
     $('#btnScanStop').disabled = !Q.running;
     $('#btnScanRetry').disabled = Q.running || !err;
     $('#btnScanClearQueue').disabled = Q.running || !Q.entries.length;
+    // Chip trạng thái trên thanh đầu trang: đóng cửa sổ Quét phiếu vẫn thấy tiến độ, bấm để mở lại.
+    const chip = $('#scanBgChip');
+    if (chip) {
+      const show = Q.running || Q.paused;
+      chip.classList.toggle('hidden', !show);
+      if (show) chip.textContent = `📷 Đang quét ${finished}/${jobs.length || '?'}${Q.paused ? ' (tạm dừng)' : ''}`;
+    }
   }
 
   function showJobJson(jobId) {
@@ -1018,7 +1050,8 @@ ${hasBack
 
   // API công khai cho Sprint 3+ (đối sánh đầy đủ, xem phiếu theo xe...)
   return {
-    db: { openDb, dbGetAll, dbGet, dbPut, dbDelete, dbCount, ST_SCANS, ST_KEYS },
+    db: { openDb, tx, dbGetAll, dbGet, dbPut, dbDelete, dbCount, ST_SCANS, ST_KEYS, ST_ITEMS, ST_LINKS },
+    on, emit, yieldToUi,
     keys: { listKeys, addKey, patchKey, removeKey, testKey },
     settings: { loadSettings, saveSettings },
     prepareImageFile, openPdf, renderPdfPage, analyzeSheet, geminiGenerate, normalizeBienSo, normalizeCccd, sha256Hex, uid,

@@ -1,0 +1,67 @@
+/* scan-review.css — giao diện màn so sánh & xem phiếu scan (dùng chung biến màu của style.css nếu có) */
+.scan-bg-chip { cursor: pointer; border: 0; animation: scanPulse 1.6s ease-in-out infinite; }
+.btn.pulse { animation: scanPulse 1s ease-in-out infinite; outline: 2px solid #f59e0b; }
+@keyframes scanPulse { 50% { opacity: .55; } }
+
+.rv-modal .modal-body { max-height: 74vh; overflow: auto; }
+.rv-warn { background: #fff7ed; border: 1px solid #fdba74; border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; }
+.rv-stats { font-size: 13px; margin-bottom: 8px; line-height: 1.7; }
+.rv-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; position: sticky; top: 0; background: var(--bg, #fff); z-index: 2; padding: 4px 0; }
+.rv-pager { margin-left: auto; font-size: 13px; }
+
+.rv-card { border: 1px solid #d1d5db; border-radius: 10px; margin-bottom: 12px; overflow: hidden; background: #fff; }
+.rv-card.rv-diff { border-color: #f59e0b; }
+.rv-card.rv-orphan { border-color: #ef4444; }
+.rv-card-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 8px 12px; background: #f3f4f6; }
+.rv-plate { font-size: 15px; }
+.rv-card-actions { margin-left: auto; display: flex; gap: 6px; }
+.rv-badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: #e5e7eb; }
+.rv-badge.match, .rv-badge.da_kiem, .rv-badge.applied { background: #dcfce7; color: #166534; }
+.rv-badge.diff, .rv-badge.chua_kiem, .rv-badge.warn { background: #fef3c7; color: #92400e; }
+.rv-badge.orphan { background: #fee2e2; color: #991b1b; }
+
+/* Bảng chia 2 cột: TRÁI = từ phiếu, PHẢI = hiện có trên Sheet */
+.rv-split-head, .rv-row { display: grid; grid-template-columns: 130px 1fr 1fr 260px; gap: 0; }
+.rv-split-head { font-weight: 600; font-size: 12px; background: #e0e7ff; }
+.rv-split-head > div, .rv-row > div { padding: 6px 10px; border-bottom: 1px solid #e5e7eb; word-break: break-word; }
+.rv-split-head .left, .rv-cell.left { border-right: 2px solid #6366f1; }
+.rv-cell.left.diff { background: #fef2f2; }
+.rv-cell.left.fill { background: #fffbeb; }
+.rv-cell.left.same { background: #f0fdf4; }
+.rv-field { font-weight: 600; font-size: 13px; }
+.rv-same { color: #166534; font-size: 13px; }
+.rv-dec-cell select { width: 100%; }
+.rv-dec-apply { border-color: #16a34a; } .rv-dec-skip { border-color: #9ca3af; } .rv-dec-later { border-color: #f59e0b; }
+.rv-target { font-size: 12px; color: #6b7280; margin-top: 4px; }
+.rv-target.on { color: #1d4ed8; }
+.rv-result { padding: 6px 12px; }
+.rv-preview { max-height: 220px; overflow: auto; font-size: 12px; }
+.rv-preview-list { margin: 6px 0; padding-left: 18px; }
+.rv-preview-list del { color: #b91c1c; } .rv-preview-list ins { color: #15803d; text-decoration: none; font-weight: 600; }
+.rv-meta-line { color: #6b7280; }
+
+/* Màn hẹp (điện thoại): xếp dọc từng trường nhưng vẫn giữ nhãn Trái/Phải */
+@media (max-width: 800px) {
+  .rv-split-head { display: none; }
+  .rv-row { grid-template-columns: 1fr; border-bottom: 3px solid #e5e7eb; }
+  .rv-cell.left::before { content: '📷 Phiếu: '; font-weight: 600; }
+  .rv-cell.right::before { content: '📋 Sheet: '; font-weight: 600; }
+  .rv-cell.left { border-right: 0; }
+}
+
+/* Biểu tượng 📷 cạnh biển số ở bảng chính */
+.scan-badge-btn { border: 0; background: transparent; cursor: pointer; font-size: 13px; padding: 0 2px; }
+.scan-badge-btn.pending { filter: grayscale(0); outline: 1px dashed #f59e0b; border-radius: 4px; }
+.scan-badge-btn.ok { opacity: .9; }
+.scan-badge-btn.remote { opacity: .5; cursor: help; }
+
+/* Xem ảnh/PDF phiếu: mặt 1 và mặt 2 cạnh nhau */
+.sv-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+.sv-pane { border: 1px solid #d1d5db; border-radius: 8px; padding: 6px; min-height: 120px; text-align: center; }
+.sv-img { max-width: 100%; max-height: 68vh; cursor: zoom-in; }
+.sv-img.zoom { max-height: none; max-width: none; width: 160%; cursor: zoom-out; }
+.sv-pane { overflow: auto; }
+.sv-frame { width: 100%; height: 68vh; border: 0; }
+.sv-empty { color: #6b7280; padding: 24px 0; }
+.sv-tabs { margin-bottom: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+@media (max-width: 800px) { .sv-split { grid-template-columns: 1fr; } }

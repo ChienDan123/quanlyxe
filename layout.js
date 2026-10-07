@@ -20,7 +20,8 @@
     if (typeof state === 'undefined') return 0;
     try {
       if (id === 'filterBar') {
-        return Object.values(state.filters).reduce((n, set) => n + set.size, 0) + (state.quickDiaBan ? 1 : 0);
+        return Object.values(state.filters).reduce((n, set) => n + set.size, 0) + (state.quickDiaBan ? 1 : 0)
+          + (window.ScanHooks && window.ScanHooks.activeCount ? window.ScanHooks.activeCount() : 0); // lọc theo phiếu scan
       }
       if (id === 'sortBar') return (state.sortCriteria || []).length;
     } catch (e) { /* state chưa sẵn sàng */ }

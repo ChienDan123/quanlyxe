@@ -136,7 +136,15 @@ const ScanReview = (() => {
   }
 
   S.on('sheetDone', async (d) => { await createItemsForScan(d.scanId, d.extracted, d.label); });
-  S.on('queueFinished', async () => { refreshMainTable(); });
+  // Quét xong toàn bộ -> chuyển sang bước SO SÁNH & XÁC NHẬN. Nếu cửa sổ Quét phiếu đang mở thì
+  // mở thẳng màn so sánh; nếu người dùng đang làm việc khác thì chỉ báo nhẹ (không cướp màn hình).
+  S.on('queueFinished', async () => {
+    refreshMainTable();
+    const scanOpen = !$('#scanModal').classList.contains('hidden');
+    if (scanOpen) { closeModal('scanModal'); open(); }
+    else toast('📷 Quét xong! Bấm «So sánh phiếu» ở đầu trang để xem và xác nhận cập nhật.');
+    const b = $('#btnScanOpenReview'); if (b) { b.classList.add('pulse'); setTimeout(() => b.classList.remove('pulse'), 8000); }
+  });
 
   /* ------------------------------------------------------------------ */
   /* 3. TÍNH TOÁN "KHUNG NHÌN" SO SÁNH CHO 1 MỤC                          */
@@ -525,6 +533,8 @@ const ScanReview = (() => {
   }
   window.ScanHooks = {
     // Lọc: được getFiltered() của app.js gọi cho từng dòng
+    // Số điều kiện lọc phiếu đang bật (layout.js dùng để hiện huy hiệu khi khối lọc thu gọn)
+    activeCount() { return (filter.hasScan || filter.review) ? 1 : 0; },
     rowPassesFilter(row) {
       if (!filter.hasScan && !filter.review) return true;
       if (!hasScanOf(row)) return false;
@@ -573,6 +583,8 @@ const ScanReview = (() => {
   async function init() {
     await loadLinks();
     bindReviewUI(); bindViewerUI(); bindFilterUI();
+    // Chip "Đang quét…" trên thanh đầu trang: bấm để mở lại cửa sổ Quét phiếu
+    const chip = $('#scanBgChip'); if (chip) chip.addEventListener('click', () => openModal('scanModal'));
     if (linkMap.size) refreshMainTable(); // dữ liệu xe có thể đã vẽ trước khi nạp liên kết -> vẽ lại để hiện icon
   }
   init();
