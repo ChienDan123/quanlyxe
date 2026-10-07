@@ -90,7 +90,17 @@
     return { state: 'diff', newVal: a, defaultDecision: 'later', note: 'Khác giá trị đang có' };
   }
 
-  const api = { normPlate, cmpCccd, cmpName, cmpPhone, cmpNote, cmpCommit, normPhone, flat };
+  /* ---- Người thực hiện: KHÔNG có trên phiếu — là người đang đối chiếu (chọn ở màn so sánh).
+     Sheet trống -> đề xuất ghi; Sheet đã có NGƯỜI KHÁC -> mặc định giữ nguyên, không ghi đè. ---- */
+  function cmpAssignee(scanRaw, dsRaw) {
+    const a = String(scanRaw || '').trim(), b = String(dsRaw || '').trim();
+    if (!a) return { state: 'empty' };
+    if (!b) return { state: 'fill', newVal: a, defaultDecision: 'apply' };
+    if (flat(a) === flat(b)) return { state: 'same' };
+    return { state: 'diff', newVal: a, defaultDecision: 'skip', note: 'Sheet đã gán người khác — mặc định GIỮ NGUYÊN' };
+  }
+
+  const api = { normPlate, cmpCccd, cmpName, cmpPhone, cmpNote, cmpCommit, cmpAssignee, normPhone, flat };
   root.ScanCompare = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

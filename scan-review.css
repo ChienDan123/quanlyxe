@@ -65,3 +65,39 @@
 .sv-empty { color: #6b7280; padding: 24px 0; }
 .sv-tabs { margin-bottom: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
 @media (max-width: 800px) { .sv-split { grid-template-columns: 1fr; } }
+
+/* ===== Bổ sung: chỉnh sửa tại chỗ, xác nhận nhanh, khung ảnh cạnh bảng so sánh ===== */
+.rv-tool-lbl { font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+.rv-quick { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 6px 12px; border-bottom: 1px solid #e5e7eb; background: #fafafa; }
+.rv-tick { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; cursor: pointer; margin-right: 6px; }
+.rv-edit { width: 100%; box-sizing: border-box; font: inherit; padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; }
+textarea.rv-edit { resize: vertical; }
+.rv-cell.edited .rv-edit { border-color: #2563eb; background: #eff6ff; }   /* ô đã sửa tay */
+.rv-revert { border: 0; background: transparent; cursor: pointer; font-size: 14px; color: #2563eb; }
+.rv-row.rv-meta { background: #f9fafb; }
+.rv-card.rv-focus { box-shadow: 0 0 0 3px #6366f1; }
+.rv-badge.da_kiem + .rv-badge.applied { background: #dbeafe; color: #1e40af; }
+
+/* Vùng làm việc: ảnh | bảng. Khi mở ảnh, cột bảng hẹp lại nên mỗi trường xếp 3 cột + quyết định nằm dưới */
+.rv-work { display: block; }
+.rv-work.with-pane { display: grid; grid-template-columns: minmax(300px, 42%) minmax(0, 1fr); gap: 12px; align-items: start; }
+.rv-imgpane { position: sticky; top: 44px; max-height: 66vh; display: flex; flex-direction: column; border: 2px solid #6366f1; border-radius: 10px; background: #fff; overflow: hidden; }
+.rv-imgpane-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; justify-content: space-between; padding: 6px 8px; background: #e0e7ff; }
+.rv-imgpane-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.rv-imgpane > .hint { padding: 2px 8px; }
+.rv-imgpane-body { --z: 100; flex: 1; overflow: auto; padding: 6px; }
+.rv-pg { margin-bottom: 10px; }
+.rv-pg-label { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+.rv-pg-img { width: calc(var(--z) * 1%); max-width: none; display: block; cursor: zoom-in; border: 1px solid #d1d5db; }
+.rv-pg-pdf { width: calc(var(--z) * 1%); height: 60vh; border: 0; }
+.rv-imgpane-body[data-mode="side1"] .rv-pg:nth-child(2) { display: none; }
+.rv-imgpane-body[data-mode="side2"] .rv-pg:nth-child(1) { display: none; }
+.rv-imgpane-actions { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 6px 8px; border-top: 1px solid #e5e7eb; background: #fafafa; }
+.rv-work.with-pane .rv-split-head { display: none; }
+.rv-work.with-pane .rv-row { grid-template-columns: 90px 1fr 1fr; }
+.rv-work.with-pane .rv-dec-cell { grid-column: 1 / -1; background: #f9fafb; }
+@media (max-width: 800px) {
+  .rv-work.with-pane { grid-template-columns: 1fr; }
+  .rv-imgpane { max-height: 42vh; }
+  .rv-work.with-pane .rv-row { grid-template-columns: 1fr; }
+}

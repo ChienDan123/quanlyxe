@@ -563,16 +563,47 @@
           <option value="match">Khớp hoàn toàn</option>
           <option value="chua_kiem">Chưa kiểm</option>
           <option value="da_kiem">Đã kiểm</option>
+          <option value="img_chua">🖼 Chưa kiểm với ảnh</option>
+          <option value="img_da">🖼 Đã kiểm với ảnh</option>
           <option value="all">Tất cả</option>
         </select>
-        <input id="rvSearch" class="tpl-input" type="search" placeholder="Tìm biển số / chủ xe…" style="max-width:260px">
+        <input id="rvSearch" class="tpl-input" type="search" placeholder="Tìm biển số / chủ xe…" style="max-width:220px">
+        <!-- Người thực hiện: cùng danh sách với cột «Người thực hiện» ở bảng chính; ghi kèm khi áp dụng -->
+        <label class="rv-tool-lbl" title="Ghi vào cột «Người thực hiện» của mỗi xe khi áp dụng (Sheet đã có người khác thì giữ nguyên)">👤 Người thực hiện:
+          <select id="rvAssignee" class="row-inline-select"></select></label>
+        <label class="chk-inline" title="Khi lấy dữ liệu từ phiếu, nối dấu «📷Phiếu dd/mm: CCCD, SĐT» vào cột Ghi Chú để sau này biết nguồn"><input type="checkbox" id="rvChkTag" checked> Ghi dấu 📷 nguồn phiếu</label>
+        <label class="chk-inline" title="Bấm «Google Sheet đúng» / «Dữ liệu từ phiếu scan đúng» là áp dụng luôn cho xe đó"><input type="checkbox" id="rvChkQuick" checked> Xác nhận nhanh = áp dụng luôn</label>
         <span id="rvPager" class="rv-pager"></span>
       </div>
-      <div id="rvList" class="rv-list"></div>
-      <details class="hint-details" open>
-        <summary>📝 Xem trước những gì SẼ ghi lên Google Sheet</summary>
-        <div id="rvPreview" class="rv-preview"></div>
-      </details>
+      <!-- Vùng làm việc: [ảnh phiếu] cạnh [bảng so sánh] — ảnh chỉ hiện khi bấm «Xem ảnh phiếu» -->
+      <div id="rvWork" class="rv-work">
+        <aside id="rvImgPane" class="rv-imgpane hidden">
+          <div class="rv-imgpane-head">
+            <b id="rvImgTitle">📷 Phiếu</b>
+            <span class="rv-imgpane-tools">
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="prev" title="Xe trước">‹</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="next" title="Xe sau">›</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="side1">Mặt 1</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="side2">Mặt 2</button>
+              <button type="button" class="btn btn-primary btn-sm" data-pane="both">Cả hai</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="zoomout" title="Thu nhỏ">−</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="zoomin" title="Phóng to">+</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="zoomfit">Vừa khung</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-pane="close" title="Đóng khung ảnh">✕</button>
+            </span>
+          </div>
+          <div id="rvImgInfo" class="hint"></div>
+          <div id="rvImgBody" class="rv-imgpane-body"></div>
+          <div id="rvImgActions" class="rv-imgpane-actions"></div>
+        </aside>
+        <div class="rv-main">
+          <div id="rvList" class="rv-list"></div>
+          <details class="hint-details" open>
+            <summary>📝 Xem trước những gì SẼ ghi lên Google Sheet</summary>
+            <div id="rvPreview" class="rv-preview"></div>
+          </details>
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <span id="rvFooterSummary" class="hint"></span>
