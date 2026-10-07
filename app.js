@@ -42,6 +42,13 @@ const FIELD_MAP = [
   // Nếu cột này chưa có trên Sheet, updateRow_() trong AppsScript.gs sẽ TỰ ĐỘNG
   // tạo cột mới (giống hệt cơ chế đã có sẵn cho "Ghi Chú"), không cần sửa Apps Script.
   { key: 'nguoiThucHien', header: 'Người thực hiện' },
+  // Module Quét phiếu (scan-review.js): 3 cột mới, TỰ TẠO trên Sheet nếu chưa có (giống các cột trên).
+  //  - Phiếu scan: xe này đã có phiếu (nguồn + mã phiếu)
+  //  - Kiểm phiếu: 'Đã kiểm' | 'Chưa kiểm'
+  //  - Kết quả đối chiếu phiếu: khớp / đã bán chưa sang tên / mất cắp / cần kiểm...
+  { key: 'phieuScan',    header: 'Phiếu scan' },
+  { key: 'kiemPhieu',    header: 'Kiểm phiếu' },
+  { key: 'ketQuaPhieu',  header: 'Kết quả đối chiếu phiếu' },
 ];
 // Danh sách lựa chọn cho trường "Tình trạng cam kết" (giữa Ghi chú và Người
 // thực hiện) — dùng chung cho mọi nơi hiển thị/sửa trường này.
@@ -1013,6 +1020,8 @@ function getFiltered(skipIncludeField, skipExcludeField) {
     if (state.extraFilters.excludeSigned && isRowSigned(row)) return false;
     // Yêu cầu (Lọc nhanh theo Địa bàn cũ): kết hợp AND với các bộ lọc khác.
     if (state.quickDiaBan && !rowMatchesQuickDiaBan(row, state.quickDiaBan)) return false;
+    // Module Quét phiếu: lọc xe đã có phiếu scan / Đã kiểm / Chưa kiểm (window.ScanHooks do scan-review.js cung cấp).
+    if (window.ScanHooks && !window.ScanHooks.rowPassesFilter(row)) return false;
     return true;
   });
 }
@@ -2181,7 +2190,7 @@ function renderTable() {
       <tr data-rowid="${row._rowId}" class="${state.exportSelected.has(row._rowId) ? 'selected-row' : ''} ${isRowPrinted(row) ? 'row-printed' : ''}" ${isRowPrinted(row) ? 'title="Đã đánh dấu: Đã in"' : ''}>
         <td class="col-chk"><input type="checkbox" data-role="row-chk" ${state.exportSelected.has(row._rowId) ? 'checked' : ''}></td>
         <td>${escapeHtml(row.stt)}</td>
-        <td class="sticky-col col-sticky-bienso">${escapeHtml(row.bienSo)} ${isRowPrinted(row) ? '<span class="printed-badge" title="Đã in">🖨️</span>' : ''}</td>
+        <td class="sticky-col col-sticky-bienso">${escapeHtml(row.bienSo)} ${isRowPrinted(row) ? '<span class="printed-badge" title="Đã in">🖨️</span>' : ''}${window.ScanHooks ? window.ScanHooks.badgeHtml(row) : ''}</td>
         <td>${escapeHtml(row.soKhung)}</td>
         <td>${escapeHtml(row.soMay)}</td>
         <td>${escapeHtml(row.nhanHieu)}</td>
@@ -2974,7 +2983,7 @@ function renderDetailPanelFor(row) {
       <tbody>
         ${rows.map(r => `<tr data-rowid="${r._rowId}" class="${cssClass || ''}">
           <td class="col-chk-mini"><input type="checkbox" data-role="mini-chk" data-rowid="${r._rowId}" ${state.exportSelected.has(r._rowId) ? 'checked' : ''}></td>
-          <td class="mini-sticky-col mini-sticky-bienso">${escapeHtml(r.bienSo)}</td>
+          <td class="mini-sticky-col mini-sticky-bienso">${escapeHtml(r.bienSo)}${window.ScanHooks ? window.ScanHooks.badgeHtml(r) : ''}</td>
           <td class="mini-sticky-col mini-sticky-chuxe">${escapeHtml(r.chuXe)}</td>
           <td>${escapeHtml(r.cccd) || '—'}</td>
           <td>${escapeHtml(r.soKhung)}</td><td>${escapeHtml(r.soMay)}</td>
@@ -3029,6 +3038,7 @@ function renderDetailPanelFor(row) {
         <button type="button" id="btnSavePhone" class="btn btn-ghost btn-sm">💾 Lưu SĐT</button>
       </div>
       <div class="owner-card-actions">
+        ${window.ScanHooks ? window.ScanHooks.detailButtonHtml(row) : ''}
         <button type="button" id="btnCreateCommitmentPanel" class="btn btn-primary btn-sm">
           📄 Tạo Bản cam kết (${state.exportSelected.size} xe đã chọn)
         </button>
