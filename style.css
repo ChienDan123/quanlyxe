@@ -465,3 +465,45 @@ thead .mini-sticky-col{z-index:15;background:#f0f3f8;}
 .scan-log-error{color:#ff8a8a;}
 .scan-log-ok{color:#8ae6a8;}
 @media (max-width:700px){.scan-key-add,.scan-params,.scan-upload{grid-template-columns:1fr;}}
+
+/* =========================================================================
+   Thu gọn / mở rộng khối lọc (layout.js)
+   ========================================================================= */
+.block-title-clickable{cursor:pointer;user-select:none;}
+.block-toggle{border:1px solid var(--border);background:var(--surface);border-radius:4px;width:22px;height:22px;line-height:18px;padding:0;font-size:13px;color:inherit;}
+.block-toggle:hover{background:var(--highlight);}
+.block-count{background:var(--primary);color:#fff !important;border-radius:12px;padding:1px 9px;font-size:11px !important;font-weight:600 !important;}
+.exclude-bar .block-count{background:var(--danger);}
+.block-count.hidden{display:none;}
+/* Thu gọn: chỉ giữ lại dòng tiêu đề */
+.filter-bar.is-collapsed > :not(.filter-section-title){display:none !important;}
+.filter-bar.is-collapsed{padding-top:6px;padding-bottom:6px;row-gap:0;}
+
+/* =========================================================================
+   Quét phiếu — upload + hàng đợi (Sprint 2)
+   ========================================================================= */
+.modal-xl{width:1100px;}
+.scan-drop{display:flex;flex-direction:column;align-items:center;gap:4px;padding:18px;margin:10px 0;border:2px dashed var(--border);border-radius:var(--radius);background:#fafbfc;cursor:pointer;text-align:center;}
+.scan-drop:hover,.scan-drop.drag{border-color:var(--primary);background:var(--highlight);}
+.scan-drop input{margin-top:6px;}
+.scan-options{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;}
+.scan-controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}
+.scan-progress{height:10px;background:#e6eaf0;border-radius:6px;overflow:hidden;}
+.scan-progress > div{height:100%;width:0;background:var(--success);transition:width .3s;}
+.scan-now{min-height:16px;margin:2px 0 6px;color:var(--text);}
+.scan-summary{padding:8px 12px;background:#f3f6fb;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;font-size:13px;}
+.scan-bad{color:var(--danger);}
+.scan-warn{color:var(--warn);}
+.scan-table-wrap{max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);}
+.scan-queue-table{margin:0;}
+.scan-queue-table thead th{position:sticky;top:0;z-index:1;}
+.scan-queue-table tbody tr[data-job]{cursor:pointer;}
+.scan-queue-table tbody tr[data-job]:hover{background:var(--highlight);}
+.scan-row-file td{background:#eef1f6;}
+.scan-row-run td{background:#fffbe6;}
+.scan-row-error td{background:#fdf0ef;}
+.scan-row-dup td{color:var(--text-muted);}
+.scan-plate{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;background:#eef1f6;}
+.scan-plate.ok{background:#e6f7ee;color:var(--success);}
+.scan-plate.miss{background:#fff3e0;color:var(--warn);}
+@media (max-width:1150px){.modal-xl{width:96vw;}}

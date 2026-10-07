@@ -127,28 +127,101 @@ const ScanApp = (() => {
     });
   }
 
-  // Nén ảnh: giảm cạnh dài về <= maxEdge, xuất JPEG. Phiếu scan A4 300dpi có thể
-  // rất nặng (5-10MB); nén còn ~300-600KB mà chữ vẫn đọc rõ -> nhanh + tiết kiệm.
-  // PDF: giữ nguyên (Gemini đọc trực tiếp application/pdf).
-  async function prepareFile(file, maxEdge) {
-    const mime = file.type || '';
-    if (mime === 'application/pdf' || /\.pdf$/i.test(file.name)) {
-      return { blob: file, mime: 'application/pdf', base64: await blobToBase64(file), name: file.name, original: file.size };
+  /* ---- XỬ LÝ ẢNH / PDF TRƯỚC KHI GỬI GEMINI ----
+     NGUYÊN NHÂN LỖI 400 "Request contains an invalid argument" (Sprint 1):
+     file PDF ~120MB bị gửi NGUYÊN VẸN (nhánh PDF cũ không nén) dưới dạng base64
+     inline (~160MB). Gemini giới hạn toàn bộ request inline ~20MB nên từ chối.
+     Cách sửa: KHÔNG bao giờ gửi PDF thô. PDF được render từng trang -> ảnh JPEG
+     (pdf.js chạy ngay trên trình duyệt), mỗi ảnh nén <= ~3,5MB. Có thêm chốt chặn
+     dung lượng request trước khi gửi (xem analyzeSheet). */
+  const MAX_IMG_BYTES = 3.5 * 1024 * 1024;     // trần dung lượng mỗi ảnh sau nén
+  const MAX_REQUEST_B64 = 18 * 1024 * 1024;    // trần tổng base64 của 1 request (Gemini ~20MB)
+
+  const canvasToBlob = (canvas, q) => new Promise(res => canvas.toBlob(res, 'image/jpeg', q));
+
+  // Canvas -> JPEG đã nén. Nếu vẫn quá nặng: hạ chất lượng, rồi thu nhỏ 20% và thử lại.
+  async function canvasToPrepared(canvas, name, originalSize) {
+    let c = canvas, q = 0.85, blob = await canvasToBlob(c, q), guard = 0;
+    while (blob && blob.size > MAX_IMG_BYTES && guard++ < 8) {
+      if (q > 0.55) q -= 0.1;
+      else {
+        const small = document.createElement('canvas');
+        small.width = Math.max(200, Math.round(c.width * 0.8));
+        small.height = Math.max(200, Math.round(c.height * 0.8));
+        small.getContext('2d').drawImage(c, 0, 0, small.width, small.height);
+        if (c !== canvas) { c.width = c.height = 0; }
+        c = small;
+      }
+      blob = await canvasToBlob(c, q);
     }
-    if (!/^image\/(jpeg|png|webp)$/.test(mime)) {
-      throw new Error(`Định dạng "${mime || file.name}" chưa hỗ trợ (dùng JPG/PNG/WebP/PDF).`);
-    }
-    const bmp = await createImageBitmap(file);
+    if (!blob) throw new Error('Không nén được ảnh (canvas.toBlob trả về rỗng)');
+    const out = { blob, mime: 'image/jpeg', base64: await blobToBase64(blob), name, original: originalSize || blob.size, w: c.width, h: c.height };
+    if (c !== canvas) c.width = c.height = 0;
+    return out;
+  }
+
+  const isPdfFile = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+  const isImageFile = (f) => /^image\/(jpeg|png|webp)$/.test(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name);
+
+  // Nén 1 file ảnh: giảm cạnh dài về <= maxEdge, xuất JPEG.
+  async function prepareImageFile(file, maxEdge) {
+    if (!isImageFile(file)) throw new Error(`Định dạng "${file.type || file.name}" chưa hỗ trợ (dùng JPG/PNG/WebP/PDF).`);
+    let bmp;
+    try { bmp = await createImageBitmap(file); }
+    catch (e) { throw new Error('Không đọc được ảnh "' + file.name + '" (file hỏng hoặc quá lớn): ' + e.message); }
     const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
-    const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
     const canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
+    canvas.width = Math.round(bmp.width * scale); canvas.height = Math.round(bmp.height * scale);
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); // nền trắng cho PNG trong suốt
-    ctx.drawImage(bmp, 0, 0, w, h);
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); // nền trắng cho PNG trong suốt
+    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
     if (bmp.close) bmp.close();
-    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.85));
-    return { blob, mime: 'image/jpeg', base64: await blobToBase64(blob), name: file.name, original: file.size, w, h };
+    const out = await canvasToPrepared(canvas, file.name, file.size);
+    canvas.width = canvas.height = 0;
+    return out;
+  }
+
+  /* ---- pdf.js (nạp theo yêu cầu từ CDN, chỉ khi người dùng upload PDF) ---- */
+  const PDFJS_VER = '3.11.174';
+  const PDFJS_BASE = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VER}/`;
+  let _pdfjsPromise = null;
+  function loadPdfJs() {
+    if (_pdfjsPromise) return _pdfjsPromise;
+    _pdfjsPromise = new Promise((resolve, reject) => {
+      if (window.pdfjsLib) { resolve(window.pdfjsLib); return; }
+      const sc = document.createElement('script');
+      sc.src = PDFJS_BASE + 'pdf.min.js';
+      sc.onload = async () => {
+        try {
+          // Worker nằm khác origin (CDN) nên trình duyệt chặn nếu trỏ thẳng URL ->
+          // tải mã worker về, đóng vào Blob cùng origin rồi mới đưa cho pdf.js.
+          const code = await (await fetch(PDFJS_BASE + 'pdf.worker.min.js')).text();
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+          resolve(window.pdfjsLib);
+        } catch (e) { reject(new Error('Không nạp được worker pdf.js: ' + e.message)); }
+      };
+      sc.onerror = () => { _pdfjsPromise = null; reject(new Error('Không tải được pdf.js từ CDN (kiểm tra mạng).')); };
+      document.head.appendChild(sc);
+    });
+    return _pdfjsPromise;
+  }
+  async function openPdf(file) {
+    const lib = await loadPdfJs();
+    const buf = await file.arrayBuffer(); // file lớn (100MB+) vẫn đọc được, chỉ tốn RAM tạm thời
+    return lib.getDocument({ data: new Uint8Array(buf), isEvalSupported: false }).promise;
+  }
+  // Render 1 trang PDF -> ảnh JPEG nén. Chỉ render khi tới lượt tờ đó (tiết kiệm RAM).
+  async function renderPdfPage(doc, pageNo, maxEdge, name) {
+    const page = await doc.getPage(pageNo);
+    const vp1 = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: Math.min(4, maxEdge / Math.max(vp1.width, vp1.height)) });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, background: '#ffffff' }).promise;
+    page.cleanup();
+    const out = await canvasToPrepared(canvas, `${name} (tr.${pageNo})`, 0);
+    canvas.width = canvas.height = 0;
+    return out;
   }
 
   /* ---------------------------- 3. CÀI ĐẶT MODULE ---------------------------- */
@@ -158,6 +231,8 @@ const ScanApp = (() => {
     timeoutSec: 90,
     maxWaitRounds: 4,          // số lần chờ khi MỌI key đang cooldown, rồi mới báo lỗi
     maxEdgePx: 2000,
+    pagesPerSheet: 2,          // 2 = mỗi tờ gồm 2 trang/ảnh liên tiếp (mặt trước + sau); 1 = mỗi trang là 1 tờ
+    skipDuplicates: true,      // bỏ qua tờ đã quét (trùng hash ảnh mặt 1)
   };
   async function loadSettings() {
     try { return { ...DEFAULT_SETTINGS, ...((await dbGet(ST_SETTINGS, 'main')) || {}) }; }
@@ -410,7 +485,7 @@ ${hasBack
   : `9. Chỉ có 1 ảnh (mặt 1). Đặt backHasContent = false.`}`;
   }
 
-  // Dựng parts cho request từ ảnh đã chuẩn bị (prepareFile)
+  // Dựng parts cho request từ ảnh đã chuẩn bị (prepareImageFile / renderPdfPage)
   function buildParts(front, back) {
     const parts = [{ text: buildPrompt(!!back) }];
     parts.push({ text: 'MẶT 1:' });
@@ -449,6 +524,11 @@ ${hasBack
 
   // Phân tích 1 tờ: trả { extracted, geminiRaw, meta }. Dùng lại cho batch ở Sprint 2.
   async function analyzeSheet({ front, back, onStatus, signal }) {
+    // Chốt chặn: tổng base64 vượt trần -> báo rõ thay vì để Gemini trả 400 mơ hồ.
+    const total = front.base64.length + (back ? back.base64.length : 0);
+    if (total > MAX_REQUEST_B64) {
+      throw new GeminiError('fatal', `Dung lượng ảnh quá lớn (${(total / 1048576).toFixed(1)}MB > 18MB) dù đã nén.`);
+    }
     const r = await geminiGenerate({ parts: buildParts(front, back), schema: SCAN_SCHEMA, onStatus, signal });
     const json = parseJsonLoose(r.text);
     return { json, extracted: toExtracted(json), geminiRaw: r.text, meta: r };
@@ -584,56 +664,278 @@ ${hasBack
     };
   }
 
-  /* ---------------------------- 8. UI: MODAL QUÉT PHIẾU (SPRINT 1: THỬ 1 PHIẾU) ---------------------------- */
-  const ui = { front: null, back: null, abort: null, objectUrls: [], lastResult: null };
+  /* ---------------------------- 8. HÀNG ĐỢI UPLOAD (TUẦN TỰ) ---------------------------- */
+  /* Mô hình:
+       entry = 1 "nguồn" người dùng upload: 1 file PDF, hoặc 1 nhóm ảnh upload cùng lần.
+       job   = 1 TỜ vật lý (1–2 trang/ảnh) = 1 lần gọi Gemini.
+     Xử lý TUẦN TỰ tuyệt đối: hết tờ này mới sang tờ kế, hết file này mới sang file kế.
+     PDF chỉ được MỞ khi tới lượt (expandEntry) và ĐÓNG ngay khi xong file -> không
+     giữ nhiều file lớn trong RAM. */
+  const Q = { entries: [], running: false, paused: false, abort: null, seq: 0, jobNo: 0 };
+
+  const allJobs = () => Q.entries.flatMap(e => e.jobs || []);
+  const platesText = (job) => (job.extracted && job.extracted.bienSo.length) ? job.extracted.bienSo.join(', ') : '';
 
   function dbgLog(msg, level) {
     const el = $('#scanLog');
-    const t = new Date().toLocaleTimeString('vi-VN');
     const line = document.createElement('div');
     line.className = 'scan-log-' + (level || 'info');
-    line.textContent = `[${t}] ${msg}`;
+    line.textContent = `[${new Date().toLocaleTimeString('vi-VN')}] ${msg}`;
     el.appendChild(line);
+    while (el.childNodes.length > 500) el.removeChild(el.firstChild); // giữ log gọn khi chạy hàng nghìn tờ
     el.scrollTop = el.scrollHeight;
     $('#scanStatusText').textContent = msg;
   }
 
-  function setPreview(which, file) {
-    const box = $(which === 'front' ? '#scanPreviewFront' : '#scanPreviewBack');
-    ui[which] = file || null;
-    if (!file) { box.innerHTML = '<span class="hint">Chưa chọn</span>'; return; }
-    if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
-      box.innerHTML = '<span class="hint">📄 ' + escapeHtml(file.name) + '</span>';
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    ui.objectUrls.push(url);
-    box.innerHTML = '<img alt="preview" src="' + url + '"><div class="hint">' + escapeHtml(file.name) + ' · ' + Math.round(file.size / 1024) + ' KB</div>';
+  // Tìm bản ghi scan đã xong có cùng hash ảnh mặt 1 (chống quét trùng)
+  async function findDoneByHash(hash) {
+    const all = await tx(ST_SCANS, 'readonly', os => os.index('frontHash').getAll(hash));
+    return (all || []).find(r => r.status === 'done' && !r.isTest) || null;
   }
 
-  function renderResult(res, savedId) {
-    const x = res.extracted;
-    const rows = (x.vehicles || []).map((v, i) => `
-      <tr><td>${i + 1}</td><td><b>${escapeHtml(v.bienSo || '')}</b><div class="hint">chuẩn hóa: ${escapeHtml(normalizeBienSo(v.bienSo))}</div></td>
-      <td>${escapeHtml(v.loaiXe || '')}</td>
-      <td>${escapeHtml(TINH_TRANG_LABEL[v.tinhTrang] || v.tinhTrang || '')}<div class="hint">${escapeHtml(v.tinhTrangGhiTrenPhieu || '')}</div></td>
-      <td>${escapeHtml(v.ghiChu || '')}</td></tr>`).join('');
-    const m = res.meta;
-    const tok = m.usage ? `${m.usage.promptTokenCount || 0} vào / ${m.usage.candidatesTokenCount || 0} ra` : '—';
-    $('#scanResultView').innerHTML = `
-      <div class="scan-kv">
-        <div><span>Loại phiếu</span><b>${escapeHtml(x.loaiPhieu)}</b></div>
-        <div><span>Chủ hộ</span><b>${escapeHtml(x.chuHo) || '—'}</b></div>
-        <div><span>CCCD (chữ số)</span><b>${escapeHtml(x.cccd) || '—'}</b> <small>(${x.cccd.length} số)</small></div>
-        <div><span>SĐT</span><b>${escapeHtml(x.sdt) || '—'}</b></div>
-        <div><span>Mặt 2 có nội dung</span><b>${x.backHasContent ? 'Có' : 'Không'}</b></div>
-        <div><span>Ghi chú tay</span><b>${escapeHtml(x.ghiChu) || '—'}</b></div>
-      </div>
-      ${x.truongKhongRo.length ? '<div class="error-text">⚠️ Chữ khó đọc, cần kiểm tra: ' + escapeHtml(x.truongKhongRo.join(', ')) + '</div>' : ''}
-      <table class="scan-mini-table"><thead><tr><th>#</th><th>Biển số</th><th>Loại xe</th><th>Tình trạng</th><th>Ghi chú</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="hint">Không có xe nào được nhận diện</td></tr>'}</tbody></table>
-      <div class="hint">Model: ${escapeHtml(m.model)} · Key: ${escapeHtml(m.keyLabel)} · ${m.ms} ms · token ${tok}${savedId ? ' · đã lưu DB: ' + savedId.slice(0, 8) : ''}</div>`;
-    $('#scanJsonRaw').textContent = JSON.stringify(res.json, null, 2);
+  /* ---- ĐỐI SÁNH (Sprint 2: chỉ khớp EXACT biển số đã chuẩn hóa) ----
+     CCCD / chủ xe / tình trạng: Sprint 3. Biển gần đúng KHÔNG được gán nhầm:
+     không có trong DS -> đánh dấu "phiếu lạ". */
+  function buildDsIndex() {
+    const idx = new Map();
+    const rows = (typeof state !== 'undefined' && state.rawData) ? state.rawData : [];
+    for (const r of rows) {
+      const k = normalizeBienSo(r.bienSo);
+      if (!k) continue;
+      if (!idx.has(k)) idx.set(k, []);
+      idx.get(k).push(r);
+    }
+    return idx;
+  }
+  function matchPlates(plates, idx) {
+    if (!idx.size) return null; // chưa tải danh sách xe -> không đối sánh
+    return plates.map(p => ({ bienSo: p, found: idx.has(p), rows: (idx.get(p) || []).length }));
+  }
+
+  /* ---- Mở rộng 1 entry thành các job (tờ) ---- */
+  async function expandEntry(entry) {
+    const st = await loadSettings();
+    const pps = st.pagesPerSheet === 1 ? 1 : 2;
+    entry.jobs = [];
+    const mk = (label, pagesDesc, render) => {
+      const job = { id: ++Q.jobNo, entry, label, pagesDesc, render, status: 'wait', error: '', extracted: null, json: null, match: null, scanId: null };
+      entry.jobs.push(job);
+      return job;
+    };
+    if (entry.type === 'pdf') {
+      dbgLog(`Đang mở PDF "${entry.name}" (${(entry.files[0].size / 1048576).toFixed(1)}MB)…`);
+      entry.getDoc = async () => entry.doc || (entry.doc = await openPdf(entry.files[0]));
+      const doc = await entry.getDoc();
+      const n = doc.numPages;
+      for (let i = 1; i <= n; i += pps) {
+        const nums = (pps === 2 && i + 1 <= n) ? [i, i + 1] : [i];
+        mk(entry.name, 'tr.' + nums.join('-'), async (maxEdge) => {
+          const d = await entry.getDoc();
+          const out = [];
+          for (const no of nums) out.push(await renderPdfPage(d, no, maxEdge, entry.name)); // tuần tự từng trang
+          return out;
+        });
+      }
+      dbgLog(`PDF "${entry.name}": ${n} trang → ${entry.jobs.length} tờ (${pps} trang/tờ).`, 'ok');
+    } else {
+      const files = entry.files;
+      for (let i = 0; i < files.length; i += pps) {
+        const grp = files.slice(i, i + pps);
+        mk(grp.map(f => f.name).join(' + '), grp.length > 1 ? 'ảnh ' + (i + 1) + '-' + (i + grp.length) : 'ảnh ' + (i + 1),
+          async (maxEdge) => { const out = []; for (const f of grp) out.push(await prepareImageFile(f, maxEdge)); return out; });
+      }
+      dbgLog(`${files.length} ảnh → ${entry.jobs.length} tờ (${pps} ảnh/tờ).`, 'ok');
+    }
+    entry.jobs.forEach(j => renderJobRow(j));
+    updateAll();
+  }
+
+  /* ---- Xử lý 1 tờ: render/nén -> (bỏ qua nếu trùng) -> lưu DB -> Gemini -> đối sánh -> lưu ---- */
+  async function processJob(job, dsIdx) {
+    job.status = 'run'; job.error = '';
+    renderJobRow(job); updateAll();
+    Q.abort = new AbortController();
+    let rec = null;
+    try {
+      const st = await loadSettings();
+      const known = allJobs().length;
+      const pos = allJobs().indexOf(job) + 1;
+      dbgLog(`Tờ ${pos}/${known} — ${job.label} (${job.pagesDesc}): chuẩn bị ảnh…`);
+      const pages = await job.render(st.maxEdgePx);
+      const front = pages[0], back = pages[1] || null;
+      dbgLog(`  mặt 1: ${Math.round(front.blob.size / 1024)}KB` + (back ? `, mặt 2: ${Math.round(back.blob.size / 1024)}KB` : ' (không có mặt 2)'));
+      const hash = await sha256Hex(front.blob);
+      if (st.skipDuplicates && hash) {
+        const ex = await findDoneByHash(hash);
+        if (ex) {
+          job.status = 'dup'; job.scanId = ex.id; job.extracted = ex.extracted; job.match = ex.match || null;
+          dbgLog(`  tờ trùng với bản đã quét → bỏ qua.`, 'warn');
+          return;
+        }
+      }
+      rec = {
+        id: uid(), timestamp: Date.now(), source: 'batch', isTest: false,
+        fileName: job.entry.name, pagesDesc: job.pagesDesc,
+        frontBlob: front.blob, frontMime: front.mime, backBlob: back ? back.blob : null, backMime: back ? back.mime : null,
+        frontHash: hash, backBlank: false, status: 'analyzing', matchedBienSo: [],
+      };
+      job.scanId = rec.id;
+      await dbPut(ST_SCANS, rec);
+      const res = await analyzeSheet({ front, back, onStatus: dbgLog, signal: Q.abort.signal });
+      const match = matchPlates(res.extracted.bienSo, dsIdx);
+      Object.assign(rec, {
+        status: 'done', geminiRaw: res.geminiRaw, model: res.meta.model, keyLabel: res.meta.keyLabel,
+        extracted: res.extracted, backBlank: back ? !res.extracted.backHasContent : false,
+        matchedBienSo: match ? match.filter(m => m.found).map(m => m.bienSo) : [], match,
+      });
+      await dbPut(ST_SCANS, rec);
+      job.extracted = res.extracted; job.json = res.json; job.match = match; job.status = 'done';
+      const tt = res.extracted.tinhTrang.map(t => TINH_TRANG_LABEL[t] || t).join(' / ');
+      dbgLog(`  ✔ ${platesText(job) || '(không đọc được biển số)'} — ${tt || '—'}` + (match ? ` — ${match.filter(m => m.found).length}/${match.length} biển khớp DS` : ' — chưa tải DS xe'), 'ok');
+    } catch (e) {
+      const kind = e && e.kind;
+      if (rec) { rec.status = (kind === 'quota' || kind === 'nokey' || kind === 'cancelled') ? 'pending' : 'error'; rec.error = e.message; try { await dbPut(ST_SCANS, rec); } catch (x) { /* bỏ qua */ } }
+      if (kind === 'quota' || kind === 'nokey' || kind === 'cancelled') {
+        // Lỗi KHÔNG phải do tờ giấy -> giữ tờ ở trạng thái chờ và TẠM DỪNG hàng đợi (tránh đốt hết cả lốc vào lỗi).
+        job.status = 'wait'; job.error = e.message; Q.paused = true;
+        dbgLog(kind === 'cancelled' ? 'Đã dừng tờ hiện tại.' : `Tạm dừng hàng đợi: ${e.message}`, 'warn');
+      } else {
+        job.status = 'error'; job.error = (e && e.message) || String(e);
+        dbgLog(`  ✘ Lỗi tờ ${job.label} (${job.pagesDesc}) [${kind || 'unknown'}]: ${job.error}`, 'error');
+        if (e && e.raw) $('#scanJsonRaw').textContent = String(e.raw);
+      }
+    } finally {
+      Q.abort = null;
+      renderJobRow(job); updateAll();
+    }
+  }
+
+  /* ---- Vòng chạy chính ---- */
+  async function runQueue() {
+    if (Q.running) return;
+    Q.running = true; Q.paused = false; updateAll();
+    const dsIdx = buildDsIndex();
+    if (!dsIdx.size) dbgLog('⚠️ Chưa tải danh sách xe từ Google Sheet — chỉ OCR, chưa đối sánh được.', 'warn');
+    try {
+      for (const entry of Q.entries) {
+        if (Q.paused) break;
+        if (entry.status === 'done') continue;
+        entry.status = 'run'; renderEntryRow(entry);
+        try {
+          if (!entry.jobs) await expandEntry(entry);
+        } catch (e) {
+          entry.status = 'error'; entry.error = e.message; renderEntryRow(entry);
+          dbgLog(`Không mở được "${entry.name}": ${e.message}`, 'error');
+          continue; // file hỏng -> sang file kế
+        }
+        for (const job of entry.jobs) {
+          if (Q.paused) break;
+          if (job.status !== 'wait') continue;
+          await processJob(job, dsIdx);
+        }
+        const pending = entry.jobs.some(j => j.status === 'wait' || j.status === 'run');
+        if (!pending) {
+          entry.status = entry.jobs.some(j => j.status === 'error') ? 'partial' : 'done';
+          // Giải phóng PDF khỏi RAM ngay khi xong file
+          if (entry.doc) { try { entry.doc.destroy(); } catch (x) { /* bỏ qua */ } entry.doc = null; }
+        }
+        renderEntryRow(entry);
+      }
+    } finally {
+      Q.running = false;
+      updateAll();
+      const left = allJobs().some(j => j.status === 'wait') || Q.entries.some(e => !e.jobs && e.status !== 'error');
+      dbgLog(Q.paused ? 'Hàng đợi đang tạm dừng.' : (left ? 'Dừng.' : '🏁 Hoàn tất toàn bộ hàng đợi.'), left || Q.paused ? 'warn' : 'ok');
+    }
+  }
+
+  /* ---- Thêm file vào hàng đợi ---- */
+  function addFiles(fileList) {
+    const files = Array.from(fileList || []);
+    const pdfs = files.filter(isPdfFile);
+    const imgs = files.filter(f => !isPdfFile(f) && isImageFile(f)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const bad = files.filter(f => !isPdfFile(f) && !isImageFile(f));
+    if (bad.length) toast(`Bỏ qua ${bad.length} file không hỗ trợ: ${bad.slice(0, 3).map(f => f.name).join(', ')}`, true);
+    const mk = (type, name, fs) => {
+      const e = { id: ++Q.seq, type, name, files: fs, status: 'wait', jobs: null, doc: null, error: '' };
+      Q.entries.push(e);
+      renderEntryRow(e);
+    };
+    pdfs.forEach(f => mk('pdf', f.name, [f]));
+    if (imgs.length) mk('img', imgs.length === 1 ? imgs[0].name : `${imgs.length} ảnh (${imgs[0].name} …)`, imgs);
+    if (pdfs.length || imgs.length) dbgLog(`Đã thêm ${pdfs.length} PDF + ${imgs.length} ảnh vào hàng đợi.`);
+    updateAll();
+  }
+
+  /* ---- Hiển thị ---- */
+  const STATUS_LABEL = { wait: 'Chờ', run: '⏳ Đang xử lý', done: '✅ Xong', dup: '♻️ Trùng — bỏ qua', error: '❌ Lỗi' };
+
+  function ensureRow(id, entry, isFile) {
+    let tr = document.getElementById(id);
+    if (tr) return tr;
+    tr = document.createElement('tr');
+    tr.id = id;
+    if (isFile) tr.className = 'scan-row-file';
+    const body = $('#scanQueueBody');
+    // Chèn ngay SAU hàng cuối của entry (để tờ của file nào nằm dưới file đó)
+    const anchor = isFile ? null : (entry.tail || entry.rowEl);
+    if (anchor && anchor.nextSibling) body.insertBefore(tr, anchor.nextSibling); else body.appendChild(tr);
+    if (isFile) entry.rowEl = tr;
+    entry.tail = tr;
+    return tr;
+  }
+  function renderEntryRow(e) {
+    const tr = ensureRow('scan-entry-' + e.id, e, true);
+    const n = e.jobs ? e.jobs.length : null;
+    const st = { wait: 'Chờ xử lý', run: '⏳ Đang mở/xử lý', done: '✅ Hoàn tất', partial: '⚠️ Xong (có tờ lỗi)', error: '❌ Không mở được' }[e.status] || e.status;
+    tr.innerHTML = `<td colspan="6">${e.type === 'pdf' ? '📄' : '🖼️'} <b>${escapeHtml(e.name)}</b>${n != null ? ` · ${n} tờ` : ''} — ${st}${e.error ? ' · ' + escapeHtml(e.error) : ''}</td>`;
+  }
+  function renderJobRow(job) {
+    const tr = ensureRow('scan-job-' + job.id, job.entry, false);
+    tr.className = 'scan-row-' + job.status;
+    const x = job.extracted;
+    const plates = x ? x.bienSo.map(p => {
+      const m = job.match && job.match.find(mm => mm.bienSo === p);
+      const cls = !job.match ? '' : (m && m.found ? 'ok' : 'miss');
+      return `<span class="scan-plate ${cls}" title="${!job.match ? 'Chưa tải DS xe' : (cls === 'ok' ? 'Khớp danh sách xe' : 'KHÔNG có trong DS — phiếu lạ / cần bổ sung')}">${escapeHtml(p)}</span>`;
+    }).join(' ') : '';
+    const tt = x ? x.tinhTrang.map(t => TINH_TRANG_LABEL[t] || t).join(' / ') : '';
+    const err = job.error ? ` title="${escapeHtml(job.error)}"` : '';
+    tr.dataset.job = job.id;
+    tr.innerHTML = `<td>${job.id}</td><td>${escapeHtml(job.label)}<div class="hint">${escapeHtml(job.pagesDesc)}</div></td>
+      <td>${plates || '<span class="hint">—</span>'}</td><td>${x ? escapeHtml(x.chuHo) : ''}</td><td>${escapeHtml(tt)}</td>
+      <td${err}>${STATUS_LABEL[job.status]}${job.status === 'error' || (job.status === 'wait' && job.error) ? '<div class="hint">' + escapeHtml(job.error.slice(0, 80)) + '</div>' : ''}</td>`;
+  }
+
+  function updateAll() {
+    const jobs = allJobs();
+    const cnt = (s) => jobs.filter(j => j.status === s).length;
+    const done = cnt('done'), dup = cnt('dup'), err = cnt('error');
+    const finished = done + dup + err;
+    const unopened = Q.entries.filter(e => !e.jobs && e.status !== 'error').length;
+    // Thanh tiến độ (chỉ biết tổng số tờ của các file đã mở)
+    $('#scanProgressBar').style.width = (jobs.length ? Math.round(finished / jobs.length * 100) : 0) + '%';
+    $('#scanProgressText').textContent = jobs.length || unopened
+      ? `${finished}/${jobs.length} tờ` + (unopened ? ` · còn ${unopened} file chưa mở` : '') + (Q.running ? (Q.paused ? ' · đang dừng sau tờ này…' : ' · đang chạy') : (Q.paused ? ' · tạm dừng' : ''))
+      : 'Chưa có file trong hàng đợi';
+    // Báo cáo tổng
+    let khop = 0, miss = 0;
+    for (const j of jobs) if (j.match) for (const m of j.match) (m.found ? khop++ : miss++);
+    $('#scanSummary').innerHTML = `Xong <b>${done}</b> · trùng <b>${dup}</b> · lỗi <b class="${err ? 'scan-bad' : ''}">${err}</b> · biển khớp DS <b>${khop}</b> · phiếu lạ (chưa có trong DS) <b class="${miss ? 'scan-warn' : ''}">${miss}</b>`;
+    // Nút
+    const hasWork = jobs.some(j => j.status === 'wait') || unopened > 0;
+    $('#btnScanStart').disabled = Q.running || !hasWork;
+    $('#btnScanStart').textContent = (finished || Q.paused) ? '▶ Tiếp tục' : '▶ Bắt đầu';
+    $('#btnScanPause').disabled = !Q.running || Q.paused;
+    $('#btnScanStop').disabled = !Q.running;
+    $('#btnScanRetry').disabled = Q.running || !err;
+    $('#btnScanClearQueue').disabled = Q.running || !Q.entries.length;
+  }
+
+  function showJobJson(jobId) {
+    const job = allJobs().find(j => j.id === jobId);
+    if (!job) return;
+    $('#scanJsonRaw').textContent = job.json ? JSON.stringify(job.json, null, 2) : (job.extracted ? JSON.stringify(job.extracted, null, 2) : (job.error || '(chưa có dữ liệu)'));
   }
 
   async function refreshScanCount() {
@@ -641,62 +943,52 @@ ${hasBack
     catch (e) { $('#scanDbCount').textContent = 'DB lỗi: ' + e.message; }
   }
 
-  async function runTest() {
-    if (!ui.front) { toast('Chọn ảnh/PDF mặt 1 trước.', true); return; }
-    const btn = $('#btnScanRun'), cancel = $('#btnScanCancel');
-    btn.disabled = true; cancel.classList.remove('hidden');
-    ui.abort = new AbortController();
-    $('#scanResultView').innerHTML = ''; $('#scanJsonRaw').textContent = '';
-    try {
-      const st = await loadSettings();
-      dbgLog('Chuẩn bị ảnh (nén cạnh dài ≤ ' + st.maxEdgePx + 'px)…');
-      const front = await prepareFile(ui.front, st.maxEdgePx);
-      const back = ui.back ? await prepareFile(ui.back, st.maxEdgePx) : null;
-      dbgLog(`Mặt 1: ${Math.round(front.original / 1024)}KB → ${Math.round(front.blob.size / 1024)}KB` + (back ? `; mặt 2: ${Math.round(back.original / 1024)}KB → ${Math.round(back.blob.size / 1024)}KB` : ''));
-      const res = await analyzeSheet({ front, back, onStatus: dbgLog, signal: ui.abort.signal });
-      dbgLog(`Xong: ${res.extracted.bienSo.length} xe nhận diện (${res.meta.ms}ms)`, 'ok');
-      let savedId = null;
-      if ($('#chkScanSave').checked) {
-        savedId = uid();
-        await dbPut(ST_SCANS, {
-          id: savedId, timestamp: Date.now(), source: 'manual-test', isTest: true,
-          frontBlob: front.blob, frontMime: front.mime,
-          backBlob: back ? back.blob : null, backMime: back ? back.mime : null,
-          frontHash: await sha256Hex(front.blob),
-          backBlank: back ? !res.extracted.backHasContent : false,
-          status: 'done', geminiRaw: res.geminiRaw, model: res.meta.model, keyLabel: res.meta.keyLabel,
-          extracted: res.extracted, matchedBienSo: [],
-        });
-        dbgLog('Đã lưu vào IndexedDB (scans), id=' + savedId.slice(0, 8), 'ok');
-        refreshScanCount();
-      }
-      ui.lastResult = res;
-      renderResult(res, savedId);
-    } catch (e) {
-      const label = e.kind === 'cancelled' ? 'Đã hủy.' : 'LỖI [' + (e.kind || 'unknown') + ']: ' + e.message;
-      dbgLog(label, e.kind === 'cancelled' ? 'warn' : 'error');
-      if (e.raw) $('#scanJsonRaw').textContent = String(e.raw);
-    } finally {
-      btn.disabled = false; cancel.classList.add('hidden'); ui.abort = null;
-      renderKeyList();
-    }
-  }
-
   function bindScanUI() {
     $('#btnScan').addEventListener('click', async () => {
       openModal('scanModal');
-      renderKeyList();
-      refreshScanCount();
+      const st = await loadSettings();
+      $('#scanPagesPerSheet').value = String(st.pagesPerSheet);
+      $('#chkScanSkipDup').checked = !!st.skipDuplicates;
+      renderKeyList(); refreshScanCount(); updateAll();
     });
-    $('#scanOpenSettings').addEventListener('click', () => {
-      closeModal('scanModal');
-      $('#btnSettings').click();
+    $('#scanOpenSettings').addEventListener('click', () => { closeModal('scanModal'); $('#btnSettings').click(); });
+
+    // Chọn file + kéo thả
+    $('#scanFiles').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
+    const drop = $('#scanDrop');
+    ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('drag'); }));
+    ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('drag'); }));
+    drop.addEventListener('drop', (e) => addFiles(e.dataTransfer.files));
+
+    // Tuỳ chọn (lưu ngay)
+    $('#scanPagesPerSheet').addEventListener('change', async (e) => {
+      const st = await loadSettings(); st.pagesPerSheet = parseInt(e.target.value, 10) === 1 ? 1 : 2; await saveSettings(st);
+      toast('Áp dụng cho file được mở từ giờ (file đã mở giữ nguyên cách chia tờ).');
     });
-    $('#scanFileFront').addEventListener('change', (e) => setPreview('front', e.target.files[0]));
-    $('#scanFileBack').addEventListener('change', (e) => setPreview('back', e.target.files[0]));
-    $('#btnScanClearBack').addEventListener('click', () => { $('#scanFileBack').value = ''; setPreview('back', null); });
-    $('#btnScanRun').addEventListener('click', runTest);
-    $('#btnScanCancel').addEventListener('click', () => { if (ui.abort) ui.abort.abort('user'); });
+    $('#chkScanSkipDup').addEventListener('change', async (e) => {
+      const st = await loadSettings(); st.skipDuplicates = e.target.checked; await saveSettings(st);
+    });
+
+    // Điều khiển hàng đợi
+    $('#btnScanStart').addEventListener('click', runQueue);
+    $('#btnScanPause').addEventListener('click', () => { Q.paused = true; dbgLog('Sẽ tạm dừng sau khi xong tờ đang xử lý.', 'warn'); updateAll(); });
+    $('#btnScanStop').addEventListener('click', () => { Q.paused = true; if (Q.abort) Q.abort.abort('user'); });
+    $('#btnScanRetry').addEventListener('click', () => {
+      // Đưa các tờ lỗi về trạng thái chờ rồi chạy lại
+      for (const j of allJobs()) if (j.status === 'error') { j.status = 'wait'; j.error = ''; renderJobRow(j); }
+      for (const e of Q.entries) if (e.status === 'partial') e.status = 'wait';
+      runQueue();
+    });
+    $('#btnScanClearQueue').addEventListener('click', () => {
+      if (!confirm('Xóa hàng đợi hiện tại? (Dữ liệu đã lưu trong DB vẫn giữ nguyên)')) return;
+      Q.entries.forEach(e => { if (e.doc) { try { e.doc.destroy(); } catch (x) { /* bỏ qua */ } } });
+      Q.entries = []; Q.paused = false; $('#scanQueueBody').innerHTML = ''; updateAll();
+    });
+
+    $('#scanQueueBody').addEventListener('click', (e) => {
+      const tr = e.target.closest('tr[data-job]');
+      if (tr) showJobJson(parseInt(tr.dataset.job, 10));
+    });
     $('#btnScanCopyJson').addEventListener('click', () => {
       const t = $('#scanJsonRaw').textContent;
       if (!t) return;
@@ -704,12 +996,13 @@ ${hasBack
     });
     $('#btnScanClearLog').addEventListener('click', () => { $('#scanLog').innerHTML = ''; });
     $('#btnScanDeleteTests').addEventListener('click', async () => {
-      if (!confirm('Xóa tất cả bản ghi scan thử (isTest) trong DB?')) return;
+      if (!confirm('Xóa các bản ghi scan thử từ Sprint 1 (isTest) trong DB?')) return;
       const all = await dbGetAll(ST_SCANS);
-      for (const s of all) if (s.isTest) await dbDelete(ST_SCANS, s.id);
+      for (const r of all) if (r.isTest) await dbDelete(ST_SCANS, r.id);
       toast('Đã xóa dữ liệu thử.'); refreshScanCount();
     });
-    setPreview('front', null); setPreview('back', null);
+    // Cảnh báo khi đang chạy mà đóng tab
+    window.addEventListener('beforeunload', (e) => { if (Q.running) { e.preventDefault(); e.returnValue = ''; } });
   }
 
   /* ---------------------------- 9. KHỞI TẠO ---------------------------- */
@@ -717,17 +1010,18 @@ ${hasBack
     bindSettingsUI();
     bindScanUI();
     renderKeyList();
+    updateAll();
     // Xin trình duyệt giữ dữ liệu bền vững (tránh bị dọn khi đầy ổ đĩa) — ảnh scan là dữ liệu quan trọng.
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   }
   init();
 
-  // API công khai cho Sprint 2+ (hàng đợi batch, đối sánh...)
+  // API công khai cho Sprint 3+ (đối sánh đầy đủ, xem phiếu theo xe...)
   return {
     db: { openDb, dbGetAll, dbGet, dbPut, dbDelete, dbCount, ST_SCANS, ST_KEYS },
     keys: { listKeys, addKey, patchKey, removeKey, testKey },
     settings: { loadSettings, saveSettings },
-    prepareFile, analyzeSheet, geminiGenerate, normalizeBienSo, normalizeCccd, sha256Hex, uid,
+    prepareImageFile, openPdf, renderPdfPage, analyzeSheet, geminiGenerate, normalizeBienSo, normalizeCccd, sha256Hex, uid,
     TINH_TRANG_LABEL,
   };
 })();

@@ -143,11 +143,11 @@
   </div>
 </div>
 
-<!-- ============ MODAL QUÉT PHIẾU (Sprint 1: thử 1 phiếu → Gemini → JSON) ============ -->
+<!-- ============ MODAL QUÉT PHIẾU (Sprint 2: upload PDF/ảnh → hàng đợi tuần tự → Gemini) ============ -->
 <div id="scanModal" class="modal-overlay hidden">
-  <div class="modal modal-lg">
+  <div class="modal modal-xl">
     <div class="modal-header">
-      <h2>📷 Quét phiếu</h2>
+      <h2>📷 Quét phiếu — Upload file</h2>
       <button class="modal-close" data-close="scanModal">✕</button>
     </div>
     <div class="modal-body">
@@ -157,36 +157,51 @@
         <span id="scanDbCount" class="hint" style="margin:0"></span>
       </div>
 
-      <div class="section-title">🧪 Thử 1 phiếu (thủ công)</div>
-      <p class="hint">Chọn ảnh JPG/PNG/WebP hoặc PDF. Mặt 2 là tuỳ chọn. Kết quả hiện ở panel debug bên dưới. (Hàng đợi batch + thư mục scan: Sprint 2.)</p>
-      <div class="scan-upload">
-        <div>
-          <label class="hint-label">Mặt 1 (bắt buộc)</label>
-          <input id="scanFileFront" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
-          <div id="scanPreviewFront" class="scan-preview"></div>
-        </div>
-        <div>
-          <label class="hint-label">Mặt 2 (tuỳ chọn) <button id="btnScanClearBack" type="button" class="btn btn-ghost btn-sm">bỏ</button></label>
-          <input id="scanFileBack" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
-          <div id="scanPreviewBack" class="scan-preview"></div>
-        </div>
-      </div>
-      <div class="scan-run-row">
-        <label class="chk-inline"><input type="checkbox" id="chkScanSave" checked> Lưu kết quả vào IndexedDB (đánh dấu bản ghi thử)</label>
-        <button id="btnScanRun" type="button" class="btn btn-primary">🚀 Gửi Gemini</button>
-        <button id="btnScanCancel" type="button" class="btn btn-ghost hidden">⏹ Hủy</button>
-        <span id="scanStatusText" class="hint" style="margin:0"></span>
+      <label id="scanDrop" class="scan-drop" for="scanFiles">
+        <b>📂 Chọn hoặc kéo thả nhiều file vào đây</b>
+        <span class="hint">PDF (nhiều trang, file lớn vẫn được) hoặc ảnh JPG / PNG / WebP. Hệ thống xử lý lần lượt từng file, từng tờ.</span>
+        <input id="scanFiles" type="file" multiple accept="application/pdf,.pdf,image/jpeg,image/png,image/webp">
+      </label>
+
+      <div class="scan-options">
+        <label class="hint-label" for="scanPagesPerSheet" style="margin:0">Mỗi tờ gồm:</label>
+        <select id="scanPagesPerSheet" class="tpl-input" style="width:auto">
+          <option value="2">2 trang/ảnh liên tiếp (mặt trước + mặt sau)</option>
+          <option value="1">1 trang/ảnh (mỗi trang là 1 tờ)</option>
+        </select>
+        <label class="chk-inline"><input type="checkbox" id="chkScanSkipDup" checked> Bỏ qua tờ đã quét (trùng ảnh)</label>
       </div>
 
-      <div class="section-title">🐞 Panel debug</div>
-      <div id="scanResultView" class="scan-result"></div>
-      <div class="scan-debug-head"><b>JSON thô</b> <button id="btnScanCopyJson" type="button" class="btn btn-ghost btn-sm">Copy</button></div>
-      <pre id="scanJsonRaw" class="scan-pre"></pre>
-      <div class="scan-debug-head"><b>Nhật ký</b> <button id="btnScanClearLog" type="button" class="btn btn-ghost btn-sm">Xóa log</button></div>
-      <div id="scanLog" class="scan-pre scan-log"></div>
+      <div class="scan-controls">
+        <button id="btnScanStart" type="button" class="btn btn-primary" disabled>▶ Bắt đầu</button>
+        <button id="btnScanPause" type="button" class="btn btn-secondary" disabled title="Dừng sau khi xong tờ đang xử lý">⏸ Tạm dừng</button>
+        <button id="btnScanStop" type="button" class="btn btn-secondary" disabled title="Hủy ngay tờ đang gọi Gemini">⏹ Dừng ngay</button>
+        <button id="btnScanRetry" type="button" class="btn btn-ghost" disabled>↻ Thử lại tờ lỗi</button>
+        <button id="btnScanClearQueue" type="button" class="btn btn-ghost" disabled>🗑️ Xóa hàng đợi</button>
+      </div>
+      <div class="scan-progress"><div id="scanProgressBar"></div></div>
+      <div id="scanProgressText" class="hint"></div>
+      <div id="scanStatusText" class="hint scan-now"></div>
+      <div id="scanSummary" class="scan-summary"></div>
+
+      <div class="scan-table-wrap">
+        <table class="scan-mini-table scan-queue-table">
+          <thead><tr><th>#</th><th>Nguồn</th><th>Biển số</th><th>Chủ phiếu</th><th>Tình trạng</th><th>Trạng thái</th></tr></thead>
+          <tbody id="scanQueueBody"></tbody>
+        </table>
+      </div>
+      <p class="hint">Bấm vào 1 dòng để xem JSON Gemini trả về. Biển <span class="scan-plate ok">xanh</span> = khớp danh sách xe; <span class="scan-plate miss">cam</span> = chưa có trong danh sách (phiếu lạ).</p>
+
+      <details class="hint-details">
+        <summary>🐞 Panel debug (JSON + nhật ký)</summary>
+        <div class="scan-debug-head"><b>JSON thô</b> <button id="btnScanCopyJson" type="button" class="btn btn-ghost btn-sm">Copy</button></div>
+        <pre id="scanJsonRaw" class="scan-pre"></pre>
+        <div class="scan-debug-head"><b>Nhật ký</b> <button id="btnScanClearLog" type="button" class="btn btn-ghost btn-sm">Xóa log</button></div>
+        <div id="scanLog" class="scan-pre scan-log"></div>
+      </details>
     </div>
     <div class="modal-footer">
-      <button id="btnScanDeleteTests" type="button" class="btn btn-ghost btn-sm">🗑️ Xóa dữ liệu scan thử</button>
+      <button id="btnScanDeleteTests" type="button" class="btn btn-ghost btn-sm">🗑️ Xóa dữ liệu scan thử (Sprint 1)</button>
       <span class="hint">Ảnh chứa thông tin cá nhân — chỉ lưu trên máy này.</span>
     </div>
   </div>
@@ -266,8 +281,9 @@
 
   <!-- ---- SẮP XẾP + LỌC BỔ SUNG + XUẤT EXCEL (Yêu cầu #2) ---- -->
   <section class="filter-bar sort-bar" id="sortBar">
+    <div class="filter-section-title sort-title">↕️ Sắp xếp theo <span>(có thể kết hợp nhiều tiêu chí)</span></div>
     <div class="filter-field sort-field-wrap">
-      <label>Sắp xếp theo (có thể kết hợp nhiều tiêu chí)</label>
+      <label>Tiêu chí</label>
       <div id="sortCriteriaList" class="sort-criteria-list"></div>
       <button type="button" id="btnAddSortCriteria" class="btn btn-ghost btn-sm" style="align-self:flex-start;">+ Thêm tiêu chí sắp xếp</button>
     </div>
@@ -524,5 +540,6 @@
 <!-- Thư viện docx (xuất Word) được nạp theo yêu cầu bởi ensureDocxLib() trong app.js: ưu tiên lib/docx.umd.js, dự phòng CDN. -->
 <script src="app.js"></script>
 <script src="scan.js"></script>
+<script src="layout.js"></script>
 </body>
 </html>
