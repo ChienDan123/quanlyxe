@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quản lý Phương tiện &amp; Bản cam kết</title>
 <link rel="stylesheet" href="style.css">
-<link rel="stylesheet" href="scan-review.css"><!-- giao diện màn so sánh & xem phiếu scan -->
+<link rel="stylesheet" href="scan-review.css">
+<link rel="stylesheet" href="scan-store.css"><!-- giao diện cài đặt nơi lưu + kho ảnh --><!-- giao diện màn so sánh & xem phiếu scan -->
 </head>
 <body>
 
@@ -117,6 +118,49 @@
           <input id="geminiMaxWait" type="number" min="0" class="tpl-input"></div>
       </div>
 
+      <div class="section-title">☁️ Lưu trữ ảnh / PDF phiếu scan</div>
+      <p class="hint">Ảnh luôn được lưu trên máy này trước. Chọn thêm <b>nơi lưu online</b> để mở từ máy khác vẫn xem được ảnh và làm tiếp việc đang dở.</p>
+      <div class="store-modes">
+        <label class="store-opt"><input type="radio" name="scanStoreMode" value="gas"> <span><b>Google Drive — dùng Apps Script đang nối Sheet</b> <em>(khuyên dùng, mặc định)</em><br><span class="hint">Không cần thêm gì ngoài việc dán thêm mã vào Apps Script hiện có. Ảnh nằm trong Drive của chủ script.</span></span></label>
+        <label class="store-opt"><input type="radio" name="scanStoreMode" value="gas2"> <span><b>Google Drive — Apps Script RIÊNG chỉ để lưu ảnh</b><br><span class="hint">Dùng khi muốn lưu ảnh ở Drive / tài khoản Google khác (ví dụ Drive còn nhiều dung lượng), tách khỏi file Sheet.</span></span></label>
+        <div id="scanStoreUrl2Row" class="store-url hidden"><input id="scanStoreUrl2" type="text" class="tpl-input" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></div>
+        <label class="store-opt"><input type="radio" name="scanStoreMode" value="off"> <span><b>Chỉ lưu trên máy này</b><br><span class="hint">Không tải gì lên mạng. Máy khác sẽ không xem được ảnh.</span></span></label>
+      </div>
+      <div class="store-btns">
+        <button id="btnScanStoreTest" type="button" class="btn btn-secondary btn-sm">🔌 Kiểm tra kết nối</button>
+        <button id="btnScanStoreSave" type="button" class="btn btn-primary btn-sm">💾 Lưu cách lưu trữ</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-open-scanstore>🗂 Quản lý kho ảnh…</button>
+      </div>
+      <div id="scanStoreMsg" class="hint"></div>
+      <details class="hint-details">
+        <summary>📖 Hướng dẫn từng bước cho người mới</summary>
+        <b>Cách A — dùng Apps Script đang nối Sheet</b>
+        <ol>
+          <li>Mở Google Sheet của bạn → menu <b>Tiện ích mở rộng → Apps Script</b>.</li>
+          <li>Mở file <code>AppsScript_ScanPatch.gs</code> (kèm bản cập nhật này), <b>copy toàn bộ</b> và dán vào cuối dự án (Phần 1, 2, 3).</li>
+          <li>Trong hàm <code>doPost</code>, thêm các dòng <code>if (data.action === '…') return json_(…);</code> được ghi ở đầu mỗi Phần của file (đổi <code>json_</code> cho đúng tên hàm trả JSON bạn đang dùng).</li>
+          <li>Bấm <b>Triển khai → Quản lý bản triển khai → ✏️ → Phiên bản: Phiên bản mới → Triển khai</b>. Khi Google hỏi quyền <b>Google Drive</b> thì bấm <b>Cho phép</b>.</li>
+          <li>Quay lại đây, chọn «Apps Script đang nối Sheet» → <b>Kiểm tra kết nối</b> → thấy ✅ là xong → <b>Lưu</b>.</li>
+        </ol>
+        <b>Cách B — Apps Script riêng (chỉ lưu ảnh)</b>
+        <ol>
+          <li>Đăng nhập đúng tài khoản Google muốn lưu ảnh, vào <b>script.google.com → Dự án mới</b>.</li>
+          <li>Xóa mã mẫu, dán toàn bộ file <code>AppsScript_StorageOnly.gs</code> (kèm bản cập nhật này).</li>
+          <li><b>Triển khai → Triển khai mới → Loại: Ứng dụng web</b> → <i>Thực thi bằng: Tôi</i>, <i>Ai có quyền truy cập: Bất kỳ ai</i> → Triển khai → cho phép quyền Drive.</li>
+          <li>Copy <b>URL ứng dụng web</b> (đuôi <code>/exec</code>), dán vào ô phía trên, chọn «Apps Script RIÊNG» → <b>Kiểm tra kết nối</b> → <b>Lưu</b>.</li>
+        </ol>
+        <p class="hint"><b>Lưu ý:</b> đổi nơi lưu sẽ hỏi có đẩy lại toàn bộ ảnh sang nơi mới không. Ảnh nằm trong thư mục <code>QuanLyXe_PhieuScan</code> của Drive, <b>riêng tư</b>; web chỉ lấy được qua URL Apps Script, nên đừng chia sẻ URL đó cho người lạ. Xóa trong «Quản lý kho ảnh» sẽ đưa file vào thùng rác Drive (khôi phục được ~30 ngày).</p>
+      </details>
+
+      <div class="section-title">🔑 Dùng chung Gemini key giữa các máy</div>
+      <p class="hint">Key mặc định chỉ nằm trong trình duyệt từng máy. Muốn dùng máy khác: đặt một <b>mật khẩu riêng</b> rồi đẩy key lên Drive (<b>đã mã hóa</b>, Apps Script chỉ thấy chuỗi mã hóa). Trên máy kia nhập đúng mật khẩu và bấm «Lấy key về». Cần cấu hình lưu trữ online ở trên. <b>Quên mật khẩu = không khôi phục được</b> (chỉ cần nhập lại key từ Google AI Studio).</p>
+      <div class="scan-key-add">
+        <input id="scanVaultPass" type="password" class="tpl-input" placeholder="Mật khẩu kho khóa (≥ 6 ký tự)" autocomplete="new-password">
+        <button id="btnVaultPush" type="button" class="btn btn-secondary btn-sm">⬆ Đẩy key lên</button>
+        <button id="btnVaultPull" type="button" class="btn btn-secondary btn-sm">⬇ Lấy key về máy này</button>
+      </div>
+      <div id="scanVaultMsg" class="hint"></div>
+
       <div class="section-title">📝 Mẫu Bản cam kết</div>
       <p class="hint">Nội dung bên dưới sẽ được dùng làm mẫu mặc định mỗi khi tạo Bản cam kết mới. Thay đổi sẽ được lưu lại (trình duyệt này, và về Google Sheet nếu đã kết nối Apps Script) để lần sau không phải chỉnh lại.</p>
 
@@ -159,6 +203,9 @@
         <span id="scanKeySummary" class="badge">Gemini: …</span>
         <button id="scanOpenSettings" type="button" class="btn btn-ghost btn-sm">⚙️ Quản lý key</button>
         <span id="scanDbCount" class="hint" style="margin:0"></span>
+        <button id="btnScanCloud" type="button" class="btn btn-ghost btn-sm" title="Đồng bộ ảnh & trạng thái phiếu với Google Drive">☁️ Đồng bộ ngay</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-open-scanstore>🗂 Kho ảnh</button>
+        <span id="scanCloudStatus" class="hint" style="margin:0"></span>
       </div>
 
       <label id="scanDrop" class="scan-drop" for="scanFiles">
@@ -619,6 +666,39 @@
   </div>
 </div>
 
+<!-- ============ MODAL KHO ẢNH PHIẾU SCAN (scan-store.js): kiểm tra, sửa, xóa ============ -->
+<div id="scanStoreModal" class="modal-overlay hidden">
+  <div class="modal modal-xl">
+    <div class="modal-header">
+      <h2>🗂 Kho ảnh phiếu scan</h2>
+      <button class="modal-close" data-close="scanStoreModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="ssSummary" class="hint"></div>
+      <div class="ss-toolbar">
+        <input id="ssSearch" type="text" class="tpl-input" placeholder="Tìm biển số / mã phiếu / tên file nguồn…">
+        <select id="ssFilter" class="tpl-input" style="width:auto">
+          <option value="all">Tất cả</option><option value="problem">⚠ Có vấn đề</option><option value="localonly">⬆ Chưa lên Drive</option>
+          <option value="onlineonly">📱 Chỉ trên Drive</option><option value="noback">Không có mặt 2</option>
+        </select>
+        <button id="ssReload" type="button" class="btn btn-secondary btn-sm">🔄 Kiểm tra lại</button>
+        <button id="ssSync" type="button" class="btn btn-ghost btn-sm">☁️ Đồng bộ ngay</button>
+        <button id="ssRepair" type="button" class="btn btn-ghost btn-sm" title="Đẩy lại các phiếu bị thiếu file trên Drive (cần máy này còn ảnh gốc)">🛠 Sửa phiếu thiếu</button>
+        <button id="ssSelFilter" type="button" class="btn btn-ghost btn-sm" title="Chọn tất cả phiếu đang lọc — dùng để xóa cả 1 danh sách/file nguồn bị sai">☑ Chọn theo bộ lọc</button>
+        <button id="ssDelSel" type="button" class="btn btn-ghost btn-sm" disabled>🗑 Xóa các phiếu đã chọn</button>
+      </div>
+      <div class="ss-table-wrap">
+        <table class="scan-mini-table ss-table">
+          <thead><tr><th><input type="checkbox" id="ssSelAll" title="Chọn các dòng đang hiện"></th><th>Mã / thời gian</th><th>Biển số · nguồn</th><th>Mặt 2</th><th>Dung lượng</th><th>Trạng thái</th><th></th></tr></thead>
+          <tbody id="ssBody"></tbody>
+        </table>
+      </div>
+      <div id="ssMore" style="margin-top:8px"></div>
+      <p class="hint">• <b>🗑 Mặt 2</b>: bỏ trang ảnh thừa, giữ mặt 1. • <b>🗑 Phiếu</b>: xóa ảnh + dữ liệu đối chiếu của phiếu (máy này và Drive). Dữ liệu xe trên Sheet <b>không</b> bị đụng tới — các cột đã cập nhật từ phiếu vẫn giữ, giá trị cũ nằm trong Ghi chú. • Muốn xóa cả một danh sách/file bị quét sai: gõ tên file ở ô tìm → «Chọn theo bộ lọc» → «Xóa».</p>
+    </div>
+  </div>
+</div>
+
 <!-- ============ MODAL XEM ẢNH / PDF PHIẾU SCAN (mặt 1 + mặt 2 = trọn 1 phiếu đến chữ ký xác nhận) ============ -->
 <div id="scanViewerModal" class="modal-overlay hidden">
   <div class="modal modal-xl">
@@ -629,6 +709,7 @@
     <div class="modal-body">
       <div id="svTabs" class="sv-tabs"></div>
       <div id="svInfo" class="hint"></div>
+      <div id="svActions" class="sv-actions"></div>
       <div class="sv-split">
         <div><h4>Mặt 1</h4><div id="svFront" class="sv-pane"></div></div>
         <div><h4>Mặt 2 (xác nhận / chữ ký)</h4><div id="svBack" class="sv-pane"></div></div>
@@ -645,6 +726,9 @@
 <script src="scan.js"></script>
 <script src="scan-compare.js"></script><!-- hàm so sánh thuần (phải nạp trước scan-review.js) -->
 <script src="scan-review.js"></script>
+<script src="scan-files.js"></script><!-- đặt tên file theo biển số + PDF đầy đủ 2 mặt -->
+<script src="scan-sync.js"></script><!-- lưu ảnh / trạng thái phiếu online (Drive) -->
+<script src="scan-store.js"></script><!-- cài đặt nơi lưu + kho ảnh + kho khóa -->
 <script src="layout.js"></script>
 </body>
 </html>

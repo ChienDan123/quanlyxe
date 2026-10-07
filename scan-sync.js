@@ -7,19 +7,32 @@
        quyết định, giá trị đã sửa tay, tick kiểm ảnh…). Meta được đẩy lại (gộp 4 giây) mỗi khi mục của phiếu đổi.
      • KÉO: máy khác lấy danh sách phiếu online, tạo bản ghi phiếu (CHƯA có ảnh) + mục so sánh; ẢNH chỉ tải khi mở xem
        (ensureBlobs) rồi nhớ trong máy. Xung đột: mục nào có updatedAt MỚI hơn thì thắng (từng mục, không phải cả phiếu).
-   Cần kết nối Apps Script 2 chiều và đã dán phần 2 của AppsScript_ScanPatch.gs. Nạp SAU scan-review.js.
+   Nơi lưu chọn ở Cài đặt (scan-store.js): 'gas' = Apps Script đang nối Sheet · 'gas2' = Apps Script RIÊNG chỉ để lưu ảnh · 'off' = chỉ trên máy.
+   Cần đã dán phần 2 + 3 của AppsScript_ScanPatch.gs. Nạp SAU scan-review.js.
    ========================================================================= */
 const ScanSync = (() => {
   'use strict';
   const S = ScanApp, DB = S.db, ST_SCANS = DB.ST_SCANS, ST_ITEMS = DB.ST_ITEMS;
   const MAX_B64 = 18e6;                 // ảnh sau nén ≤ ~3,5MB nên base64 hiếm khi vượt; chặn file quá lớn để khỏi treo request
   const RETRY_MS = 60000;               // gặp lỗi: nghỉ 1 phút rồi thử lại
-  const Y = { busy: false, pulled: false, errUntil: 0, lastError: '', touched: new Set(), timer: null, cur: '' };
+  const Y = { busy: false, pulled: false, errUntil: 0, lastError: '', touched: new Set(), timer: null, cur: '', gone: new Set() };
 
-  const online = () => typeof isWriteConnected === 'function' && isWriteConnected();
+  /* ---- NƠI LƯU ẢNH (chọn ở Cài đặt): nhớ trên máy; ảnh luôn lưu IndexedDB trước, "nơi lưu online" chỉ là bản sao dùng chung ---- */
+  const STORE_KEY = 'vehicleScanStoreV1';
+  const cfg = { mode: 'gas', url2: '' };
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch (e) { /* bỏ qua */ }
+  const validUrl = (u) => /^https:\/\/script\.google(usercontent)?\.com\/.+\/exec/.test(String(u || '').trim());
+  function setConfig(c) {
+    Object.assign(cfg, c);
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (e) { /* bỏ qua */ }
+    Y.errUntil = 0; Y.pulled = false; Y.lastError = ''; refreshStatus();
+  }
+  // URL Apps Script dùng để lưu ảnh: 'gas' = cái đang nối Sheet; 'gas2' = cái riêng; 'off' = không dùng
+  const storeUrl = () => cfg.mode === 'gas2' ? String(cfg.url2 || '').trim() : (cfg.mode === 'gas' ? ((typeof state !== 'undefined' && state.gasUrl) || '') : '');
+  const online = () => cfg.mode === 'gas2' ? validUrl(cfg.url2) : (cfg.mode === 'gas' && typeof isWriteConnected === 'function' && isWriteConnected());
   async function call(payload) {
-    const r = await gasRequest(state.gasUrl, payload);
-    if (!r || r.ok === false) throw new Error((r && r.error) || 'Apps Script chưa hỗ trợ lưu ảnh online (dán phần 2 của AppsScript_ScanPatch.gs và Deploy lại).');
+    const r = await gasRequest(storeUrl(), payload);
+    if (!r || r.ok === false) throw new Error((r && r.error) || 'Apps Script chưa hỗ trợ lưu ảnh online (dán phần 2 + 3 của AppsScript_ScanPatch.gs và Deploy lại).');
     return r;
   }
   const blobToB64 = (blob) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
@@ -45,7 +58,8 @@ const ScanSync = (() => {
     let total = 0, up = 0;
     try { await forEachScan(r => { if (r.status === 'done' && !r.isTest) { total++; if (r.cloud && r.cloud.frontId) up++; } return null; }); } catch (e) { /* bỏ qua */ }
     let msg;
-    if (!online()) msg = total ? `☁️ ${up}/${total} phiếu đã lưu online · chưa kết nối Apps Script 2 chiều` : '';
+    if (cfg.mode === 'off') msg = total ? `💾 ${total} phiếu chỉ lưu trên máy này (đã tắt lưu online)` : '';
+    else if (!online()) msg = total ? `☁️ ${up}/${total} phiếu đã lưu online · ${cfg.mode === 'gas2' ? 'chưa nhập URL Apps Script lưu ảnh' : 'chưa kết nối Apps Script 2 chiều'}` : '';
     else if (Y.busy) msg = `☁️ Đang đồng bộ ảnh${Y.cur ? ' (' + Y.cur + ')' : ''}… ${up}/${total}`;
     else if (Y.lastError) msg = `⚠ Lỗi lưu online: ${Y.lastError}`;
     else msg = total ? `☁️ ${up}/${total} phiếu đã lưu online` : '';
@@ -65,6 +79,7 @@ const ScanSync = (() => {
   async function pushScan(scanId) {
     const rec = await DB.dbGet(ST_SCANS, scanId);
     if (!rec || rec.status !== 'done' || rec.isTest) return;
+    if (Y.gone.has(scanId)) return;           // đã bị xóa online (ở máy khác) -> KHÔNG đẩy lại, tránh "sống dậy"
     const items = await itemsOf(scanId);
     const plates = items.map(i => i.bienSoRaw || i.bienSo).filter(Boolean).join(', ');
     rec.cloud = rec.cloud || {};
@@ -114,6 +129,7 @@ const ScanSync = (() => {
     rec.cloud = rec.cloud || {};
     if (m.hasFront && !rec.cloud.frontId) rec.cloud.frontId = 'remote';
     if (m.hasBack && !rec.cloud.backId) rec.cloud.backId = 'remote';
+    if (!m.hasBack && rec.cloud.backId === 'remote') delete rec.cloud.backId;     // mặt 2 đã xóa ở máy khác (ô giữ chỗ chưa tải)
     rec.cloud.metaAt = updated;
     await DB.dbPut(ST_SCANS, rec);
     // Gộp từng mục: bản nào updatedAt mới hơn thì thắng
@@ -133,10 +149,16 @@ const ScanSync = (() => {
     return plates.filter(Boolean);
   }
   async function pull() {
-    const { list } = await call({ action: 'scanList' });
+    const { list, gone } = await call({ action: 'scanList' });
+    Y.gone = new Set(gone || []);
+    // Phiếu đã xóa ở máy khác -> dọn bản trên máy này (ảnh + mục so sánh + liên kết biển số)
+    if (Y.gone.size && window.ScanReview && ScanReview.purgeScanLocal) {
+      const mine = await forEachScan(r => Y.gone.has(r.id) ? r.id : null);
+      for (const id of mine) { try { await ScanReview.purgeScanLocal(id); Y.touched.delete(id); } catch (e) { console.warn('[scan-sync] dọn phiếu đã xóa lỗi', id, e); } }
+    }
     const known = new Map();
     await forEachScan(r => { known.set(r.id, (r.cloud && r.cloud.metaAt) || 0); return null; });
-    const need = (list || []).filter(x => x.updated > (known.get(x.scanId) || 0));
+    const need = (list || []).filter(x => !Y.gone.has(x.scanId) && x.updated > (known.get(x.scanId) || 0));
     const plates = [];
     for (let i = 0; i < need.length; i += 15) {
       const batch = need.slice(i, i + 15), { metas } = await call({ action: 'scanMetaBatch', ids: batch.map(x => x.scanId) });
@@ -179,6 +201,14 @@ const ScanSync = (() => {
     Y.errUntil = 0; Y.pulled = false; await run();
     toast(Y.lastError ? 'Lỗi lưu online: ' + Y.lastError : 'Đã đồng bộ ảnh & trạng thái phiếu với Google Drive.', !!Y.lastError);
   }
+  const syncNow = async () => { Y.errUntil = 0; Y.pulled = false; await run(); return !Y.lastError; };
+  // Thử kết nối nơi lưu đang chọn (dùng ở Cài đặt): trả { ok, count } hoặc { ok:false, error }
+  async function testConnection() {
+    if (cfg.mode === 'off') return { ok: false, error: 'Đang chọn «Chỉ lưu trên máy này».' };
+    if (!online()) return { ok: false, error: cfg.mode === 'gas2' ? 'URL chưa đúng dạng https://script.google.com/macros/s/…/exec' : 'Chưa kết nối Google Sheet bằng Apps Script 2 chiều.' };
+    try { const r = await call({ action: 'scanList' }); return { ok: true, count: (r.list || []).length }; }
+    catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  }
   S.on('sheetDone', (d) => touch(d.scanId));          // phiếu vừa quét xong -> lên Drive
   S.on('itemsChanged', (d) => touch(d.scanId));       // đối chiếu / chỉnh sửa -> cập nhật meta
   S.on('queueFinished', () => run());
@@ -186,6 +216,6 @@ const ScanSync = (() => {
   setInterval(run, 20000);                            // kết nối Sheet có thể xong SAU khi trang nạp -> kiểm tra định kỳ
   setTimeout(run, 3000);
 
-  return { run, pull, touch, ensureBlobs, refreshStatus };
+  return { run, pull, touch, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id) };
 })();
 window.ScanSync = ScanSync;

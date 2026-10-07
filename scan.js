@@ -1052,7 +1052,7 @@ ${hasBack
   return {
     db: { openDb, tx, dbGetAll, dbGet, dbPut, dbDelete, dbCount, ST_SCANS, ST_KEYS, ST_ITEMS, ST_LINKS },
     on, emit, yieldToUi,
-    keys: { listKeys, addKey, patchKey, removeKey, testKey },
+    keys: { listKeys, addKey, patchKey, removeKey, testKey, refreshUi: () => { renderKeyList(); notifyKeysChanged(); } },   // refreshUi: scan-store.js gọi sau khi nhập key từ kho khóa
     settings: { loadSettings, saveSettings },
     prepareImageFile, openPdf, renderPdfPage, analyzeSheet, geminiGenerate, normalizeBienSo, normalizeCccd, sha256Hex, uid,
     TINH_TRANG_LABEL,

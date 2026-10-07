@@ -1,0 +1,20 @@
+/* scan-store.css — cài đặt nơi lưu ảnh, kho khóa, kho ảnh phiếu scan */
+.store-modes { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.store-opt { display: flex; gap: 8px; align-items: flex-start; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px; cursor: pointer; background: #fff; }
+.store-opt:has(input:checked) { border-color: #6366f1; background: #eef2ff; }
+.store-opt input { margin-top: 3px; }
+.store-url { margin: -2px 0 0 26px; }
+.store-btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.sv-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+
+.ss-toolbar { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 8px 0; }
+.ss-toolbar #ssSearch { flex: 1 1 220px; min-width: 160px; }
+.ss-table-wrap { max-height: 56vh; overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
+.ss-table th { position: sticky; top: 0; background: #f3f4f6; z-index: 1; }
+.ss-table td { vertical-align: top; }
+.ss-plates { word-break: break-word; max-width: 280px; }
+.ss-actions { white-space: nowrap; }
+.ss-chip { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: #e5e7eb; white-space: nowrap; }
+.ss-ok { background: #dcfce7; color: #166534; } .ss-warn { background: #fef3c7; color: #92400e; }
+.ss-err { background: #fee2e2; color: #991b1b; } .ss-info { background: #dbeafe; color: #1e40af; }
+@media (max-width: 800px) { .ss-plates { max-width: 160px; } .ss-table th:nth-child(4), .ss-table td:nth-child(4) { display: none; } }

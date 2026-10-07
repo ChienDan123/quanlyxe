@@ -296,6 +296,23 @@ const ScanReview = (() => {
     return (base ? base + ' | ' : '') + `📷Phiếu ${date}: ${labels.join(', ')}`;
   }
 
+  /* ---- GIỮ DỮ LIỆU CŨ: khi giá trị từ phiếu GHI ĐÈ giá trị đang có trên Sheet, nối giá trị cũ vào Ghi chú để hồi tố sau này.
+     Dạng: "⏪Trước cập nhật từ phiếu 07/10: CCCD=0123…; SĐT=09…". Cùng ngày + cùng trường thì giữ giá trị cũ NHẤT (gốc), không nhân đôi. ---- */
+  const OLD_MAX = 60;   // mỗi giá trị cũ tối đa 60 ký tự để Ghi chú không phình to
+  function withOldValues(note, pairs) {   // pairs: [{ label, old }]
+    if (!pairs.length) return note;
+    const d = new Date(), p2 = (n) => String(n).padStart(2, '0'), date = `${p2(d.getDate())}/${p2(d.getMonth() + 1)}`;
+    const clean = (v) => { const t = String(v).replace(/[|\n\r]+/g, ' ').replace(/\s+/g, ' ').trim(); return t.length > OLD_MAX ? t.slice(0, OLD_MAX) + '…' : t; };
+    const base = String(note || '').trim();
+    const re = new RegExp('⏪Trước cập nhật từ phiếu ' + date + ': ([^|]*)');
+    const m = base.match(re);
+    const have = m ? m[1] : '';
+    const add = pairs.filter(x => !have.includes(x.label + '=')).map(x => `${x.label}=${clean(x.old)}`);
+    if (!add.length) return base;
+    if (m) return base.replace(re, (s0) => s0.replace(/\s+$/, '') + '; ' + add.join('; ') + (/\s$/.test(s0) ? ' ' : ''));
+    return (base ? base + ' | ' : '') + `⏪Trước cập nhật từ phiếu ${date}: ${add.join('; ')}`;
+  }
+
   // Chuỗi mô tả ghi vào cột "Kết quả đối chiếu phiếu" của Sheet
   function buildResultText(v, plannedKeys) {
     const it = v.it, parts = [];
@@ -323,7 +340,8 @@ const ScanReview = (() => {
   /* ------------------------------------------------------------------ */
   /* 4. ÁP DỤNG                                                           */
   /* ------------------------------------------------------------------ */
-  async function saveItem(it) { it.updatedAt = Date.now(); await DB.dbPut(ST_ITEMS, it); }
+  // Lưu mục + báo cho scan-sync.js đẩy lại meta phiếu lên online (trước đây thiếu sự kiện này nên thay đổi đối chiếu không lên Drive)
+  async function saveItem(it) { it.updatedAt = Date.now(); await DB.dbPut(ST_ITEMS, it); S.emit('itemsChanged', { scanId: it.scanId }); }
 
   // Áp dụng 1 mục có trên DS. onlyKeys (tùy chọn) = chỉ áp dụng các trường này (áp dụng RIÊNG LẺ từng trường).
   async function applyFoundItem(v, onlyKeys) {
@@ -346,6 +364,11 @@ const ScanReview = (() => {
     if (toWrite.trangThaiXe) toWrite.trangThaiXe = addStatus(toWrite.trangThaiXe) || toWrite.trangThaiXe;
     // DẤU NGUỒN: chỉ nối vào Ghi chú (không làm bẩn CCCD/SĐT/Chủ xe) khi thật sự có trường lấy từ phiếu
     if (prefs.tag && fromScan.length) toWrite.ghiChu = withSourceTag(('ghiChu' in toWrite) ? toWrite.ghiChu : row.ghiChu, fromScan);
+    // GIỮ DỮ LIỆU CŨ: trường lấy từ phiếu mà Sheet ĐANG CÓ giá trị khác -> ghi giá trị cũ vào Ghi chú (luôn bật, không phụ thuộc dấu 📷)
+    const olds = v.fields.filter(f => willWrite(f) && f.decision === 'apply' && !f.spec.meta && f.spec.key !== 'ghiChu' && (!onlyKeys || onlyKeys.includes(f.spec.key))
+      && String(f.dsVal || '').trim() && String(f.dsVal).trim() !== String(f.writeVal).trim())
+      .map(f => ({ label: TAG_LABEL[f.spec.key] || f.spec.label, old: f.dsVal }));
+    if (olds.length) toWrite.ghiChu = withOldValues(('ghiChu' in toWrite) ? toWrite.ghiChu : row.ghiChu, olds);
     // Còn trường chưa giải quyết? ('later' hoặc đã chọn ghi nhưng chưa áp dụng vì chỉ áp dụng 1 phần)
     const unresolved = v.fields.filter(f => !f.spec.meta && (f.decision === 'later' || (willWrite(f) && !wrote.includes(f.spec.key))));
     it.review = unresolved.length ? 'chua_kiem' : 'da_kiem';
@@ -731,7 +754,7 @@ const ScanReview = (() => {
       for (const c of e.changes) {
         const item = dir < 0 ? c.before : c.after, rowState = dir < 0 ? c.rowBefore : c.rowAfter;
         if (rowState && c.rowId) { const row = findRow(c.rowId); if (row) await updateSingleRowFields(row, rowState); }
-        await DB.dbPut(ST_ITEMS, clone(item));
+        await DB.dbPut(ST_ITEMS, clone(item)); S.emit('itemsChanged', { scanId: item.scanId });
         await recomputeLink(c.before.bienSo); await recomputeLink(c.after.bienSo);
       }
       to.push(e);
@@ -905,12 +928,18 @@ const ScanReview = (() => {
     refreshPaneActions();
     if (!force && p.loadedId === it.id) return;
     const token = ++p.token;
-    const rec = await DB.dbGet(ST_SCANS, it.scanId);
+    let rec = await DB.dbGet(ST_SCANS, it.scanId);
+    if (rec && window.ScanSync && !rec.frontBlob && rec.cloud) {            // phiếu từ máy khác: tải ảnh từ online
+      $('#rvImgInfo').textContent = '⏳ Đang tải ảnh từ online…';
+      rec = await ScanSync.ensureBlobs(rec);
+    }
     if (token !== p.token) return;                      // người dùng đã chuyển sang mục khác trong lúc nạp
     p.urls.forEach(revoke); p.urls = []; p.loadedId = it.id;
     $('#rvImgTitle').textContent = '📷 ' + (it.bienSoRaw || '(không đọc được biển)');
     if (!rec) { $('#rvImgInfo').textContent = 'Không tìm thấy ảnh phiếu trong máy này (có thể đã xóa hoặc quét ở máy khác).'; $('#rvImgBody').innerHTML = ''; return; }
-    $('#rvImgInfo').innerHTML = `Nguồn: <b>${escapeHtml(rec.sheetLabel || rec.fileName || '')}</b> · quét ${new Date(rec.timestamp).toLocaleString('vi-VN')} · mã ${escapeHtml(rec.id.slice(0, 8))}`;
+    $('#rvImgInfo').innerHTML = `Nguồn: <b>${escapeHtml(rec.sheetLabel || rec.fileName || '')}</b> · quét ${new Date(rec.timestamp).toLocaleString('vi-VN')} · mã ${escapeHtml(rec.id.slice(0, 8))}`
+      + (window.ScanFiles ? ` <button type="button" class="btn btn-ghost btn-sm" data-rvdl="pdf" data-scan="${escapeHtml(rec.id)}">⬇ PDF đầy đủ</button>` : '')
+      + (rec._cloudMsg ? ` <span class="error-text">${escapeHtml(rec._cloudMsg)}</span>` : '');
     $('#rvImgBody').innerHTML = pageBlock('Mặt 1', rec.frontBlob, rec.frontMime, p.urls) +
       (rec.backBlob ? pageBlock('Mặt 2 (xác nhận / chữ ký)', rec.backBlob, rec.backMime, p.urls) : '<div class="rv-pg"><div class="rv-pg-label">Mặt 2</div><div class="sv-empty">Phiếu không có mặt 2.</div></div>');
     applyPaneView();
@@ -1070,14 +1099,20 @@ const ScanReview = (() => {
   function pageHtml(blob, mime, title) {
     if (!blob) return '<div class="sv-empty">Không có mặt này.</div>';
     const url = URL.createObjectURL(blob); V.urls.push(url);
-    const dl = `<a class="btn btn-ghost btn-sm" href="${url}" download="${escapeHtml(title)}.${mime === 'application/pdf' ? 'pdf' : 'jpg'}">⬇ Tải</a>`;
-    return (mime === 'application/pdf'
+    // Nút tải nằm ở thanh #svActions (tên file ghi rõ biển số — ScanFiles), không còn link tải riêng từng mặt
+    return mime === 'application/pdf'
       ? `<iframe class="sv-frame" src="${url}" title="${escapeHtml(title)}"></iframe>`
-      : `<img class="sv-img" src="${url}" alt="${escapeHtml(title)}" title="Bấm để phóng to / thu nhỏ">`) + `<div class="sv-dl">${dl}</div>`;
+      : `<img class="sv-img" src="${url}" alt="${escapeHtml(title)}" title="Bấm để phóng to / thu nhỏ">`;
   }
   async function showViewerIdx(i) {
     revokeUrls(); V.idx = i;
-    const rec = await DB.dbGet(ST_SCANS, V.ids[i]);
+    let rec = await DB.dbGet(ST_SCANS, V.ids[i]);
+    // Phiếu quét ở máy khác: ảnh đang nằm online -> tải về (và nhớ trong máy) trước khi hiển thị
+    if (rec && window.ScanSync && !rec.frontBlob && rec.cloud) {
+      $('#svFront').innerHTML = '<div class="sv-empty">⏳ Đang tải ảnh từ online…</div>'; $('#svBack').innerHTML = '';
+      rec = await ScanSync.ensureBlobs(rec);
+      if (V.idx !== i) return;                       // người dùng đã chuyển phiếu khác trong lúc tải
+    }
     if (!rec) { $('#svInfo').textContent = 'Không tìm thấy ảnh phiếu trong máy này (có thể đã xóa).'; $('#svFront').innerHTML = ''; $('#svBack').innerHTML = ''; return; }
     const items = await itemsByIndex('scanId', rec.id);
     const plates = items.map(it => {
@@ -1088,7 +1123,13 @@ const ScanReview = (() => {
       ? V.ids.map((id, k) => `<button type="button" class="btn ${k === i ? 'btn-primary' : 'btn-ghost'} btn-sm" data-sv="${k}">Phiếu ${k + 1}</button>`).join(' ') : '';
     $('#svInfo').innerHTML = `Nguồn: <b>${escapeHtml(rec.sheetLabel || rec.fileName || '')}</b> · quét lúc ${new Date(rec.timestamp).toLocaleString('vi-VN')} · mã ${escapeHtml(rec.id.slice(0, 8))}` +
       `<br>Phiếu này gồm ${items.length} xe (cùng mở ra ảnh này): ${plates}`;
-    $('#svFront').innerHTML = pageHtml(rec.frontBlob, rec.frontMime, 'phieu-mat1-' + rec.id.slice(0, 8));
+    const act = $('#svActions');
+    if (act) act.innerHTML = window.ScanFiles
+      ? `<button type="button" class="btn btn-primary btn-sm" data-dl="pdf" ${rec.frontBlob || rec.cloud ? '' : 'disabled'}>⬇ PDF đầy đủ (2 mặt)</button> `
+        + `<button type="button" class="btn btn-ghost btn-sm" data-dl="front">⬇ Ảnh mặt 1</button> `
+        + `<button type="button" class="btn btn-ghost btn-sm" data-dl="back" ${rec.backBlob || (rec.cloud && rec.cloud.backId) ? '' : 'disabled'}>⬇ Ảnh mặt 2</button>`
+        + (rec._cloudMsg ? ` <span class="error-text">${escapeHtml(rec._cloudMsg)}</span>` : '') : '';
+    $('#svFront').innerHTML = rec.frontBlob ? pageHtml(rec.frontBlob, rec.frontMime, 'phieu-mat1-' + rec.id.slice(0, 8)) : `<div class="sv-empty">${escapeHtml(rec._cloudMsg || 'Không có ảnh mặt 1.')}</div>`;
     $('#svBack').innerHTML = rec.backBlob
       ? pageHtml(rec.backBlob, rec.backMime, 'phieu-mat2-' + rec.id.slice(0, 8)) + (rec.backBlank ? '<div class="hint">Mặt 2 gần như trống.</div>' : '')
       : '<div class="sv-empty">Phiếu không có mặt 2.</div>';
@@ -1104,10 +1145,34 @@ const ScanReview = (() => {
   }
   function bindViewerUI() {
     enablePan($('#svFront')); enablePan($('#svBack'));
+    // Tải ảnh / PDF đầy đủ: tên file ghi tất cả biển số của phiếu (scan-files.js)
+    document.addEventListener('click', (e) => { const b = e.target.closest('[data-rvdl]'); if (b && window.ScanFiles) ScanFiles.download(b.dataset.scan, b.dataset.rvdl); });
+    $('#svActions').addEventListener('click', (e) => { const b = e.target.closest('[data-dl]'); if (b && window.ScanFiles) ScanFiles.download(V.ids[V.idx], b.dataset.dl); });
     $('#svTabs').addEventListener('click', (e) => { const b = e.target.closest('[data-sv]'); if (b) showViewerIdx(parseInt(b.dataset.sv, 10)); });
     $('#scanViewerModal').addEventListener('click', (e) => { if (e.target.classList.contains('sv-img')) e.target.classList.toggle('zoom'); });
     // Dọn URL ảnh khi đóng (nút ✕ hoặc click nền — app.js đã xử lý đóng, ta chỉ thu dọn)
     $('#scanViewerModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]') || e.target.id === 'scanViewerModal') setTimeout(revokeUrls, 300); });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 6b. XÓA PHIẾU TRÊN MÁY + LÀM TƯƠI SAU KHI ĐỒNG BỘ (scan-sync.js / scan-store.js gọi)  */
+  /* ------------------------------------------------------------------ */
+  // Xóa hẳn 1 phiếu trên máy này: bản ghi + ảnh, mọi mục so sánh, rồi tính lại liên kết các biển liên quan.
+  // KHÔNG đụng dữ liệu xe trên Sheet (các cột đã cập nhật từ phiếu vẫn giữ — dữ liệu cũ nằm trong Ghi chú).
+  async function purgeScanLocal(scanId) {
+    const items = await itemsByIndex('scanId', scanId), plates = new Set();
+    for (const it of items) { if (it.bienSo) plates.add(it.bienSo); await DB.dbDelete(ST_ITEMS, it.id); }
+    await DB.dbDelete(ST_SCANS, scanId);
+    for (const pl of plates) await recomputeLink(pl);
+    R.items = R.items.filter(i => i.scanId !== scanId);
+    if (R.pane.open && !R.items.some(i => i.id === R.pane.id)) R.pane.open = false;
+    refreshMainTable();
+    return items.length;
+  }
+  // Sau khi kéo phiếu mới từ online: tính lại liên kết biển số để icon 📷 hiện ngay trên bảng chính
+  async function afterRemoteMerge(plates) {
+    for (const pl of new Set((plates || []).filter(Boolean))) await recomputeLink(pl);
+    refreshMainTable();
   }
 
   /* ------------------------------------------------------------------ */
@@ -1187,6 +1252,6 @@ const ScanReview = (() => {
   }
   init();
 
-  return { open, openViewer, linkMap, computeView, createItemsForScan, backfillItems };
+  return { open, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
 })();
 window.ScanReview = ScanReview;
