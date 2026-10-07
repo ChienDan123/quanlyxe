@@ -33,3 +33,67 @@ function appendScanOrphans_(rows) {
     return { ok: true, added: out.length };
   } finally { lock.releaseLock(); }
 }
+
+
+/* =========================================================================
+   PHẦN 2 — LƯU ẢNH / PDF PHIẾU SCAN ONLINE (Google Drive) để máy khác vẫn xem được và làm tiếp việc dở dang.
+   Việc cần làm (ngoài mục 1–3 ở đầu file):
+   1) Dán toàn bộ các hàm scan*_ bên dưới vào dự án Apps Script.
+   2) Trong doPost(e) thêm các nhánh (cùng chỗ với appendScanOrphans):
+        if (data.action === 'scanPut')       return json_(scanPut_(data));
+        if (data.action === 'scanGet')       return json_(scanGet_(data));
+        if (data.action === 'scanList')      return json_(scanList_());
+        if (data.action === 'scanMetaBatch') return json_(scanMetaBatch_(data.ids));
+   3) Deploy lại Web App (New version) và CHO PHÉP quyền Google Drive khi được hỏi.
+   Cách lưu: thư mục «QuanLyXe_PhieuScan» trong Drive của CHỦ script, mỗi phiếu 3 file:
+        <mã phiếu>__front (ảnh mặt 1) · <mã phiếu>__back (mặt 2) · <mã phiếu>__meta (JSON: dữ liệu đọc được + trạng thái đối chiếu).
+   File để RIÊNG TƯ (không chia sẻ công khai); web chỉ lấy được qua Web App này. Mô tả mỗi file ghi sẵn các biển số để dễ tìm trong Drive.
+   ========================================================================= */
+var SCAN_FOLDER_NAME = 'QuanLyXe_PhieuScan';
+
+function scanFolder_() {
+  var props = PropertiesService.getScriptProperties(), id = props.getProperty('SCAN_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) { /* thư mục đã bị xóa -> tạo lại bên dưới */ } }
+  var it = DriveApp.getFoldersByName(SCAN_FOLDER_NAME);
+  var f = it.hasNext() ? it.next() : DriveApp.createFolder(SCAN_FOLDER_NAME);
+  props.setProperty('SCAN_FOLDER_ID', f.getId());
+  return f;
+}
+function scanName_(scanId, kind) { return String(scanId).replace(/[^\w\-]/g, '') + '__' + kind; }
+function scanFile_(folder, name) { var it = folder.getFilesByName(name); return it.hasNext() ? it.next() : null; }
+
+// Ghi (hoặc ghi đè) 1 file của phiếu. p = { scanId, kind:'front'|'back'|'meta', mime, b64 | text, plates }
+function scanPut_(p) {
+  if (!p || !p.scanId || !/^(front|back|meta)$/.test(p.kind)) return { ok: false, error: 'Thiếu scanId / kind' };
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var folder = scanFolder_(), name = scanName_(p.scanId, p.kind), f = scanFile_(folder, name);
+    if (p.kind === 'meta') {
+      if (f) f.setContent(p.text || '{}'); else f = folder.createFile(name, p.text || '{}', 'application/json');
+    } else {
+      var blob = Utilities.newBlob(Utilities.base64Decode(p.b64 || ''), p.mime || 'image/jpeg', name);
+      if (f) f.setTrashed(true);                 // file nhị phân không sửa nội dung tại chỗ được -> thay bằng bản mới
+      f = folder.createFile(blob);
+    }
+    f.setDescription('Biển số: ' + (p.plates || ''));
+    return { ok: true, fileId: f.getId(), updated: f.getLastUpdated().getTime() };
+  } finally { lock.releaseLock(); }
+}
+// Đọc 1 file ảnh/PDF về dạng base64 (web không truy cập thẳng Drive riêng tư được)
+function scanGet_(p) {
+  var f = scanFile_(scanFolder_(), scanName_(p.scanId, p.kind));
+  if (!f) return { ok: false, error: 'Không thấy file trên Drive' };
+  return { ok: true, mime: f.getMimeType(), b64: Utilities.base64Encode(f.getBlob().getBytes()) };
+}
+// Danh sách phiếu đã có online + thời điểm cập nhật (để máy khác biết phiếu nào mới)
+function scanList_() {
+  var it = scanFolder_().searchFiles("title contains '__meta'"), list = [];
+  while (it.hasNext()) { var f = it.next(); list.push({ scanId: f.getName().replace('__meta', ''), updated: f.getLastUpdated().getTime() }); }
+  return { ok: true, list: list };
+}
+// Lấy nội dung meta của nhiều phiếu 1 lượt (client gọi từng nhóm ~15 phiếu)
+function scanMetaBatch_(ids) {
+  var folder = scanFolder_(), metas = {};
+  (ids || []).forEach(function (id) { var f = scanFile_(folder, scanName_(id, 'meta')); if (f) metas[id] = f.getBlob().getDataAsString(); });
+  return { ok: true, metas: metas };
+}
