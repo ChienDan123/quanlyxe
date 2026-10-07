@@ -106,7 +106,8 @@ const ScanReview = (() => {
         scanData: buildScanData(extracted, v),
         orphan: false, decisions: {}, applied: {}, review: 'chua_kiem', done: false, dirty: false,
         orphanDecision: null, orphanPushed: false, pushError: '', result: '',
-        edits: {}, sheetEdits: {}, fixed: {}, imgChecked: false, // chỉnh sửa tay bên phiếu / bên Sheet + tick "Đã kiểm với ảnh"
+        edits: {}, sheetEdits: {}, fixed: {}, imgChecked: false,
+        source: {}, fieldChecked: {}, sheetOk: {},   // nguồn đã chọn RIÊNG từng trường ('scan'|'sheet'), tick «đã kiểm ảnh» từng trường, trường «Sheet đúng» đã chốt // chỉnh sửa tay bên phiếu / bên Sheet + tick "Đã kiểm với ảnh"
         createdAt: Date.now(), updatedAt: Date.now(),
       };
       await DB.dbPut(ST_ITEMS, it);
@@ -160,7 +161,7 @@ const ScanReview = (() => {
   };
   // Tùy chọn của người dùng (nhớ trên máy): người thực hiện mặc định, ghi dấu 📷, xác nhận nhanh = áp dụng luôn
   const PREF_KEY = 'vehicleScanPrefsV1';
-  const prefs = { assignee: '', tag: true, quick: true };
+  const prefs = { assignee: '', tag: true, quick: true, full: true };
   try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) { /* bỏ qua */ }
   const savePrefs = () => { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (e) { /* bỏ qua */ } };
 
@@ -175,6 +176,7 @@ const ScanReview = (() => {
   function normItem(it) {
     it.edits = it.edits || {}; it.sheetEdits = it.sheetEdits || {}; it.fixed = it.fixed || {};
     it.decisions = it.decisions || {}; it.applied = it.applied || {}; it.imgChecked = !!it.imgChecked;
+    it.source = it.source || {}; it.fieldChecked = it.fieldChecked || {}; it.sheetOk = it.sheetOk || {};
     return it;
   }
 
@@ -200,6 +202,16 @@ const ScanReview = (() => {
     return it.scanData[key] || '';
   }
 
+  // Giá trị CHÍNH XÁC sẽ ghi khi người dùng chọn «Dữ liệu từ phiếu scan đúng» — luôn lấy từ PHIẾU, không lấy lại giá trị Sheet cũ.
+  // (Ghi chú là ngoại lệ: luôn NỐI THÊM, không ghi đè.)
+  function exactScanValue(key, sv, c) {
+    const s0 = String(sv == null ? '' : sv).trim();
+    if (key === 'cccd') return (c && c.newVal != null) ? c.newVal : s0.replace(/\D/g, '');
+    if (key === 'soDienThoai') return C.normPhone(s0);
+    if (key === 'ghiChu') return (c && c.newVal != null) ? c.newVal : s0;
+    return s0;
+  }
+
   // So sánh luôn dùng dữ liệu HIỆN TẠI của Sheet + giá trị phiếu SAU KHI chỉnh sửa
   // => sửa tay xong mà khớp Sheet thì trường tự chuyển thành "khớp" (đối chiếu/cập nhật bình thường).
   function computeView(it) {
@@ -211,7 +223,11 @@ const ScanReview = (() => {
     for (const spec of SPECS) {
       const key = spec.key;
       const sv = scanValue(it, key), dsv = row[key] || '';
-      const c = spec.cmp(sv, dsv);
+      const srcSel = it.source[key] || null;      // nguồn người dùng đã CHỌN RÕ cho trường này: 'scan' | 'sheet'
+      let c = spec.cmp(sv, dsv);
+      // Đã chọn «phiếu đúng» nhưng hàm so sánh coi là khớp (lệch số 0 đầu / dấu / thiếu số cuối...) -> vẫn phải ghi đúng giá trị phiếu
+      if (srcSel === 'scan' && c.state === 'same' && key !== 'ghiChu' && String(sv).trim() && exactScanValue(key, sv, c) !== String(dsv).trim())
+        c = { state: 'diff', newVal: exactScanValue(key, sv, c), defaultDecision: 'apply', note: 'Bạn chọn lấy từ phiếu: sẽ ghi đúng giá trị trên phiếu thay cho giá trị Sheet' };
       let dec = it.decisions[key] || null;                              // quyết định người dùng đã chọn (nếu có)
       // Người dùng đã sửa giá trị bên Sheet (khác giá trị gốc) -> trường này là "sửa Sheet"
       const sheetEdit = (key in it.sheetEdits && it.sheetEdits[key] !== dsv) ? it.sheetEdits[key] : null;
@@ -228,9 +244,12 @@ const ScanReview = (() => {
       // Giá trị sẽ ghi vào Sheet theo quyết định hiện tại
       let writeVal;
       if (decision === 'sheetfix') writeVal = sheetEdit;
-      else if (decision === 'apply') writeVal = c.newVal != null ? c.newVal : (state_ === 'sheetedit' && sv ? sv : undefined);
-      v.fields.push({ spec, scanVal: sv, dsVal: dsv, state: state_, newVal: c.newVal, note, decision, writeVal,
-        edited: key in it.edits, sheetEdit });
+      else if (decision === 'apply') {
+        if (srcSel === 'scan' && String(sv).trim()) writeVal = exactScanValue(key, sv, c);   // đã chọn nguồn = phiếu -> BẮT BUỘC ghi giá trị phiếu
+        else writeVal = c.newVal != null ? c.newVal : (state_ === 'sheetedit' && sv ? sv : undefined);
+      }
+      v.fields.push({ spec, scanVal: sv, dsVal: dsv, state: state_, newVal: c.newVal, note, decision, writeVal, srcSel,
+        edited: key in it.edits, sheetEdit, checked: !!it.fieldChecked[key] });
     }
     return v;
   }
@@ -261,8 +280,13 @@ const ScanReview = (() => {
     if (it.scanData.tinhTrangCode !== 'khong_ro') parts.push(it.scanData.tinhTrangLabel);
     if (!v.found) parts.push('Chưa có trong DS');
     else {
-      const applied = [...new Set([...Object.keys(it.applied || {}).filter(k => TAG_LABEL[k]), ...(plannedKeys || [])])];
-      const keep = v.fields.filter(f => !f.spec.meta && f.decision === 'skip').map(f => lab(f.spec.key));
+      const byKey = Object.fromEntries(v.fields.map(f => [f.spec.key, f]));
+      // «Đã cập nhật từ phiếu» chỉ tính trường ĐANG lấy từ phiếu — bỏ trường vừa chuyển sang «Sheet đúng» / «Để kiểm sau»
+      const applied = [...new Set([...Object.keys(it.applied || {}).filter(k => it.applied[k] && TAG_LABEL[k]), ...(plannedKeys || [])])]
+        .filter(k => { const f = byKey[k]; return !(f && isActionable(f.state) && (f.decision === 'skip' || f.decision === 'later')); });
+      const keepKeys = [...new Set([...v.fields.filter(f => !f.spec.meta && f.decision === 'skip').map(f => f.spec.key),
+        ...Object.keys(it.sheetOk || {}).filter(k => it.sheetOk[k] && TAG_LABEL[k])])].filter(k => !applied.includes(k));
+      const keep = keepKeys.map(lab);
       const pend = v.fields.filter(f => f.decision === 'later').map(f => `${f.spec.label}: phiếu "${f.scanVal}" ≠ Sheet "${f.dsVal || 'trống'}"`);
       if (applied.length) parts.push('Đã cập nhật từ phiếu: ' + applied.map(lab).join(', '));
       if (keep.length) parts.push('Sheet đúng: ' + keep.join(', '));
@@ -284,10 +308,16 @@ const ScanReview = (() => {
     const toWrite = {}, wrote = [], fromScan = [];
     for (const f of v.fields) {
       if (onlyKeys && !onlyKeys.includes(f.spec.key)) continue;
-      if (!willWrite(f)) continue;
-      toWrite[f.spec.key] = f.writeVal; wrote.push(f.spec.key);
-      if (f.decision === 'sheetfix') it.fixed[f.spec.key] = true;       // sửa tay giá trị Sheet khi kiểm
-      else { it.applied[f.spec.key] = true; if (!f.spec.meta) fromScan.push(f.spec.key); }
+      const k = f.spec.key;
+      if (!willWrite(f)) {
+        // Ghi nhận nguồn đã chọn: «Sheet đúng» / «Để kiểm sau» => KHÔNG còn tính là «đã cập nhật từ phiếu»
+        if (isActionable(f.state) && f.decision === 'skip') { delete it.applied[k]; it.sheetOk[k] = true; }
+        else if (isActionable(f.state) && f.decision === 'later') { delete it.applied[k]; delete it.sheetOk[k]; }
+        continue;
+      }
+      toWrite[k] = f.writeVal; wrote.push(k);
+      if (f.decision === 'sheetfix') { it.fixed[k] = true; delete it.applied[k]; }   // sửa tay giá trị Sheet khi kiểm
+      else { it.applied[k] = true; delete it.sheetOk[k]; if (!f.spec.meta) fromScan.push(k); }
     }
     // DẤU NGUỒN: chỉ nối vào Ghi chú (không làm bẩn CCCD/SĐT/Chủ xe) khi thật sự có trường lấy từ phiếu
     if (prefs.tag && fromScan.length) toWrite.ghiChu = withSourceTag(('ghiChu' in toWrite) ? toWrite.ghiChu : row.ghiChu, fromScan);
@@ -361,8 +391,14 @@ const ScanReview = (() => {
     sel.value = prefs.assignee || '';
   }
 
+  // Chế độ TOÀN MÀN HÌNH của cửa sổ so sánh (mặc định bật; nhớ lựa chọn)
+  function applyFullscreen() {
+    const m = document.querySelector('#scanReviewModal .modal'); if (m) m.classList.toggle('rv-full', !!prefs.full);
+    const b = $('#btnRvFull'); if (b) b.textContent = prefs.full ? '🗗 Thu nhỏ' : '⛶ Toàn màn hình';
+  }
+
   async function open() {
-    openModal('scanReviewModal');
+    openModal('scanReviewModal'); applyFullscreen();
     $('#rvList').innerHTML = '<p class="hint">Đang nạp dữ liệu…</p>';
     $('#rvChkTag').checked = !!prefs.tag; $('#rvChkQuick').checked = !!prefs.quick;
     buildAssigneeSelect();
@@ -423,26 +459,39 @@ const ScanReview = (() => {
     return `<input type="text" class="rv-edit" ${attrs} value="${escapeHtml(val)}">`;
   }
 
+  // Nút RIÊNG CỦA TỪNG TRƯỜNG: ✅ Đã kiểm với ảnh · ✅ Google Sheet đúng · ✅ Dữ liệu từ phiếu scan đúng
+  function fieldBtnsHtml(it, f, canSheet, canScan) {
+    const key = f.spec.key, id = escapeHtml(it.id), a = `data-id="${id}" data-field="${key}"`;
+    const src = it.source[key];
+    return `<div class="rv-field-btns"><label class="rv-tick rv-tick-sm" title="Đã đối chiếu RIÊNG trường này với ảnh phiếu"><input type="checkbox" data-act="tick-field" ${a} ${f.checked ? 'checked' : ''}> Đã kiểm với ảnh</label>` +
+      (canSheet ? `<button type="button" class="btn btn-sm ${src === 'sheet' ? 'btn-primary' : 'btn-secondary'}" data-act="field-sheet" ${a} title="Giữ nguyên giá trị Google Sheet cho trường này">✅ Google Sheet đúng</button>` : '') +
+      (canScan ? `<button type="button" class="btn btn-sm ${src === 'scan' ? 'btn-primary' : 'btn-secondary'}" data-act="field-scan" ${a} title="Ghi đúng giá trị từ phiếu vào Sheet cho trường này">✅ Dữ liệu từ phiếu scan đúng</button>` : '') + '</div>';
+  }
+
   function fieldRowHtml(it, f, v) {
     const key = f.spec.key, col = hdr(key), id = escapeHtml(it.id);
-    const actionable = isActionable(f.state);
     const leftCls = f.state === 'diff' ? 'diff' : (f.state === 'fill' ? 'fill' : (f.state === 'same' ? 'same' : (f.state === 'sheetedit' ? 'fill' : '')));
+    const svT = String(f.scanVal || '').trim(), dsT = String(f.dsVal || '').trim();
+    const canSheet = !f.spec.meta && isActionable(f.state);
+    // Dòng "khớp" nhưng khác về định dạng (số 0 đầu, dấu, thiếu số cuối...) vẫn cho chọn lấy đúng từ phiếu
+    const canScan = !f.spec.meta && (isActionable(f.state) || (f.state === 'same' && svT && svT !== dsT && key !== 'ghiChu'));
+    const btns = f.spec.meta ? '' : fieldBtnsHtml(it, f, canSheet, canScan);
     let dec = '';
     const revert = (f.edited || f.sheetEdit != null) ? `<button type="button" class="rv-revert" data-act="revert" data-id="${id}" data-field="${key}" title="Hoàn tác chỉnh sửa trường này">↺</button>` : '';
-    if (f.state === 'empty') dec = `<span class="hint">${key === 'nguoiThucHien' ? 'Chọn người thực hiện bên trái để ghi.' : 'Phiếu không có giá trị — nhập/chọn bên trái nếu nhìn ảnh thấy.'}</span>`;
-    else if (f.state === 'same') dec = '<span class="rv-same">✔ Khớp</span>' + (f.note ? `<div class="hint">${escapeHtml(f.note)}</div>` : '');
+    if (f.state === 'empty') dec = `<span class="hint">${key === 'nguoiThucHien' ? 'Chọn người thực hiện bên trái để ghi.' : 'Phiếu không có giá trị — nhập/chọn bên trái nếu nhìn ảnh thấy.'}</span>${btns}`;
+    else if (f.state === 'same') dec = '<span class="rv-same">✔ Khớp</span>' + (f.note ? `<div class="hint">${escapeHtml(f.note)}</div>` : '') + btns;
     else {
       const opts = ['apply', 'skip'].concat(f.spec.meta ? [] : ['later']).concat(f.sheetEdit != null ? ['sheetfix'] : []);
       const tagNote = (!f.spec.meta && prefs.tag && f.decision === 'apply') ? ' + dấu 📷 trong «Ghi Chú»' : '';
       let target = '→ không ghi gì';
-      if (f.decision === 'apply') target = f.writeVal != null ? `→ ghi vào cột «${escapeHtml(col)}»: <b>${escapeHtml(f.writeVal)}</b>${tagNote}` : '→ (chưa có giá trị để ghi)';
+      if (f.decision === 'apply') target = f.writeVal != null ? `→ ghi vào cột «${escapeHtml(col)}» (từ PHIẾU): <b>${escapeHtml(f.writeVal)}</b>${tagNote}` : '→ (chưa có giá trị để ghi)';
       else if (f.decision === 'sheetfix') target = `→ ghi giá trị Sheet đã sửa vào cột «${escapeHtml(col)}»: <b>${escapeHtml(f.writeVal || '')}</b>`;
       else if (f.decision === 'later') target = '→ chỉ ghi cảnh báo vào cột «Kết quả đối chiếu phiếu»';
       else if (f.decision === 'skip') target = '→ giữ nguyên Google Sheet';
       dec = `<select class="row-inline-select rv-dec rv-dec-${f.decision}" data-act="decide" data-id="${id}" data-field="${key}">` +
         opts.map(k => `<option value="${k}" ${f.decision === k ? 'selected' : ''}>${DEC_LABEL[k]}</option>`).join('') + '</select>' +
         (f.note ? `<div class="hint">${escapeHtml(f.note)}</div>` : '') +
-        `<div class="rv-target ${willWrite(f) ? 'on' : ''}">${target}</div>` +
+        `<div class="rv-target ${willWrite(f) ? 'on' : ''}">${target}</div>` + btns +
         (willWrite(f) ? `<button type="button" class="btn btn-ghost btn-sm" data-act="apply-field" data-id="${id}" data-field="${key}" title="Chỉ ghi trường này, các trường khác giữ nguyên">⚡ Áp dụng riêng trường này</button>` : '');
     }
     return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}"><div class="rv-field">${escapeHtml(f.spec.label)}<div class="hint">cột «${escapeHtml(col)}»</div></div>
@@ -506,6 +555,7 @@ const ScanReview = (() => {
   }
 
   function renderReview() {
+    const scroller = document.querySelector('#scanReviewModal .modal-body'), keepTop = scroller ? scroller.scrollTop : 0;
     const views = R.items.map(computeView);
     renderStats(views);
     // --- danh sách ---
@@ -525,6 +575,8 @@ const ScanReview = (() => {
       : `${list.length} mục`;
     renderFooter(views);
     renderPane(false);
+    if (scroller) scroller.scrollTop = keepTop;   // vẽ lại xong vẫn giữ vị trí đang làm việc
+    updateHistoryButtons();
   }
 
   // Tóm tắt toàn bộ phần SẼ ghi + bản xem trước chi tiết từng thay đổi
@@ -557,23 +609,77 @@ const ScanReview = (() => {
     $('#btnRvApplyAll').textContent = `✅ Áp dụng tất cả (${todo.length} mục)`;
   }
 
-  async function applyViews(vs, label, onlyKeys) {
-    R.busy = true; renderFooter();
+  /* ---- LỊCH SỬ THAO TÁC: «Quay lại bước trước» / «Tới bước sau» ----
+     Mỗi thao tác = 1 bước, lưu ảnh chụp mục (item) TRƯỚC/SAU và, nếu có ghi vào Sheet, cả các cột của dòng xe TRƯỚC/SAU
+     => quay lại sẽ khôi phục luôn giá trị trên Sheet (qua updateSingleRowFields nên vẫn đồng bộ ngầm). Chỉ giữ trong phiên. */
+  const HIST = { undo: [], redo: [], max: 100 };
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+  const ROW_KEYS = ['chuXe', 'cccd', 'soDienThoai', 'ghiChu', 'tinhTrangCamKet', 'nguoiThucHien', 'phieuScan', 'kiemPhieu', 'ketQuaPhieu'];
+  const rowSnap = (row) => row ? Object.fromEntries(ROW_KEYS.map(k => [k, row[k] || ''])) : null;
+  const findRow = (rowId) => state.rawData.find(r => r._rowId === rowId);
+  const labelOf = (k) => (SPECS.find(sp => sp.key === k) || {}).label || k;
+  function updateHistoryButtons() {
+    const u = $('#rvUndo'), r = $('#rvRedo'); if (!u || !r) return;
+    const lu = HIST.undo[HIST.undo.length - 1], lr = HIST.redo[HIST.redo.length - 1];
+    u.disabled = R.busy || !lu; r.disabled = R.busy || !lr;
+    u.title = lu ? 'Hoàn tác: ' + lu.label : 'Chưa có bước nào để quay lại';
+    r.title = lr ? 'Làm lại: ' + lr.label : 'Chưa có bước nào để tới';
+  }
+  function record(label, changes) {
+    const real = changes.filter(c => JSON.stringify(c.before) !== JSON.stringify(c.after) || (c.rowBefore && JSON.stringify(c.rowBefore) !== JSON.stringify(c.rowAfter)));
+    if (!real.length) return;
+    HIST.undo.push({ label, changes: real }); if (HIST.undo.length > HIST.max) HIST.undo.shift();
+    HIST.redo.length = 0; updateHistoryButtons();
+  }
+  // Chạy 1 thao tác sửa mục và ghi thành 1 bước lịch sử
+  async function track(it, label, fn) { const before = clone(it); await fn(); record(label, [{ id: it.id, before, after: clone(it) }]); }
+  async function stepHistory(dir) {          // dir = -1: quay lại · +1: tới
+    if (R.busy) return;
+    const from = dir < 0 ? HIST.undo : HIST.redo, to = dir < 0 ? HIST.redo : HIST.undo;
+    const e = from.pop(); if (!e) return;
+    R.busy = true; updateHistoryButtons();
+    try {
+      for (const c of e.changes) {
+        const item = dir < 0 ? c.before : c.after, rowState = dir < 0 ? c.rowBefore : c.rowAfter;
+        if (rowState && c.rowId) { const row = findRow(c.rowId); if (row) await updateSingleRowFields(row, rowState); }
+        await DB.dbPut(ST_ITEMS, clone(item));
+        await recomputeLink(item.bienSo);
+      }
+      to.push(e);
+    } catch (err) { from.push(e); toast('Không hoàn tác được: ' + (err.message || err), true); }
+    finally { R.busy = false; }
+    R.items = (await DB.dbGetAll(ST_ITEMS)).map(normItem);
+    renderReview(); refreshMainTable(); updateHistoryButtons();
+    toast((dir < 0 ? '↶ Đã quay lại bước: ' : '↷ Đã làm lại bước: ') + e.label);
+  }
+
+  // pre (tùy chọn) = { [itemId]: bản chụp mục TRƯỚC thao tác chọn nguồn } để gộp "chọn + áp dụng" thành 1 bước lịch sử
+  async function applyViews(vs, label, onlyKeys, pre) {
+    R.busy = true; renderFooter(); updateHistoryButtons();
     let ok = 0, writes = 0;
     const orphans = vs.filter(v => !v.found);
     const founds = vs.filter(v => v.found);
+    const changes = [];
     try {
       for (const v of founds) {
+        const before = (pre && pre[v.it.id]) || clone(v.it), rowBefore = rowSnap(v.row);
         const r = await applyFoundItem(v, onlyKeys);
+        changes.push({ id: v.it.id, before, after: clone(v.it), rowId: v.row._rowId, rowBefore, rowAfter: rowSnap(v.row) });
         writes += r.writes; ok++;
         if (ok % 10 === 0) { $('#rvFooterSummary').textContent = `${label}… ${ok}/${founds.length}`; await S.yieldToUi(); } // chạy ngầm, nhường UI
       }
-      if (orphans.length) await applyOrphanItems(orphans);
+      if (orphans.length) {
+        const olds = orphans.map(v => clone(v.it));
+        await applyOrphanItems(orphans);
+        orphans.forEach((v, i) => changes.push({ id: v.it.id, before: olds[i], after: clone(v.it) }));
+      }
     } finally { R.busy = false; }
+    record(onlyKeys ? 'Áp dụng riêng 1 trường' : (vs.length === 1 ? 'Áp dụng xe ' + (vs[0].it.bienSoRaw || '') : `Áp dụng ${vs.length} mục`), changes);
     R.items = (await DB.dbGetAll(ST_ITEMS)).map(normItem);
     toast(`Đã áp dụng ${ok + orphans.length} mục (${writes} trường cập nhật). ` + (isWriteConnected() ? 'Đang đồng bộ ngầm lên Google Sheet…' : 'Mới lưu trên máy (chưa kết nối ghi Sheet).'));
     renderReview();
     refreshMainTable();
+    updateHistoryButtons();
   }
 
   /* ---- Chỉnh sửa tại chỗ: vẽ lại thẻ SAU một nhịp ngắn ----
@@ -603,46 +709,78 @@ const ScanReview = (() => {
       const added = typeof addAssigneeToList === 'function' ? addAssigneeToList(window.prompt('Nhập tên Người thực hiện mới:')) : '';
       val = added || '';
     }
-    const base = key === 'nguoiThucHien' ? (prefs.assignee || '') : (it.scanData[key] || '');
-    if (val === base) delete it.edits[key]; else it.edits[key] = val;
-    // Sửa xong: còn khác Sheet -> mặc định "Lấy từ phiếu" (người dùng đã chủ động sửa); đã khớp -> bỏ quyết định cũ
-    const f = computeView(it).fields.find(x => x.spec.key === key);
-    if (f && isActionable(f.state) && (key in it.edits)) it.decisions[key] = 'apply'; else if (f && !isActionable(f.state)) delete it.decisions[key];
-    await persistEdit(it); scheduleRerender(it, val === ADD_NEW ? 0 : 250);
+    await track(it, `Sửa «${labelOf(key)}» bên phiếu`, async () => {
+      const base = key === 'nguoiThucHien' ? (prefs.assignee || '') : (it.scanData[key] || '');
+      if (val === base) delete it.edits[key]; else it.edits[key] = val;
+      // Sửa xong: còn khác Sheet -> chọn nguồn = phiếu (người dùng đã chủ động sửa); đã khớp -> bỏ quyết định cũ
+      const f = computeView(it).fields.find(x => x.spec.key === key);
+      if (f && isActionable(f.state) && (key in it.edits)) { it.decisions[key] = 'apply'; it.source[key] = 'scan'; }
+      else if (f && !isActionable(f.state)) { delete it.decisions[key]; delete it.source[key]; }
+      await persistEdit(it);
+    });
+    scheduleRerender(it, val === ADD_NEW ? 0 : 250);
   }
   // Sửa giá trị BÊN SHEET ngay tại chỗ (Sheet gõ sai) -> ghi giá trị đã sửa lên Sheet khi áp dụng
   async function onEditSheet(it, key, raw) {
     const v = computeView(it); if (!v.row) return;
     const val = String(raw || '').trim(), orig = v.row[key] || '';
-    if (val === orig) { delete it.sheetEdits[key]; if (it.decisions[key] === 'sheetfix') delete it.decisions[key]; }
-    else { it.sheetEdits[key] = val; it.decisions[key] = 'sheetfix'; }
-    await persistEdit(it); scheduleRerender(it);
+    await track(it, `Sửa «${labelOf(key)}» bên Sheet`, async () => {
+      if (val === orig) { delete it.sheetEdits[key]; if (it.decisions[key] === 'sheetfix') delete it.decisions[key]; if (it.source[key] === 'sheet') delete it.source[key]; }
+      else { it.sheetEdits[key] = val; it.decisions[key] = 'sheetfix'; it.source[key] = 'sheet'; }
+      await persistEdit(it);
+    });
+    scheduleRerender(it);
   }
 
-  // XÁC NHẬN NHANH: đặt quyết định cho MỌI trường đang khác/thiếu chỉ bằng 1 cú bấm
+  const isWriteConnectedOrLocal = () => state.rawData.length > 0; // local-first: vẫn áp dụng được khi chưa nối Sheet 2 chiều
+  // Chạy thao tác chọn nguồn rồi (nếu bật «Xác nhận nhanh») áp dụng luôn; cả hai gộp thành 1 bước lịch sử.
+  async function mutateThenMaybeApply(it, label, onlyKeys, fn) {
+    const before = clone(it);
+    await fn();
+    it.dirty = true; await saveItem(it);
+    if (prefs.quick && isWriteConnectedOrLocal()) await applyViews([computeView(it)], 'Đang áp dụng', onlyKeys, { [it.id]: before });
+    else { record(label, [{ id: it.id, before, after: clone(it) }]); rerenderCard(it); }
+  }
+
+  // CHỌN NGUỒN RIÊNG TỪNG TRƯỜNG: 'sheet' = Google Sheet đúng (giữ nguyên) · 'scan' = Dữ liệu từ phiếu scan đúng (ghi đúng giá trị phiếu)
+  async function setFieldSource(it, key, mode) {
+    const f = computeView(it).fields.find(x => x.spec.key === key); if (!f) return;
+    const label = (mode === 'scan' ? '«Phiếu đúng» — ' : '«Sheet đúng» — ') + labelOf(key);
+    await mutateThenMaybeApply(it, label, [key], async () => {
+      it.source[key] = mode;
+      if (mode === 'sheet') it.decisions[key] = f.sheetEdit != null ? 'sheetfix' : 'skip';
+      else { delete it.sheetEdits[key]; it.decisions[key] = 'apply'; }
+    });
+  }
+
+  // XÁC NHẬN NHANH cho CẢ XE: đặt nguồn cho MỌI trường đang khác/thiếu chỉ bằng 1 cú bấm
   //  mode 'sheet' = Google Sheet đúng (giữ Sheet; trường người dùng đã sửa Sheet vẫn được ghi)
   //  mode 'scan'  = Dữ liệu từ phiếu scan đúng (lấy giá trị phiếu, gồm cả chỗ đã chỉnh sửa)
   async function quickConfirm(it, mode) {
     const v = computeView(it);
     if (!v.found) return;
-    for (const f of v.fields) {
-      if (f.spec.meta || !isActionable(f.state)) continue;
-      if (mode === 'sheet') it.decisions[f.spec.key] = (f.state === 'sheetedit') ? 'sheetfix' : 'skip';
-      else { delete it.sheetEdits[f.spec.key]; it.decisions[f.spec.key] = 'apply'; }
-    }
-    it.imgChecked = true;                    // xác nhận nhanh nghĩa là người dùng đã đối chiếu xong với ảnh
-    it.dirty = true; await saveItem(it);
-    if (prefs.quick && isWriteConnectedOrLocal()) await applyViews([computeView(it)], 'Đang áp dụng');
-    else rerenderCard(it);
+    await mutateThenMaybeApply(it, mode === 'sheet' ? '«Google Sheet đúng» cho cả xe' : '«Dữ liệu từ phiếu scan đúng» cho cả xe', undefined, async () => {
+      for (const f of v.fields) {
+        if (f.spec.meta || !isActionable(f.state)) continue;
+        const k = f.spec.key;
+        if (mode === 'sheet') { it.decisions[k] = (f.state === 'sheetedit') ? 'sheetfix' : 'skip'; it.source[k] = 'sheet'; }
+        else { delete it.sheetEdits[k]; it.decisions[k] = 'apply'; it.source[k] = 'scan'; }
+      }
+      it.imgChecked = true;                  // xác nhận nhanh nghĩa là người dùng đã đối chiếu xong với ảnh
+    });
   }
-  const isWriteConnectedOrLocal = () => state.rawData.length > 0; // local-first: vẫn áp dụng được khi chưa nối Sheet 2 chiều
 
   // Đặt "Tình trạng cam kết = Đã ký cam kết" khi nhìn ảnh thấy phiếu đã ký (máy chưa chắc nên cần người xác nhận)
   async function quickSign(it) {
-    it.edits.tinhTrangCamKet = SIGNED;
-    const f = computeView(it).fields.find(x => x.spec.key === 'tinhTrangCamKet');
-    if (f && isActionable(f.state)) it.decisions.tinhTrangCamKet = 'apply'; else delete it.decisions.tinhTrangCamKet;
-    it.dirty = it.dirty || it.done; await saveItem(it); rerenderCard(it);
+    let f;
+    await track(it, 'Phiếu đã ký cam kết', async () => {
+      it.edits.tinhTrangCamKet = SIGNED;
+      f = computeView(it).fields.find(x => x.spec.key === 'tinhTrangCamKet');
+      if (f && isActionable(f.state)) { it.decisions.tinhTrangCamKet = 'apply'; it.source.tinhTrangCamKet = 'scan'; }
+      else { delete it.decisions.tinhTrangCamKet; delete it.source.tinhTrangCamKet; }
+      it.dirty = it.dirty || it.done; await saveItem(it);
+    });
+    rerenderCard(it);
     toast(f && f.state === 'same' ? 'Tình trạng cam kết trên Sheet đã là «' + SIGNED + '».' : 'Đã chọn «' + SIGNED + '» — bấm Áp dụng để ghi.');
   }
 
@@ -668,7 +806,7 @@ const ScanReview = (() => {
     const p = R.pane;
     $('#rvImgPane').classList.toggle('hidden', !p.open);
     $('#rvWork').classList.toggle('with-pane', p.open);
-    if (!p.open) { p.urls.forEach(revoke); p.urls = []; p.loadedId = null; return; }
+    if (!p.open) { p.urls.forEach(revoke); p.urls = []; p.loadedId = null; p.zoom = 100; $('#rvImgBody').innerHTML = ''; return; }   // đóng: dọn ảnh + đặt lại mức phóng
     const it = R.items.find(i => i.id === p.id); if (!it) return;
     refreshPaneActions();
     if (!force && p.loadedId === it.id) return;
@@ -702,6 +840,9 @@ const ScanReview = (() => {
 
   function bindReviewUI() {
     $('#btnScanOpenReview').addEventListener('click', open);
+    $('#rvUndo').addEventListener('click', () => stepHistory(-1));
+    $('#rvRedo').addEventListener('click', () => stepHistory(1));
+    $('#btnRvFull').addEventListener('click', () => { prefs.full = !prefs.full; savePrefs(); applyFullscreen(); });
     $('#rvFilter').addEventListener('change', (e) => { R.filter = e.target.value; R.page = 1; renderReview(); });
     $('#rvSearch').addEventListener('input', (e) => { R.search = e.target.value.trim(); R.page = 1; renderReview(); });
     // Thanh công cụ: người thực hiện mặc định + 2 tùy chọn
@@ -728,14 +869,22 @@ const ScanReview = (() => {
     work.addEventListener('change', async (e) => {
       const el = e.target.closest('[data-act]'); if (!el) return;
       const it = R.items.find(i => i.id === el.dataset.id); if (!it) return;
-      const act = el.dataset.act;
-      if (act === 'decide') { it.decisions[el.dataset.field] = el.value; await persistEdit(it); rerenderCard(it); }
-      else if (act === 'decide-orphan') { it.orphanDecision = el.value; await persistEdit(it); rerenderCard(it); }
-      else if (act === 'edit-scan') await onEditScan(it, el.dataset.field, el.value);
-      else if (act === 'edit-sheet') await onEditSheet(it, el.dataset.field, el.value);
+      const act = el.dataset.act, key = el.dataset.field;
+      if (act === 'decide') {
+        await track(it, `Đổi quyết định «${labelOf(key)}»`, async () => {
+          it.decisions[key] = el.value;
+          // Quyết định chọn rõ nguồn nào thì nguồn đó được ghi nhận (để lúc ghi KHÔNG lấy nhầm nguồn còn lại)
+          if (el.value === 'apply') it.source[key] = 'scan'; else if (el.value === 'skip' || el.value === 'sheetfix') it.source[key] = 'sheet'; else delete it.source[key];
+          await persistEdit(it);
+        });
+        rerenderCard(it);
+      }
+      else if (act === 'decide-orphan') { await track(it, 'Đổi quyết định phiếu lạ', async () => { it.orphanDecision = el.value; await persistEdit(it); }); rerenderCard(it); }
+      else if (act === 'edit-scan') await onEditScan(it, key, el.value);
+      else if (act === 'edit-sheet') await onEditSheet(it, key, el.value);
+      else if (act === 'tick-field') { await track(it, `Đã kiểm ảnh «${labelOf(key)}»`, async () => { it.fieldChecked[key] = el.checked; await saveItem(it); }); rerenderCard(it); }
       else if (act === 'tick-img') { // tiến độ kiểm với ảnh: lưu NGAY để làm dở có thể tiếp tục sau (không đụng Sheet)
-        it.imgChecked = el.checked; it.imgCheckedAt = el.checked ? Date.now() : null;
-        await saveItem(it);
+        await track(it, 'Đã kiểm với ảnh', async () => { it.imgChecked = el.checked; it.imgCheckedAt = el.checked ? Date.now() : null; await saveItem(it); });
         if (R.filter === 'img_chua' || R.filter === 'img_da') renderReview(); else rerenderCard(it);
       }
     });
@@ -772,9 +921,12 @@ const ScanReview = (() => {
       } else if (act === 'quick-sheet') await quickConfirm(it, 'sheet');
       else if (act === 'quick-scan') await quickConfirm(it, 'scan');
       else if (act === 'quick-sign') await quickSign(it);
+      else if (act === 'field-scan') await setFieldSource(it, b.dataset.field, 'scan');
+      else if (act === 'field-sheet') await setFieldSource(it, b.dataset.field, 'sheet');
       else if (act === 'revert') { // hoàn tác chỉnh sửa của 1 trường
-        delete it.edits[b.dataset.field]; delete it.sheetEdits[b.dataset.field]; delete it.decisions[b.dataset.field];
-        await persistEdit(it); rerenderCard(it);
+        const k = b.dataset.field;
+        await track(it, `Hoàn tác chỉnh sửa «${labelOf(k)}»`, async () => { delete it.edits[k]; delete it.sheetEdits[k]; delete it.decisions[k]; delete it.source[k]; await persistEdit(it); });
+        rerenderCard(it);
       }
     });
   }

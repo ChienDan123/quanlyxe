@@ -550,12 +550,17 @@
   <div class="modal modal-xl rv-modal">
     <div class="modal-header">
       <h2>🔍 So sánh phiếu scan ↔ Google Sheet</h2>
+      <button type="button" id="btnRvFull" class="btn btn-ghost btn-sm rv-full-btn" title="Bật/tắt chế độ toàn màn hình">🗗 Thu nhỏ</button>
       <button class="modal-close" data-close="scanReviewModal">✕</button>
     </div>
     <div class="modal-body">
       <div id="rvWarn" class="rv-warn hidden"></div>
       <div id="rvStats" class="rv-stats"></div>
       <div class="rv-toolbar">
+        <span class="rv-history">
+          <button type="button" id="rvUndo" class="btn btn-secondary btn-sm" disabled>↶ Quay lại bước trước</button>
+          <button type="button" id="rvRedo" class="btn btn-secondary btn-sm" disabled>Tới bước sau ↷</button>
+        </span>
         <select id="rvFilter" class="tpl-input" style="width:auto">
           <option value="review">Cần xem xét (mặc định)</option>
           <option value="diff">Có khác biệt</option>
