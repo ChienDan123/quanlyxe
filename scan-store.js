@@ -33,7 +33,14 @@ const ScanStore = (() => {
     document.querySelectorAll('input[name="scanStoreMode"]').forEach(r => { r.disabled = false; r.checked = r.value === c.mode; });
     const u2 = q('#scanStoreUrl2'); if (u2) { u2.value = c.url2 || ''; u2.disabled = false; u2.readOnly = false; }
     const af = q('#scanStoreAutoFree'); if (af) af.checked = !!c.autoFree;
-    toggleUrlRow(); refreshFreeInfo();
+    const ai = q('#scanStoreAutoImages'); if (ai) ai.checked = !!c.autoImages;
+    const nn = q('#scanStoreImgNet'); if (nn) nn.value = c.imgNet === 'any' ? 'any' : 'wifi';
+    const lm = q('#scanStoreLimit'); if (lm) {
+      const v = String(c.prefetchLimit == null ? 300 : c.prefetchLimit);
+      if (![...lm.options].some(o => o.value === v)) lm.add(new Option(v + ' phiếu mới nhất', v));   // giá trị lạ (từ scan-config.json) vẫn hiển thị đúng
+      lm.value = v;
+    }
+    toggleUrlRow(); refreshFreeInfo(); refreshPrefetchInfo();
   }
 
   // Đổi nơi lưu: các phiếu đã lên nơi cũ KHÔNG tự sang nơi mới -> nếu người dùng đồng ý thì xóa cờ "đã lên" để lần đồng bộ sau đẩy lại toàn bộ
@@ -50,10 +57,14 @@ const ScanStore = (() => {
 
   async function saveSettings() {
     const mode = pickedMode(), url2 = (q('#scanStoreUrl2').value || '').trim(), autoFree = !!(q('#scanStoreAutoFree') || {}).checked;
+    const autoImages = !!(q('#scanStoreAutoImages') || {}).checked, imgNet = (q('#scanStoreImgNet') || {}).value === 'any' ? 'any' : 'wifi';
+    const lim = parseInt((q('#scanStoreLimit') || {}).value, 10), prefetchLimit = Number.isFinite(lim) && lim >= 0 ? lim : 300;
     if (mode === 'gas2' && !Y.validUrl(url2)) { setMsg('#scanStoreMsg', '❌ URL chưa đúng dạng <code>https://script.google.com/macros/s/…/exec</code> (phải kết thúc bằng <code>/exec</code>)', true); return; }
     const before = Y.config(), oldKey = before.mode + '|' + (before.mode === 'gas2' ? before.url2 : '');
     const newKey = mode + '|' + (mode === 'gas2' ? url2 : '');
-    Y.setConfig({ mode, url2, autoFree });
+    // «Tự xóa ảnh trên máy» và «Tự tải ảnh về máy» ngược nhau -> không cho bật cùng lúc
+    if (autoFree && autoImages) { setMsg('#scanStoreMsg', '❌ Không bật cùng lúc «Tự xóa ảnh trên máy» và «Tự tải ảnh về máy» — hãy chọn 1 trong 2.', true); return; }
+    Y.setConfig({ mode, url2, autoFree, autoImages, imgNet, prefetchLimit });
     let msg = '✅ Đã lưu cách lưu trữ.';
     // Đổi nơi lưu -> TỰ đẩy lại toàn bộ ảnh đang có trên máy sang nơi mới (không hỏi; ảnh ở nơi cũ không bị xóa)
     if (oldKey !== newKey && mode !== 'off') { const n = await resetCloudFlags(); msg += ` Đang tự đẩy ${n} phiếu sang nơi mới (chạy ngầm, không cần chờ).`; }
@@ -119,6 +130,7 @@ const ScanStore = (() => {
     host.insertAdjacentElement('afterend', free);
     q('#btnFreeLocal').addEventListener('click', freeNow);
     q('#btnCopyGs').addEventListener('click', copyGs);
+    injectImageAndLinkExtras(free);
   }
   // Sao chép mã Apps Script riêng vào clipboard (file nằm cùng repo GitHub Pages)
   async function copyGs() {
@@ -129,6 +141,94 @@ const ScanStore = (() => {
       await navigator.clipboard.writeText(txt);
       toast('Đã sao chép mã Apps Script — sang trang Apps Script và dán (Ctrl+V).');
     } catch (e) { toast('Không tự sao chép được. Hãy mở file AppsScript_StorageOnly.gs trong repo và sao chép thủ công.', true); }
+  }
+
+  /* ---- Kiểm soát TẢI ẢNH về máy + LINK THIẾT LẬP cho máy khác (chèn bằng JS, không cần sửa index.html) ---- */
+  const BLOCK_TXT = {
+    off: 'Đang TẮT tự tải ảnh: ảnh chỉ tải khi bạn mở xem phiếu hoặc bấm «Tải ảnh về máy ngay». Dữ liệu nhẹ (biển số, đối chiếu) vẫn luôn tự đồng bộ.',
+    autoFree: 'Đang bật «Tự xóa ảnh trên máy» nên không tự tải ảnh.', offline: 'Chưa kết nối nơi lưu online.',
+    saveData: 'Trình duyệt đang bật «Tiết kiệm dữ liệu» nên tạm không tự tải ảnh.', notWifi: 'Đang không dùng Wi-Fi (hoặc không xác định được) nên tạm chưa tự tải ảnh.',
+  };
+  function injectImageAndLinkExtras(free) {
+    if (q('#scanStoreAutoImages')) return;
+    const imgs = document.createElement('div'); imgs.className = 'ss-free ss-imgs';
+    imgs.innerHTML = `<b>🖼 Tải ảnh về máy này</b>
+<label class="ss-check"><input type="checkbox" id="scanStoreAutoImages"> Tự động tải ảnh về máy (chạy ngầm) <span class="hint">— mặc định TẮT, nên để tắt trên điện thoại. Nhớ bấm «Lưu» sau khi đổi.</span></label>
+<div class="sv-actions">
+  <label>Mạng: <select id="scanStoreImgNet"><option value="wifi">Chỉ khi dùng Wi-Fi</option><option value="any">Cả 4G/5G (tốn data)</option></select></label>
+  <label>Tải sẵn: <select id="scanStoreLimit"><option value="50">50 phiếu mới nhất</option><option value="100">100 phiếu mới nhất</option><option value="300">300 phiếu mới nhất</option><option value="1000">1000 phiếu mới nhất</option><option value="0">Tất cả</option></select></label>
+</div>
+<div class="sv-actions"><button type="button" class="btn btn-ghost btn-sm" id="btnPrefetchNow">⬇ Tải ảnh về máy ngay</button><button type="button" class="btn btn-ghost btn-sm hidden" id="btnPrefetchStop">⏹ Dừng</button><span class="hint" id="scanPrefetchInfo"></span></div>
+<div class="hint" id="scanPrefetchMsg"></div>`;
+    free.insertAdjacentElement('beforebegin', imgs);
+    const link = document.createElement('div'); link.className = 'ss-free ss-link';
+    link.innerHTML = `<b>🔗 Dùng trên máy / trình duyệt / tab ẩn danh khác</b>
+<div class="hint">Cài 1 lần: tạo link rồi mở trên máy mới → tự nối Drive, tải dữ liệu nhẹ về, (nếu kèm mật khẩu) lấy luôn khóa Gemini. Link dùng cấu hình đã «Lưu».</div>
+<label class="ss-check"><input type="checkbox" id="scanLinkPass"> Kèm mật khẩu kho khóa Gemini <span class="hint">— link sẽ CHỨA mật khẩu: chỉ gửi cho chính mình (tin nhắn đã lưu), không đăng công khai.</span></label>
+<div class="sv-actions"><button type="button" class="btn btn-ghost btn-sm" id="btnMakeLink">🔗 Tạo link thiết lập</button><button type="button" class="btn btn-ghost btn-sm hidden" id="btnCopyLink">📋 Sao chép link</button></div>
+<input type="text" id="scanLinkOut" class="hidden" readonly>
+<div class="hint" id="scanLinkMsg"></div>`;
+    free.insertAdjacentElement('afterend', link);
+    // «Tự tải ảnh» và «Tự xóa ảnh» loại trừ nhau: bật cái này thì bỏ tick cái kia
+    const ai = q('#scanStoreAutoImages'), af = q('#scanStoreAutoFree');
+    ai.addEventListener('change', () => { if (ai.checked && af) af.checked = false; });
+    if (af) af.addEventListener('change', () => { if (af.checked) ai.checked = false; });
+    q('#btnPrefetchNow').addEventListener('click', prefetchNow);
+    q('#btnPrefetchStop').addEventListener('click', () => { Y.stopPrefetch(); setMsg('#scanPrefetchMsg', '⏳ Đang dừng…'); });
+    q('#btnMakeLink').addEventListener('click', makeLink);
+    q('#btnCopyLink').addEventListener('click', copyLink);
+  }
+  async function refreshPrefetchInfo() {
+    const el = q('#scanPrefetchInfo'); if (!el) return;
+    try {
+      const n = await Y.pendingImageCount(), why = Y.prefetchState().blocked;
+      el.textContent = (n ? `${n} phiếu chưa có ảnh trên máy này. ` : 'Máy này đã có đủ ảnh. ') + (why && n ? (BLOCK_TXT[why] || '') : '');
+    } catch (e) { el.textContent = ''; }
+  }
+  let pfTimer = null;
+  function showPrefetch() {
+    const s = Y.prefetchState(); if (!s.busy) return;
+    setMsg('#scanPrefetchMsg', `⏳ Đang tải ảnh… ${s.done}/${s.total} phiếu · ${fmtSize(s.bytes)}`);
+  }
+  function pollPrefetch(on) {
+    clearInterval(pfTimer); pfTimer = null;
+    const b = q('#btnPrefetchStop'); if (b) b.classList.toggle('hidden', !on);
+    if (on) pfTimer = setInterval(showPrefetch, 700);
+  }
+  // Tải ảnh CHỦ ĐỘNG: báo trước số phiếu + dung lượng ước tính, người dùng đồng ý mới tải
+  async function prefetchNow() {
+    if (!Y.online()) { setMsg('#scanPrefetchMsg', '❌ Cần kết nối nơi lưu online trước.', true); return; }
+    if (Y.prefetchState().busy) { pollPrefetch(true); showPrefetch(); return; }
+    setMsg('#scanPrefetchMsg', '⏳ Đang tính dung lượng cần tải…');
+    try {
+      const p = await Y.pendingImages();
+      if (!p.n) { setMsg('#scanPrefetchMsg', '✅ Máy này đã có đủ ảnh.'); return; }
+      const sz = p.known ? ` (khoảng ${fmtSize(p.bytes)})` : '';
+      if (!confirm(`Tải ảnh của ${p.n} phiếu về máy này${sz}?\n\n• Tốn dung lượng bộ nhớ và data mạng — trên điện thoại nên dùng Wi-Fi.\n• Có thể bấm «Dừng» bất cứ lúc nào; ảnh đã tải được giữ lại.`)) { setMsg('#scanPrefetchMsg', 'Đã hủy.'); return; }
+      pollPrefetch(true);
+      await Y.prefetchImages({ force: true });
+      const s = Y.prefetchState();
+      setMsg('#scanPrefetchMsg', s.note === 'stopped' ? `⏹ Đã dừng — đã tải ${s.done}/${s.total} phiếu (${fmtSize(s.bytes)}).` : `✅ Đã tải ảnh của ${s.total} phiếu (${fmtSize(s.bytes)}).`);
+    } catch (e) { setMsg('#scanPrefetchMsg', '❌ ' + esc(e.message || e), true); }
+    finally { pollPrefetch(false); refreshPrefetchInfo(); refreshFreeInfo(); }
+  }
+  // Link thiết lập cho máy khác (mật khẩu nếu kèm chỉ nằm trong phần #…, không gửi lên server và bị xóa khỏi thanh địa chỉ khi mở)
+  function makeLink() {
+    try {
+      const withPass = !!q('#scanLinkPass').checked; let pass = '';
+      if (withPass) {
+        pass = localStorage.getItem(PASS_KEY) || vaultPass();
+        if (pass.length < 6) throw new Error('Muốn kèm mật khẩu: hãy nhập mật khẩu kho khóa (≥ 6 ký tự) ở mục «Kho khóa Gemini» bên dưới, và đã đẩy key lên ít nhất 1 lần.');
+      }
+      const r = Y.makeSetupLink(withPass, pass), out = q('#scanLinkOut');
+      out.value = r.link; out.classList.remove('hidden'); q('#btnCopyLink').classList.remove('hidden');
+      setMsg('#scanLinkMsg', r.withPass ? '✅ Đã tạo link (CÓ kèm mật khẩu). Mở link này 1 lần trên máy mới là xong.' : '✅ Đã tạo link. Mở trên máy mới; khóa Gemini sẽ lấy sau khi bạn nhập mật khẩu kho khóa ở máy đó.');
+    } catch (e) { setMsg('#scanLinkMsg', '❌ ' + esc(e.message || e), true); }
+  }
+  async function copyLink() {
+    const out = q('#scanLinkOut');
+    try { await navigator.clipboard.writeText(out.value); toast('Đã sao chép link thiết lập.'); }
+    catch (e) { out.select(); toast('Không tự sao chép được — hãy bôi đen link và sao chép thủ công.', true); }
   }
 
   /* ====================================================================== */

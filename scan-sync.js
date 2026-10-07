@@ -25,10 +25,24 @@ const ScanSync = (() => {
   const RETRY_MS = 60000;               // gặp lỗi: nghỉ 1 phút rồi thử lại
   const PULL_EVERY = 120000;            // kéo thay đổi từ Drive mỗi 2 phút (tăng dần nên rất nhẹ) — để tab/máy khác thấy nhau
   const PASS_KEY = 'vehicleScanVaultPassV1';   // mật khẩu kho khóa (trùng với scan-store.js) — link thiết lập có thể kèm
-  const Y = { busy: false, pulled: false, pullAt: 0, since: 0, batchOk: true, errUntil: 0, lastError: '', touched: new Set(), timer: null, cur: '', phase: '', gone: new Set() };
+  const Y = { busy: false, pulled: false, pullAt: 0, since: 0, fullAt: 0, batchOk: true, errUntil: 0, lastError: '', touched: new Set(), timer: null, cur: '', phase: '', gone: new Set() };
   // Trạng thái tải ẢNH NỀN (prefetch): dirty = có phiếu mới cần xem lại; checkedAt/errUntil để không quét liên tục
   const P = { busy: false, stop: false, done: 0, total: 0, bytes: 0, note: '', error: '', dirty: true, checkedAt: 0, errUntil: 0 };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  // MỐC «since» được NHỚ TRÊN MÁY: mở lại trang chỉ hỏi Drive các phiếu đổi sau mốc (rất nhanh) thay vì liệt kê lại cả kho.
+  // Cứ 24 giờ (hoặc khi đổi nơi lưu / bấm «Đồng bộ ngay») lại liệt kê ĐỦ 1 lần để bắt phiếu sót.
+  const SINCE_KEY = 'vehicleScanSinceV1', FULL_LIST_EVERY = 24 * 3600e3;
+  function resetPull(full) {
+    Y.pulled = false; Y.since = 0;
+    if (full) { Y.fullAt = 0; try { localStorage.removeItem(SINCE_KEY); } catch (e) { /* bỏ qua */ } }
+  }
+  function loadSince() {
+    try { const j = JSON.parse(localStorage.getItem(SINCE_KEY) || 'null'); if (j && j.url === storeUrl() && j.since > 0 && j.fullAt && Date.now() - j.fullAt < FULL_LIST_EVERY) return j; } catch (e) { /* bỏ qua */ }
+    return null;
+  }
+  function saveSince() { try { localStorage.setItem(SINCE_KEY, JSON.stringify({ url: storeUrl(), since: Y.since, fullAt: Y.fullAt })); } catch (e) { /* bỏ qua */ } }
+  // Đếm phiếu trên máy; lỗi -> 0 (an toàn: sẽ liệt kê đủ)
+  const countScans = async () => { try { return (await DB.tx(ST_SCANS, 'readonly', os => os.count())) || 0; } catch (e) { return 0; } };
 
   /* ---- NƠI LƯU ẢNH (chọn ở Cài đặt): nhớ trên máy; ảnh luôn lưu IndexedDB trước, "nơi lưu online" chỉ là bản sao dùng chung ---- */
   const STORE_KEY = 'vehicleScanStoreV1';
@@ -43,7 +57,7 @@ const ScanSync = (() => {
     Object.assign(cfg, c, { src: (c && c.src) || 'user' });
     try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (e) { /* bỏ qua */ }
     // đổi nơi lưu -> danh sách «đã xóa» của nơi cũ không còn đúng, kéo lại TOÀN BỘ (since = 0) từ nơi mới
-    Y.errUntil = 0; Y.pulled = false; Y.since = 0; Y.lastError = ''; Y.gone = new Set(); P.dirty = true; P.errUntil = 0;
+    resetPull(true); Y.errUntil = 0; Y.lastError = ''; Y.gone = new Set(); P.dirty = true; P.errUntil = 0;
     refreshStatus();
   }
   // URL Apps Script dùng để lưu ảnh: 'gas' = cái đang nối Sheet; 'gas2' = cái riêng; 'off' = không dùng
@@ -138,7 +152,11 @@ const ScanSync = (() => {
   }
 
   // Chạy 1 lượt: kéo dữ liệu NHẸ (lần đầu + định kỳ) -> đẩy mọi phiếu còn thiếu ảnh + các phiếu có thay đổi -> (nếu được phép) tải ảnh nền
-  async function run() {
+  // Web Locks: các tab cùng trình duyệt dùng chung IndexedDB nên chỉ cần 1 tab làm việc đồng bộ. wait=true: chờ tới lượt (thao tác thủ công).
+  const withLock = (name, fn, wait) => (navigator.locks && navigator.locks.request)
+    ? navigator.locks.request(name, wait ? {} : { ifAvailable: true }, (l) => l ? fn() : undefined) : fn();
+  function run(wait) { return withLock('scanSync.run', runOnce, wait === true); }
+  async function runOnce() {
     await ready;                                              // chờ nạp xong cấu hình từ link / scan-config.json
     if (Y.busy || !online() || Date.now() < Y.errUntil) { refreshStatus(); return; }
     Y.busy = true; refreshStatus();
@@ -196,7 +214,10 @@ const ScanSync = (() => {
   async function pull() {
     // Lần đầu/đổi nơi lưu: since = 0 (liệt kê hết). Các lần sau chỉ hỏi phiếu đổi SAU mốc đã biết (Apps Script mới hỗ trợ; bản cũ bỏ qua tham số, vẫn đúng).
     Y.phase = 'Đang lấy danh sách phiếu'; refreshStatus();
-    const lst = await call({ action: 'scanList', since: Y.pulled ? Y.since : 0 });
+    let since = 0;
+    if (Y.since > 0 && Y.fullAt && Date.now() - Y.fullAt < FULL_LIST_EVERY) since = Y.since;           // đang chạy: tăng dần
+    else if (!Y.pulled) { const sv = loadSince(); if (sv && await countScans() > 0) { since = sv.since; Y.fullAt = sv.fullAt; } }   // MỞ LẠI TRANG: dùng mốc đã nhớ (máy còn dữ liệu)
+    const lst = await call({ action: 'scanList', since });
     const list = lst.list, gone = lst.gone;
     Y.gone = new Set(gone || []);
     // Phiếu đã xóa ở máy khác -> dọn bản trên máy này (ảnh + mục so sánh + liên kết biển số)
@@ -223,7 +244,11 @@ const ScanSync = (() => {
       }
     }
     if (need.length && window.ScanReview && ScanReview.afterRemoteMerge) await ScanReview.afterRemoteMerge(plates);
-    if (lst.serverNow) Y.since = Math.max(0, lst.serverNow - 120000);   // lùi 2 phút phòng lệch giờ; mốc lấy theo đồng hồ SERVER
+    if (lst.serverNow) {
+      Y.since = Math.max(0, lst.serverNow - 120000);
+      if (!lst.incremental) Y.fullAt = Date.now();                    // lượt này server đã liệt kê ĐỦ
+      saveSince();
+    }   // lùi 2 phút phòng lệch giờ; mốc lấy theo đồng hồ SERVER
     if (need.length) P.dirty = true;                                    // có phiếu mới -> xem lại danh sách ảnh cần tải
     Y.phase = '';
     return need.length;
@@ -336,7 +361,11 @@ const ScanSync = (() => {
   }
   async function markTry(id) { const rec = await DB.dbGet(ST_SCANS, id); if (rec && rec.cloud) { rec.cloud.imgTry = Date.now(); await DB.dbPut(ST_SCANS, rec); } }
   // Tải ảnh về máy, mới nhất trước, mỗi lượt 3 phiếu (gộp 1 request). opts.force = người dùng bấm «Tải ngay» (bỏ qua cài đặt tự động/Wi-Fi).
-  async function prefetchImages(opts) {
+  function prefetchImages(opts) {
+    // «Tải ngay» do người dùng bấm thì chạy luôn; tải tự động chỉ chạy ở 1 tab (tránh 2 tab cùng tải 1 ảnh)
+    return (opts && opts.force) ? prefetchOnce(opts) : withLock('scanSync.prefetch', () => prefetchOnce(opts)).then(r => r || P);
+  }
+  async function prefetchOnce(opts) {
     opts = opts || {};
     if (P.busy) return P;
     if (!opts.force) {
@@ -378,10 +407,10 @@ const ScanSync = (() => {
   /* ---------------- KHỞI TẠO ---------------- */
   async function manual() {
     if (!online()) { toast('Cần kết nối Apps Script (2 chiều) để lưu / lấy ảnh online.', true); return; }
-    Y.errUntil = 0; Y.pulled = false; Y.since = 0; P.dirty = true; await run();
+    Y.errUntil = 0; resetPull(true); P.dirty = true; await run(true);
     toast(Y.lastError ? 'Lỗi lưu online: ' + Y.lastError : 'Đã đồng bộ ảnh & trạng thái phiếu với Google Drive.', !!Y.lastError);
   }
-  const syncNow = async () => { Y.errUntil = 0; Y.pulled = false; Y.since = 0; P.dirty = true; await run(); return !Y.lastError; };
+  const syncNow = async () => { Y.errUntil = 0; resetPull(true); P.dirty = true; await run(true); return !Y.lastError; };
   // Thử kết nối nơi lưu (dùng ở Cài đặt). override = lựa chọn đang hiện trên màn hình (chưa Lưu) -> không đụng cấu hình thật
   async function testConnection(override) {
     const c = Object.assign({}, cfg, override || {});
@@ -464,14 +493,19 @@ const ScanSync = (() => {
     } catch (e) { /* không có file / lỗi mạng: bỏ qua, dùng cấu hình trên máy */ }
   }
   // Tạo link thiết lập cho máy khác (dùng URL đang dùng; withPass: kèm mật khẩu kho khóa đang ghi nhớ — chỉ gửi cho chính mình!)
-  function makeSetupLink(withPass) {
+  function makeSetupLink(withPass, passOverride) {
     const u = urlOf(cfg).trim(); if (!validUrl(u)) throw new Error('Chưa có URL Apps Script hợp lệ để chia sẻ.');
-    const o = { u }; if (withPass) { const p = localStorage.getItem(PASS_KEY); if (p) o.p = p; }
+    const o = { u }; if (withPass) { const p = passOverride || localStorage.getItem(PASS_KEY); if (p) o.p = p; }
     const b = btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     return { link: location.href.split('#')[0] + '#scancfg=' + b, withPass: !!o.p };
   }
   importFromHash();                                              // đồng bộ, chạy NGAY khi nạp (trước mọi lần đồng bộ)
   const ready = loadRemoteConfig();
+  // Tab khác (cùng trình duyệt) vừa đổi Cài đặt lưu trữ -> nạp lại cấu hình ở tab này, khỏi phải F5
+  window.addEventListener('storage', (e) => {
+    if (e.key !== STORE_KEY || !e.newValue) return;
+    try { Object.assign(cfg, JSON.parse(e.newValue)); resetPull(true); Y.errUntil = 0; Y.lastError = ''; Y.gone = new Set(); P.dirty = true; P.errUntil = 0; refreshStatus(); run(); } catch (x) { /* bỏ qua */ }
+  });
 
   S.on('sheetDone', (d) => touch(d.scanId));          // phiếu vừa quét xong -> lên Drive
   S.on('itemsChanged', (d) => touch(d.scanId));       // đối chiếu / chỉnh sửa -> cập nhật meta
@@ -486,6 +520,6 @@ const ScanSync = (() => {
   setTimeout(run, 3000);
 
   return { run, pull, touch, freeLocal, localImageBytes, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id),
-    prefetchImages, pendingImages, prefetchState, stopPrefetch: () => { P.stop = true; }, makeSetupLink };
+    prefetchImages, pendingImages, pendingImageCount: async () => (await pendingImageIds(0, true)).length, prefetchState, stopPrefetch: () => { P.stop = true; }, makeSetupLink };
 })();
 window.ScanSync = ScanSync;

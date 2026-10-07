@@ -1,3 +1,6 @@
 {
-  "url": "https://script.google.com/macros/s/DAN_URL_EXEC_CUA_BAN_VAO_DAY/exec"
+  "url": "https://script.google.com/macros/s/DAN_URL_EXEC_CUA_BAN_VAO_DAY/exec",
+  "autoImages": false,
+  "imgNet": "wifi",
+  "prefetchLimit": 300
 }
