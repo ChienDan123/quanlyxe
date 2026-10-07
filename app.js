@@ -133,6 +133,23 @@ const STATUS_OPTIONS = [
 // Trạng thái được coi là "cần liên hệ lại" cho bộ lọc ở Yêu cầu #6.
 const RECONTACT_STATUS = 'Chưa liên hệ được';
 
+// Trạng thái xe do người dùng BỔ SUNG (vd. từ màn So sánh phiếu khi phiếu ghi tình trạng chưa có trong danh sách).
+// Lưu cục bộ và nạp lại vào STATUS_OPTIONS mỗi lần mở trang -> ô chọn «Trạng thái xe» ở bảng chính có luôn lựa chọn mới.
+const CUSTOM_STATUS_KEY = 'vehicleCustomStatusV1';
+function addStatusOption(name) {
+  const clean = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!clean) return null;
+  const same = STATUS_OPTIONS.find(o => o.toLowerCase() === clean.toLowerCase());
+  if (same) return same;                                   // đã có (không phân biệt hoa/thường) -> dùng lại bản chuẩn
+  STATUS_OPTIONS.push(clean);
+  try {
+    const saved = JSON.parse(localStorage.getItem(CUSTOM_STATUS_KEY) || '[]');
+    saved.push(clean); localStorage.setItem(CUSTOM_STATUS_KEY, JSON.stringify(saved));
+  } catch (e) { /* không lưu được thì chỉ có hiệu lực trong phiên này */ }
+  return clean;
+}
+try { JSON.parse(localStorage.getItem(CUSTOM_STATUS_KEY) || '[]').forEach(s => { if (!STATUS_OPTIONS.includes(s)) STATUS_OPTIONS.push(s); }); } catch (e) { /* bỏ qua */ }
+
 const NOTES_KEY = 'vehicleNotesV1';
 const LAST_URL_KEY = 'vehicleLastSheetCsvUrl';
 const GAS_URL_KEY = 'vehicleGasUrl';

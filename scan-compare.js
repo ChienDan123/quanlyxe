@@ -100,7 +100,23 @@
     return { state: 'diff', newVal: a, defaultDecision: 'skip', note: 'Sheet đã gán người khác — mặc định GIỮ NGUYÊN' };
   }
 
-  const api = { normPlate, cmpCccd, cmpName, cmpPhone, cmpNote, cmpCommit, cmpAssignee, normPhone, flat };
+  /* ---- Trạng thái xe (= «Tình trạng phương tiện» trên phiếu) ----
+     - giá trị phiếu CHƯA có trong danh sách Trạng thái xe -> note nhắc bổ sung, mặc định 'later';
+     - Sheet đang ở trạng thái QUY TRÌNH (đã liên hệ / đã xác minh...) mà phiếu ghi «Còn sử dụng»: không mâu thuẫn -> coi là khớp. */
+  const WORKFLOW_STATUS = ['Đã liên hệ', 'Đã xác minh', 'Chưa liên hệ được', 'Cần xác minh thêm'].map(flat);
+  function cmpStatus(scanRaw, dsRaw) {
+    const a = String(scanRaw || '').trim(), b = String(dsRaw || '').trim();
+    if (!a) return { state: 'empty' };
+    if (flat(a) === flat(b)) return { state: 'same' };
+    const list = (typeof STATUS_OPTIONS !== 'undefined') ? STATUS_OPTIONS : [];
+    const known = list.some(o => flat(o) === flat(a));
+    const unk = known ? '' : ' · «' + a + '» chưa có trong danh sách Trạng thái xe — bấm ➕ để thêm';
+    if (flat(a) === flat('Còn sử dụng') && WORKFLOW_STATUS.includes(flat(b))) return { state: 'same', note: 'Sheet đang ở trạng thái quy trình — giữ nguyên' };
+    if (!b) return { state: 'fill', newVal: a, defaultDecision: known ? 'apply' : 'later', note: unk.replace(/^ · /, '') };
+    return { state: 'diff', newVal: a, defaultDecision: 'later', note: 'Khác Trạng thái xe đang có' + unk };
+  }
+
+  const api = { normPlate, cmpCccd, cmpName, cmpPhone, cmpNote, cmpCommit, cmpAssignee, cmpStatus, normPhone, flat };
   root.ScanCompare = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

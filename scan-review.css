@@ -122,3 +122,39 @@ textarea.rv-edit { resize: vertical; }
 /* ===== Nút riêng từng trường ===== */
 .rv-field-btns { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 6px; }
 .rv-tick-sm { font-size: 12px; margin-right: 2px; }
+
+/* ===== #2 Luôn thấy rõ cột nào là PHIẾU, cột nào là GOOGLE SHEET (không bị ảnh / thanh cuộn che) =====
+   Nguyên nhân cũ: ô lưới dùng 1fr (min-content) nên nội dung dài đẩy cột Sheet tràn ra khỏi khung; tiêu đề cột bị ẩn khi mở ảnh
+   và cuộn đi mất; thẻ overflow:hidden làm tiêu đề không dính được. */
+.rv-main { min-width: 0; }
+.rv-split-head, .rv-row { grid-template-columns: 110px minmax(0, 1fr) minmax(0, 1fr) minmax(200px, 260px); }
+.rv-work.with-pane .rv-row { grid-template-columns: 90px minmax(0, 1fr) minmax(0, 1fr); }
+.rv-card { overflow: visible; overflow: clip; }
+.rv-split-head { position: sticky; top: var(--rv-sticky, 44px); z-index: 1; }
+.rv-work.with-pane .rv-split-head { display: grid; grid-template-columns: 90px minmax(0, 1fr) minmax(0, 1fr); }
+.rv-work.with-pane .rv-split-head > div:nth-child(4) { display: none; }
+.rv-split-head .left { background: #e0e7ff; color: #3730a3; }
+.rv-split-head .right { background: #d1fae5; color: #065f46; }
+.rv-imgpane { top: var(--rv-sticky, 44px); }
+.rv-modal.rv-full .rv-imgpane { top: var(--rv-sticky, 44px); max-height: calc(100vh - var(--rv-sticky, 44px) - 150px); }
+/* Nhãn nguồn nằm NGAY TRONG từng ô -> dù cuộn tới đâu vẫn biết ô đó lấy từ đâu */
+.rv-cell.left::before, .rv-cell.right::before { display: block; font-size: 11px; font-weight: 700; margin-bottom: 3px; letter-spacing: .2px; }
+.rv-cell.left::before { content: '📷 TỪ PHIẾU SCAN'; color: #4338ca; }
+.rv-cell.right::before { content: '📋 TỪ GOOGLE SHEET'; color: #047857; }
+.rv-cell.right { background: #f0fdf9; }
+.rv-cell.right.na { color: #6b7280; font-style: italic; background: #f9fafb; }
+@media (max-width: 1000px) {
+  .rv-work.with-pane { grid-template-columns: 1fr; }
+  .rv-imgpane { position: relative; top: 0; max-height: 45vh; }
+}
+
+/* ===== #3 Sửa biển số + gợi ý ===== */
+.rv-plate-edit { display: inline-flex; align-items: center; gap: 4px; }
+.rv-plate-input { width: 140px; font-weight: 700; text-transform: uppercase; }
+.rv-sugg { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 12px; background: #fffbeb; border-bottom: 1px solid #fde68a; }
+
+/* ===== #4 Kéo ảnh ===== */
+.rv-imgpane-body, .sv-pane { cursor: grab; }
+.rv-imgpane-body.panning, .sv-pane.panning { cursor: grabbing; user-select: none; }
+.rv-pg-img, .sv-img { cursor: grab; user-select: none; -webkit-user-drag: none; }
+.panning .rv-pg-img, .panning .sv-img { cursor: grabbing; }
