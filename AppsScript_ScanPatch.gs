@@ -1,4 +1,13 @@
 /* =========================================================================
+   >>> CÁCH NHANH NHẤT (làm 1 lần, chỉ 1 DÒNG) <<<
+   1) Dán TOÀN BỘ file này vào dự án Apps Script (cuối file hiện có).
+   2) Trong doPost(e), ngay SAU dòng parse JSON (chỗ có biến `data`), thêm DUY NHẤT 1 dòng:
+          var sr = scanDispatch_(data); if (sr) return json_(sr);      // đổi json_ cho đúng tên hàm trả JSON của bạn
+      -> KHÔNG cần thêm từng nhánh if (scanPut / scanList / scanInventory / …) như hướng dẫn cũ nữa.
+   3) Triển khai → Quản lý bản triển khai → ✏ → Phiên bản MỚI → Triển khai. Cho phép quyền Drive nếu được hỏi.
+   Lỗi «Unknown POST action: scanInventory» = doPost chưa có nhánh cho action đó -> làm đúng 3 bước trên là hết (PHẦN 4 ở cuối file).
+   ========================================================================= */
+/* =========================================================================
    AppsScript_ScanPatch.gs — BỔ SUNG cho AppsScript.gs hiện có (không thay thế).
    Việc cần làm:
    1) Dán hàm appendScanOrphans_() bên dưới vào dự án Apps Script.
@@ -169,4 +178,27 @@ function scanDelete_(p) {
 function scanTextGet_(p) {
   var f = scanFile_(scanFolder_(), scanName_(p.scanId, p.kind));
   return f ? { ok: true, text: f.getBlob().getDataAsString(), updated: f.getLastUpdated().getTime() } : { ok: false, error: 'Chưa có trên Drive' };
+}
+
+
+/* =========================================================================
+   PHẦN 4 — BỘ ĐỊNH TUYẾN DUY NHẤT: gọi từ doPost bằng 1 dòng (xem đầu file)
+   Trả kết quả nếu là action của phần Quét phiếu, trả null nếu không phải (để doPost xử lý tiếp các action cũ như updateRow…).
+   Thêm action mới sau này chỉ cần thêm 1 case ở đây.
+   ========================================================================= */
+function scanDispatch_(d) {
+  if (!d || !d.action) return null;
+  switch (d.action) {
+    case 'scanPing':          return { ok: true, version: 4, actions: ['scanPut', 'scanGet', 'scanList', 'scanGetBatch', 'scanMetaBatch', 'scanInventory', 'scanDelete', 'scanTextGet'] };
+    case 'appendScanOrphans': return appendScanOrphans_(d.rows);
+    case 'scanPut':           return scanPut_(d);
+    case 'scanGet':           return scanGet_(d);
+    case 'scanList':          return scanList_(d);
+    case 'scanGetBatch':      return scanGetBatch_(d);
+    case 'scanMetaBatch':     return scanMetaBatch_(d.ids);
+    case 'scanInventory':     return scanInventory_();
+    case 'scanDelete':        return scanDelete_(d);
+    case 'scanTextGet':       return scanTextGet_(d);
+    default:                  return null;
+  }
 }

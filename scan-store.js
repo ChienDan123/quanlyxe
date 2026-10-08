@@ -167,6 +167,8 @@ const ScanStore = (() => {
 <div class="hint">Thường KHÔNG cần: máy mới chỉ việc mở trang, cấu hình tự đồng bộ qua Apps Script chính. Link này dự phòng khi máy mới không nối được Apps Script chính.</div>
 <label class="ss-check"><input type="checkbox" id="scanLinkPass"> Kèm mật khẩu kho khóa Gemini <span class="hint">— link sẽ CHỨA mật khẩu: chỉ gửi cho chính mình (tin nhắn đã lưu), không đăng công khai.</span></label>
 <div class="sv-actions"><button type="button" class="btn btn-ghost btn-sm" id="btnMakeLink">🔗 Tạo link thiết lập</button><button type="button" class="btn btn-ghost btn-sm hidden" id="btnCopyLink">📋 Sao chép link</button></div>
+<div class="sv-actions"><button type="button" class="btn btn-primary btn-sm" id="btnMakeCfg">📄 Tạo file scan-config.json (để người nhận KHÔNG phải làm gì)</button></div>
+<div class="hint">Tải file này về rồi <b>tải lên repo GitHub, đặt cạnh index.html</b> (Add file → Upload files → Commit). Sau đó ai mở link web cũng tự nối Drive + lấy ảnh + lấy Gemini key, không cần cài gì.</div>
 <input type="text" id="scanLinkOut" class="hidden" readonly>
 <div class="hint" id="scanLinkMsg"></div>`;
     free.insertAdjacentElement('afterend', link);
@@ -177,6 +179,7 @@ const ScanStore = (() => {
     q('#btnPrefetchNow').addEventListener('click', prefetchNow);
     q('#btnPrefetchStop').addEventListener('click', () => { Y.stopPrefetch(); setMsg('#scanPrefetchMsg', '⏳ Đang dừng…'); });
     q('#btnMakeLink').addEventListener('click', makeLink);
+    q('#btnMakeCfg').addEventListener('click', downloadConfigFile);
     q('#btnCopyLink').addEventListener('click', copyLink);
   }
   async function refreshPrefetchInfo() {
@@ -225,6 +228,15 @@ const ScanStore = (() => {
       out.value = r.link; out.classList.remove('hidden'); q('#btnCopyLink').classList.remove('hidden');
       setMsg('#scanLinkMsg', r.withPass ? '✅ Đã tạo link (CÓ kèm mật khẩu). Mở link này 1 lần trên máy mới là xong.' : '✅ Đã tạo link. Mở trên máy mới; khóa Gemini tự lấy về (mật khẩu mặc định) hoặc nhập mật khẩu riêng nếu bạn đã đặt.');
     } catch (e) { setMsg('#scanLinkMsg', '❌ ' + esc(e.message || e), true); }
+  }
+  // scan-config.json: MỌI máy mở trang tự đọc file này (scan-sync.js → loadRemoteConfig) → nối đúng Apps Script lưu ảnh, không ai phải nhập gì
+  function downloadConfigFile() {
+    const u = Y.storeUrl();
+    if (!Y.validUrl(u)) { setMsg('#scanLinkMsg', '❌ Chưa có URL Apps Script hợp lệ — hãy chọn nơi lưu và bấm «Kiểm tra kết nối» trước.', true); return; }
+    const c = Y.config(), json = JSON.stringify({ url: u, autoImages: false, imgNet: c.imgNet === 'any' ? 'any' : 'wifi', prefetchLimit: c.prefetchLimit == null ? 300 : c.prefetchLimit }, null, 2) + '\n';
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' })); a.download = 'scan-config.json';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    setMsg('#scanLinkMsg', '✅ Đã tải scan-config.json. Tải lên repo GitHub (cạnh index.html) là xong — nhớ chờ ~1 phút để GitHub Pages cập nhật.');
   }
   async function copyLink() {
     const out = q('#scanLinkOut');
@@ -412,9 +424,17 @@ const ScanStore = (() => {
     K.inv = null; K.invError = '';
     if (!Y.online()) { K.invError = Y.config().mode === 'off' ? 'Đang tắt lưu online.' : 'Chưa kết nối nơi lưu online.'; return; }
     try {
-      const r = await Y.call({ action: 'scanInventory' }), by = new Map();
+      let r, partial = false;
+      try { r = await Y.call({ action: 'scanInventory' }); }
+      catch (e) {
+        if (!e || e.code !== 'NOACTION') throw e;
+        // Apps Script thiếu scanInventory: dùng scanList (có từ trước) -> vẫn liệt kê được phiếu online, chỉ chưa có dung lượng / kiểm tra thiếu file
+        const l = await Y.call({ action: 'scanList' });
+        r = { files: (l.list || []).map(x => ({ scanId: x.scanId, kind: 'meta', size: 0, updated: x.updated, plates: '' })), gone: l.gone || [] }; partial = true;
+      }
+      const by = new Map();
       (r.files || []).forEach(f => { const e = by.get(f.scanId) || { id: f.scanId, plates: '', updated: 0 }; e[f.kind] = f; e.updated = Math.max(e.updated, f.updated || 0); if (f.plates) e.plates = f.plates; by.set(f.scanId, e); });
-      K.inv = { by, gone: new Set(r.gone || []), totalSize: (r.files || []).reduce((n, f) => n + (f.size || 0), 0), files: (r.files || []).length };
+      K.inv = { by, gone: new Set(r.gone || []), totalSize: (r.files || []).reduce((n, f) => n + (f.size || 0), 0), files: (r.files || []).length, partial };
     } catch (e) { K.invError = String((e && e.message) || e); }
   }
 
@@ -429,6 +449,7 @@ const ScanStore = (() => {
       if (!l && o) { row.status = o.meta ? 'onlineonly' : 'orphan'; row.note = o.meta ? 'Chỉ có trên Drive — bấm «Đồng bộ ngay» để lấy về máy' : 'File ảnh không có phiếu đi kèm (mồ côi)'; }
       else if (!inv) { row.status = (l.cloud.frontId ? 'unknown' : 'localonly'); row.note = l.cloud.frontId ? 'Chưa kiểm tra online' : (Y.config().mode === 'off' ? 'Chỉ lưu trên máy' : 'Chưa lên Drive'); }
       else if (!o) { row.status = l.cloud.frontId || l.cloud.metaAt ? 'missing' : 'localonly'; row.note = row.status === 'missing' ? 'Đã đánh dấu lưu online nhưng Drive không còn file' : 'Chưa lên Drive (sẽ tự đẩy)'; }
+      else if (inv.partial) { row.status = 'ok'; row.note = 'Chưa kiểm tra chi tiết ảnh (Apps Script thiếu scanInventory)'; }
       else if (!o.meta || !o.front || (row.hasBack && !o.back)) { row.status = 'missing'; row.note = !o.meta ? 'Thiếu file dữ liệu (meta) trên Drive' : !o.front ? 'Thiếu ảnh mặt 1 trên Drive' : 'Thiếu ảnh mặt 2 trên Drive'; }
       if (row.status === 'missing' && l && !l.hasFrontBlob) row.note += ' · máy này cũng không còn ảnh gốc → không sửa được';
       return row;
@@ -459,6 +480,7 @@ const ScanStore = (() => {
     const problems = K.rows.filter(r => ['missing', 'orphan'].includes(r.status)).length;
     q('#ssSummary').innerHTML = `📱 Máy này: <b>${local.length}</b> phiếu · ${fmtSize(localSize)} &nbsp;|&nbsp; ` + (K.inv
       ? `☁️ Online: <b>${K.inv.by.size}</b> phiếu · ${K.inv.files} file · ${fmtSize(K.inv.totalSize)} (Drive miễn phí 15 GB dùng chung với Gmail/Ảnh)` : `☁️ Online: <span class="error-text">${esc(K.invError || 'chưa tải')}</span>`)
+      + (K.inv && K.inv.partial ? ' &nbsp;|&nbsp; <span class="error-text">⚠ Apps Script chưa có scanInventory — làm bước «1 dòng» đầu file AppsScript_ScanPatch.gs</span>' : '')
       + (problems ? ` &nbsp;|&nbsp; <b class="error-text">${problems} phiếu có vấn đề</b>` : '');
     q('#ssBody').innerHTML = shown.length ? shown.map(r => {
       const [lab, cls] = STATUS_CHIP[r.status] || ['', ''];

@@ -73,18 +73,21 @@ const ScanSync = (() => {
   const onlineOf = (c) => c.mode === 'gas2' ? validUrl(c.url2) : (c.mode === 'gas' && typeof isWriteConnected === 'function' && isWriteConnected());
   const storeUrl = () => urlOf(cfg);
   const online = () => onlineOf(cfg);
-  async function callWith(c, payload) {
-    const r = await gasRequest(urlOf(c), payload);
-    if (!r || r.ok === false) throw new Error((r && r.error) || 'Apps Script chưa hỗ trợ lưu ảnh online (dán đúng file Apps Script rồi Deploy → Phiên bản mới).');
-    return r;
+  // Apps Script chưa có nhánh cho action (lỗi «Unknown POST action: x») -> đổi thành hướng dẫn rõ ràng + gắn code 'NOACTION' để nơi gọi tự lùi về cách khác
+  function noAction(msg) {
+    const m = /Unknown (?:POST |GET )?action:?\s*(\w+)/i.exec(String(msg || '')); if (!m) return null;
+    const e = new Error(`Apps Script chưa có action «${m[1]}» (không hỗ trợ). Mở AppsScript_ScanPatch.gs, làm bước «1 dòng» ở đầu file rồi Triển khai → Phiên bản mới.`);
+    e.code = 'NOACTION'; return e;
   }
-  const call = (payload) => callWith(cfg, payload);
-  // Gọi thẳng 1 URL Apps Script (dùng cho «hub» cấu hình = Apps Script chính mà MỌI máy đều biết sẵn, xem scan-hub.js)
+  const NO_SUPPORT = 'Apps Script chưa hỗ trợ lưu ảnh online (dán đúng file Apps Script rồi Deploy → Phiên bản mới).';
   async function callUrl(url, payload) {
-    const r = await gasRequest(url, payload);
-    if (!r || r.ok === false) throw new Error((r && r.error) || 'Apps Script chưa hỗ trợ lưu ảnh online (dán đúng file Apps Script rồi Deploy → Phiên bản mới).');
+    let r;
+    try { r = await gasRequest(url, payload); } catch (e) { throw noAction(e && e.message) || e; }
+    if (!r || r.ok === false) throw noAction(r && r.error) || new Error((r && r.error) || NO_SUPPORT);
     return r;
   }
+  const callWith = (c, payload) => callUrl(urlOf(c), payload);
+  const call = (payload) => callWith(cfg, payload);
   const blobToB64 = (blob) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
   const b64ToBlob = async (b64, mime) => (await fetch(`data:${mime || 'application/octet-stream'};base64,${b64}`)).blob();
   const itemsOf = async (scanId) => (await DB.tx(ST_ITEMS, 'readonly', os => os.index('scanId').getAll(scanId))) || [];
@@ -290,7 +293,7 @@ const ScanSync = (() => {
           rest = rest.filter(p => !seen.has(p.id + '|' + p.side));     // phần server chưa kịp xử lý (vượt giới hạn dung lượng 1 lượt) -> xin tiếp
         }
         return { map, error };
-      } catch (e) { if (/không hỗ trợ/i.test(String((e && e.message) || e))) Y.batchOk = false; else throw e; }
+      } catch (e) { if ((e && e.code === 'NOACTION') || /không hỗ trợ/i.test(String((e && e.message) || e))) Y.batchOk = false; else throw e; }
     }
     const res = await Promise.allSettled(rest.map(p => call({ action: 'scanGet', scanId: p.id, kind: p.side })));
     for (let i = 0; i < rest.length; i++) {
@@ -301,14 +304,22 @@ const ScanSync = (() => {
     return { map, error };
   }
   // Ghi ảnh vào bản ghi MỚI NHẤT trong IndexedDB (đọc lại trước khi ghi để không đè thay đổi khác; phiếu đã bị xóa thì bỏ qua)
-  async function storeBlobs(id, got) {
+  async function storeBlobs(id, got, skipDisk) {
     const rec = await DB.dbGet(ST_SCANS, id); if (!rec || Y.gone.has(id)) return null;
     for (const side of ['front', 'back']) {
       const g = got[side];
       if (g && !rec[side + 'Blob']) { rec[side + 'Blob'] = g.blob; rec[side + 'Mime'] = g.mime || rec[side + 'Mime']; }
     }
     if (rec.cloud) delete rec.cloud.imgTry;
-    await DB.dbPut(ST_SCANS, rec); return rec;
+    await DB.dbPut(ST_SCANS, rec);
+    if (!skipDisk && window.ScanDisk) ScanDisk.writeRec(rec);      // ảnh mới tải về cũng được lưu thêm vào thư mục trên máy (nếu người dùng đã chọn)
+    return rec;
+  }
+  // Ảnh đã có sẵn trong thư mục người dùng chọn trên máy (scan-disk.js) -> đọc tại chỗ, KHÔNG tải lại từ Drive
+  async function fromDisk(id, sides) {
+    const out = {}; if (!window.ScanDisk || !ScanDisk.ready()) return out;
+    for (const sd of sides) { try { const f = await ScanDisk.read(id, sd); if (f && f.size) out[sd] = { blob: f, mime: f.type }; } catch (e) { /* bỏ qua */ } }
+    return out;
   }
   // Bản ghi chưa có ảnh nhưng đã lưu online -> tải về, nhớ trong IndexedDB. Lỗi thì gắn rec._cloudMsg để giao diện báo.
   // BẢN MỚI: 2 mặt tải song song (trước đây tuần tự → chậm gấp đôi); lần xem sau đọc thẳng từ máy (tức thì).
@@ -317,7 +328,12 @@ const ScanSync = (() => {
     if (inflight.has(rec.id)) return inflight.get(rec.id);
     const p = (async () => {
       rec._cloudMsg = '';
-      const need = ['front', 'back'].filter(sd => !rec[sd + 'Blob'] && rec.cloud[sd + 'Id']);
+      let need = ['front', 'back'].filter(sd => !rec[sd + 'Blob'] && rec.cloud[sd + 'Id']);
+      if (!need.length) return rec;
+      const dk = await fromDisk(rec.id, need);                    // có trong thư mục trên máy -> dùng luôn, khỏi tải Drive
+      Object.keys(dk).forEach(sd => { rec[sd + 'Blob'] = dk[sd].blob; rec[sd + 'Mime'] = dk[sd].mime || rec[sd + 'Mime']; });
+      if (Object.keys(dk).length) await storeBlobs(rec.id, dk, true);
+      need = need.filter(sd => !dk[sd]);
       if (!need.length) return rec;
       if (!online()) { rec._cloudMsg = 'Ảnh phiếu đang lưu online — cần kết nối Apps Script (2 chiều) để tải về máy này.'; return rec; }
       try {
@@ -397,6 +413,10 @@ const ScanSync = (() => {
         const chunk = ids.slice(i, i + 3).filter(id => !inflight.has(id) && !Y.gone.has(id));   // phiếu đang được mở xem thì thôi
         const recs = (await Promise.all(chunk.map(id => DB.dbGet(ST_SCANS, id)))).filter(Boolean), pairs = [];
         recs.forEach(r => ['front', 'back'].forEach(sd => { if (!r[sd + 'Blob'] && r.cloud && r.cloud[sd + 'Id']) pairs.push({ id: r.id, side: sd }); }));
+        for (const id of new Set(pairs.map(p => p.id))) {           // thử đọc từ thư mục trên máy trước; phần có rồi thì bỏ khỏi danh sách tải
+          const dk = await fromDisk(id, pairs.filter(p => p.id === id).map(p => p.side));
+          if (Object.keys(dk).length) { await storeBlobs(id, dk, true); for (let k = pairs.length - 1; k >= 0; k--) if (pairs[k].id === id && dk[pairs[k].side]) pairs.splice(k, 1); }
+        }
         if (pairs.length) {
           const { map } = await fetchFiles(pairs, false);
           for (const id of chunk) {
@@ -534,7 +554,7 @@ const ScanSync = (() => {
   setInterval(run, 20000);                            // kết nối Sheet có thể xong SAU khi trang nạp -> kiểm tra định kỳ
   setTimeout(run, 800);                               // mở trang: dùng dữ liệu có sẵn trên máy ngay, đồng bộ chạy NGẦM sau đó
 
-  return { callUrl, addGate, whenReady: () => gate, cfgInfo: () => ({ src: cfg.src, at: cfg.at || 0, legacy: hadLocal && !cfg.src }), markConfigAt: (t) => { cfg.at = t; persistCfg(); },
+  return { storeUrl, callUrl, addGate, whenReady: () => gate, cfgInfo: () => ({ src: cfg.src, at: cfg.at || 0, legacy: hadLocal && !cfg.src }), markConfigAt: (t) => { cfg.at = t; persistCfg(); },
     run, pull, touch, freeLocal, localImageBytes, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id),
     prefetchImages, pendingImages, pendingImageCount: async () => (await pendingImageIds(0, true)).length, prefetchState, stopPrefetch: () => { P.stop = true; }, makeSetupLink };
 })();

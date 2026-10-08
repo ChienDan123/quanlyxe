@@ -60,12 +60,17 @@ const ScanHub = (() => {
   /* ---- 1 lượt đồng bộ: lấy _cfg → áp phần mới hơn về máy → đẩy phần máy này mới hơn lên ---- */
   async function tick() {
     if (H.busy) { H.again = true; return; }
-    const url = hubUrl(); if (!url || !Y.validUrl(url)) return;
+    // Ứng viên hub: Apps Script chính, rồi (dự phòng) Apps Script lưu ảnh đang dùng — cái nào có hỗ trợ scanTextGet thì dùng
+    const c0 = Y.config(), cands = [...new Set([hubUrl(), c0.mode === 'gas2' ? c0.url2 : ''].filter(u => u && Y.validUrl(u)))];
+    if (!cands.length) return;
     H.busy = true;
     try {
-      let remote = null;
-      try { remote = JSON.parse((await Y.callUrl(url, { action: 'scanTextGet', ...PTR })).text); }
-      catch (e) { if (!/Chưa có trên Drive/i.test(msgOf(e))) throw e; }     // chưa có file = lần đầu, bình thường
+      let remote = null, url = cands[0], got = false, lastErr = null;
+      for (const u of cands) {
+        try { remote = JSON.parse((await Y.callUrl(u, { action: 'scanTextGet', ...PTR })).text); url = u; got = true; break; }
+        catch (e) { if (/Chưa có trên Drive/i.test(msgOf(e))) { url = u; got = true; break; } lastErr = e; }   // chưa có file = lần đầu, bình thường
+      }
+      if (!got) throw lastErr;
       remote = remote || {};
       const doc = { v: 1, storage: remote.storage, prefs: remote.prefs, gem: remote.gem };
       const L = loadL(), applied = []; let push = false;
