@@ -49,16 +49,24 @@ const ScanSync = (() => {
   // autoFree: tự xóa ảnh trên máy sau khi đã lên Drive (mặc định TẮT)
   // autoImages: tự tải ẢNH về máy chạy ngầm (mặc định TẮT — người dùng phải chủ động bật); imgNet: 'wifi' | 'any'; prefetchLimit: số phiếu mới nhất tải sẵn (0 = tất cả)
   // src: cấu hình đến từ đâu — 'user' (tự chỉnh ở Cài đặt) | 'link' (link thiết lập) | 'file' (scan-config.json) | '' (mặc định). 'file' chỉ được ghi đè nếu người dùng chưa tự chỉnh.
-  const cfg = { mode: 'gas', url2: '', autoFree: false, autoImages: false, imgNet: 'wifi', prefetchLimit: 300, src: '' };
+  const cfg = { mode: 'gas', url2: '', autoFree: false, autoImages: false, imgNet: 'wifi', prefetchLimit: 300, src: '', at: 0 };
   let hadLocal = false;
   try { const raw = localStorage.getItem(STORE_KEY); if (raw) { hadLocal = true; Object.assign(cfg, JSON.parse(raw)); } } catch (e) { /* bỏ qua */ }
   const validUrl = (u) => /^https:\/\/script\.google(usercontent)?\.com\/.+\/exec/.test(String(u || '').trim());
+  const persistCfg = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (e) { /* bỏ qua */ } };
+  // c.at (tùy chọn): mốc thời gian của cấu hình khi nhận từ nơi khác (hub/link/file). Không truyền: tự đóng dấu «bây giờ» NẾU nơi lưu (mode/url2) đổi.
+  // Mốc này dùng để xử lý xung đột giữa các máy: cấu hình đổi SAU sẽ đè cấu hình đổi trước (last-write-wins). Trả true nếu nơi lưu đổi.
   function setConfig(c) {
-    Object.assign(cfg, c, { src: (c && c.src) || 'user' });
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (e) { /* bỏ qua */ }
-    // đổi nơi lưu -> danh sách «đã xóa» của nơi cũ không còn đúng, kéo lại TOÀN BỘ (since = 0) từ nơi mới
-    resetPull(true); Y.errUntil = 0; Y.lastError = ''; Y.gone = new Set(); P.dirty = true; P.errUntil = 0;
+    c = c || {};
+    const storageChanged = (c.mode != null && c.mode !== cfg.mode) || (c.url2 != null && String(c.url2).trim() !== String(cfg.url2 || '').trim());
+    Object.assign(cfg, c, { src: c.src || 'user' });
+    if (c.at != null) cfg.at = c.at; else if (storageChanged) cfg.at = Date.now();
+    persistCfg();
+    Y.errUntil = 0; Y.lastError = ''; P.dirty = true; P.errUntil = 0;
+    // đổi nơi lưu -> danh sách «đã xóa» của nơi cũ không còn đúng, kéo lại TOÀN BỘ (since = 0) từ nơi mới. Chỉ đổi tùy chọn tải ảnh thì KHÔNG cần.
+    if (storageChanged) { resetPull(true); Y.gone = new Set(); }
     refreshStatus();
+    return storageChanged;
   }
   // URL Apps Script dùng để lưu ảnh: 'gas' = cái đang nối Sheet; 'gas2' = cái riêng; 'off' = không dùng
   const urlOf = (c) => c.mode === 'gas2' ? String(c.url2 || '').trim() : (c.mode === 'gas' ? ((typeof state !== 'undefined' && state.gasUrl) || '') : '');
@@ -71,6 +79,12 @@ const ScanSync = (() => {
     return r;
   }
   const call = (payload) => callWith(cfg, payload);
+  // Gọi thẳng 1 URL Apps Script (dùng cho «hub» cấu hình = Apps Script chính mà MỌI máy đều biết sẵn, xem scan-hub.js)
+  async function callUrl(url, payload) {
+    const r = await gasRequest(url, payload);
+    if (!r || r.ok === false) throw new Error((r && r.error) || 'Apps Script chưa hỗ trợ lưu ảnh online (dán đúng file Apps Script rồi Deploy → Phiên bản mới).');
+    return r;
+  }
   const blobToB64 = (blob) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
   const b64ToBlob = async (b64, mime) => (await fetch(`data:${mime || 'application/octet-stream'};base64,${b64}`)).blob();
   const itemsOf = async (scanId) => (await DB.tx(ST_ITEMS, 'readonly', os => os.index('scanId').getAll(scanId))) || [];
@@ -157,7 +171,7 @@ const ScanSync = (() => {
     ? navigator.locks.request(name, wait ? {} : { ifAvailable: true }, (l) => l ? fn() : undefined) : fn();
   function run(wait) { return withLock('scanSync.run', runOnce, wait === true); }
   async function runOnce() {
-    await ready;                                              // chờ nạp xong cấu hình từ link / scan-config.json
+    await gate;                                               // chờ nạp xong cấu hình từ link / scan-config.json / hub (scan-hub.js)
     if (Y.busy || !online() || Date.now() < Y.errUntil) { refreshStatus(); return; }
     Y.busy = true; refreshStatus();
     let cur = '';
@@ -230,9 +244,9 @@ const ScanSync = (() => {
     const need = (list || []).filter(x => !Y.gone.has(x.scanId) && x.updated > (known.get(x.scanId) || 0));
     const plates = [];
     // Dữ liệu NHẸ (meta) kéo trước: 2 nhóm × 15 phiếu chạy song song; ghi IndexedDB tuần tự
-    for (let i = 0; i < need.length; i += 30) {
-      const group = need.slice(i, i + 30), halves = [group.slice(0, 15), group.slice(15)].filter(h => h.length);
-      Y.phase = `Đang tải dữ liệu phiếu ${Math.min(i + 30, need.length)}/${need.length}`; refreshStatus();
+    for (let i = 0; i < need.length; i += 45) {
+      const group = need.slice(i, i + 45), halves = [group.slice(0, 15), group.slice(15, 30), group.slice(30)].filter(h => h.length);
+      Y.phase = `Đang tải dữ liệu phiếu ${Math.min(i + 45, need.length)}/${need.length}`; refreshStatus();
       const res = await Promise.all(halves.map(h => call({ action: 'scanMetaBatch', ids: h.map(x => x.scanId) })));
       halves.forEach(() => { /* giữ thứ tự */ });
       for (let k = 0; k < halves.length; k++) {
@@ -470,14 +484,14 @@ const ScanSync = (() => {
       const raw = atob(m[1].replace(/-/g, '+').replace(/_/g, '/'));
       const j = JSON.parse(new TextDecoder().decode(Uint8Array.from(raw, c => c.charCodeAt(0))));
       if (!validUrl(j.u)) throw new Error('URL trong link không hợp lệ');
-      setConfig({ mode: 'gas2', url2: String(j.u).trim(), src: 'link' });
+      setConfig({ mode: 'gas2', url2: String(j.u).trim(), at: 0, src: 'link' });
       if (typeof j.p === 'string' && j.p.length >= 6) { try { localStorage.setItem(PASS_KEY, j.p); } catch (e) { /* bỏ qua */ } }   // kèm mật khẩu -> kho khóa Gemini tự khôi phục
       toast_('Đã nạp cấu hình lưu trữ từ link thiết lập' + (j.p ? ' (kèm mật khẩu kho khóa)' : '') + '. Ảnh & dữ liệu sẽ tự đồng bộ.');
     } catch (e) { console.warn('[scan-sync] link thiết lập lỗi', e); toast_('Link thiết lập không hợp lệ.', true); }
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* bỏ qua */ }   // xóa phần #… (có thể chứa mật khẩu) khỏi thanh địa chỉ
   }
   async function loadRemoteConfig() {
-    if (cfg.src === 'user' || cfg.src === 'link') return;       // người dùng tự chọn / đã dùng link -> không ghi đè
+    if (cfg.src === 'user' || cfg.src === 'link' || cfg.src === 'hub') return;       // người dùng tự chọn / đã dùng link -> không ghi đè
     if (hadLocal && !cfg.src) return;                           // cấu hình cũ có sẵn từ trước (không rõ nguồn) -> coi như của người dùng
     try {
       const res = await fetch(new URL('scan-config.json', document.baseURI).href, { cache: 'no-store' });
@@ -488,7 +502,7 @@ const ScanSync = (() => {
       if (j.imgNet === 'wifi' || j.imgNet === 'any') next.imgNet = j.imgNet;
       if (Number.isFinite(j.prefetchLimit)) next.prefetchLimit = Math.max(0, j.prefetchLimit | 0);
       if (Object.keys(next).every(k => cfg[k] === next[k]) && cfg.src === 'file') return;   // không đổi -> khỏi reset đồng bộ
-      const first = !cfg.src; setConfig({ ...next, src: 'file' });
+      const first = !cfg.src; setConfig({ ...next, at: 0, src: 'file' });
       if (first) toast_('Đã nạp cấu hình lưu trữ từ scan-config.json — ảnh & dữ liệu sẽ tự đồng bộ.');
     } catch (e) { /* không có file / lỗi mạng: bỏ qua, dùng cấu hình trên máy */ }
   }
@@ -500,7 +514,8 @@ const ScanSync = (() => {
     return { link: location.href.split('#')[0] + '#scancfg=' + b, withPass: !!o.p };
   }
   importFromHash();                                              // đồng bộ, chạy NGAY khi nạp (trước mọi lần đồng bộ)
-  const ready = loadRemoteConfig();
+  let gate = loadRemoteConfig();
+  const addGate = (p) => { gate = Promise.all([gate, p]).catch(() => {}); };   // scan-hub.js gắn thêm việc «nhận cấu hình chung» vào cổng
   // Tab khác (cùng trình duyệt) vừa đổi Cài đặt lưu trữ -> nạp lại cấu hình ở tab này, khỏi phải F5
   window.addEventListener('storage', (e) => {
     if (e.key !== STORE_KEY || !e.newValue) return;
@@ -517,9 +532,10 @@ const ScanSync = (() => {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resume(); });
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* bỏ qua */ }   // tránh trình duyệt tự dọn IndexedDB khi đầy bộ nhớ
   setInterval(run, 20000);                            // kết nối Sheet có thể xong SAU khi trang nạp -> kiểm tra định kỳ
-  setTimeout(run, 3000);
+  setTimeout(run, 800);                               // mở trang: dùng dữ liệu có sẵn trên máy ngay, đồng bộ chạy NGẦM sau đó
 
-  return { run, pull, touch, freeLocal, localImageBytes, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id),
+  return { callUrl, addGate, whenReady: () => gate, cfgInfo: () => ({ src: cfg.src, at: cfg.at || 0, legacy: hadLocal && !cfg.src }), markConfigAt: (t) => { cfg.at = t; persistCfg(); },
+    run, pull, touch, freeLocal, localImageBytes, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id),
     prefetchImages, pendingImages, pendingImageCount: async () => (await pendingImageIds(0, true)).length, prefetchState, stopPrefetch: () => { P.stop = true; }, makeSetupLink };
 })();
 window.ScanSync = ScanSync;

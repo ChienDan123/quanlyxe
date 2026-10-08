@@ -1252,6 +1252,8 @@ const ScanReview = (() => {
   }
   init();
 
-  return { open, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
+  // Nạp lại tùy chọn từ localStorage (scan-hub.js gọi khi nhận cài đặt mới từ máy khác)
+  function reloadPrefs() { try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) { /* bỏ qua */ } }
+  return { reloadPrefs, open, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
 })();
 window.ScanReview = ScanReview;

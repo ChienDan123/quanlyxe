@@ -101,7 +101,7 @@
       <button id="btnConnect" class="btn btn-secondary" style="margin-bottom:18px;">🔗 Kết nối Google Sheet</button>
 
       <div class="section-title">🤖 Gemini API — Quét phiếu</div>
-      <p class="hint">Thêm <b>nhiều key</b> để xoay vòng khi một key hết quota. Key chỉ lưu trong trình duyệt này (IndexedDB), không gửi đi đâu ngoài Google và không nằm trong mã nguồn.</p>
+      <p class="hint">Thêm <b>nhiều key</b> để xoay vòng khi một key hết quota. Key lưu trong trình duyệt này (IndexedDB) và <b>tự đồng bộ (mã hóa)</b> sang các máy khác qua Drive — không nằm trong mã nguồn.</p>
       <div id="geminiKeyList" class="scan-key-list"></div>
       <div class="scan-key-add">
         <input id="geminiKeyLabel" type="text" class="tpl-input" placeholder="Tên (VD: Key1)" autocomplete="off">
@@ -153,9 +153,9 @@
       </details>
 
       <div class="section-title">🔑 Dùng chung Gemini key giữa các máy</div>
-      <p class="hint">Key mặc định chỉ nằm trong trình duyệt từng máy. Muốn dùng máy khác: đặt một <b>mật khẩu riêng</b> rồi đẩy key lên Drive (<b>đã mã hóa</b>, Apps Script chỉ thấy chuỗi mã hóa). Trên máy kia nhập đúng mật khẩu và bấm «Lấy key về». Cần cấu hình lưu trữ online ở trên. <b>Quên mật khẩu = không khôi phục được</b> (chỉ cần nhập lại key từ Google AI Studio).</p>
+      <p class="hint">Key <b>tự đồng bộ</b> giữa các máy qua Drive (đã mã hóa AES-GCM, Apps Script chỉ thấy chuỗi mã hóa) — <b>không cần nhập mật khẩu</b>, dùng mật khẩu mặc định. Muốn kín hơn, nhập một <b>mật khẩu riêng</b> (≥ 6 ký tự) rồi bấm «Đẩy key lên»; các máy khác nhập đúng mật khẩu đó 1 lần và bấm «Lấy key về». Cần cấu hình lưu trữ online ở trên. <b>Quên mật khẩu riêng = không khôi phục được</b> (chỉ cần nhập lại key từ Google AI Studio).</p>
       <div class="scan-key-add">
-        <input id="scanVaultPass" type="password" class="tpl-input" placeholder="Mật khẩu kho khóa (≥ 6 ký tự)" autocomplete="new-password">
+        <input id="scanVaultPass" type="password" class="tpl-input" placeholder="Mật khẩu riêng (bỏ trống = mặc định)" autocomplete="new-password">
         <button id="btnVaultPush" type="button" class="btn btn-secondary btn-sm">⬆ Đẩy key lên</button>
         <button id="btnVaultPull" type="button" class="btn btn-secondary btn-sm">⬇ Lấy key về máy này</button>
       </div>
@@ -728,6 +728,7 @@
 <script src="scan-review.js"></script>
 <script src="scan-files.js"></script><!-- đặt tên file theo biển số + PDF đầy đủ 2 mặt -->
 <script src="scan-sync.js"></script><!-- lưu ảnh / trạng thái phiếu online (Drive) -->
+<script src="scan-hub.js"></script><!-- đồng bộ cấu hình đa thiết bị (nơi lưu, cài đặt Gemini, tùy chọn) -->
 <script src="scan-store.js"></script><!-- cài đặt nơi lưu + kho ảnh + kho khóa -->
 <script src="layout.js"></script>
 </body>

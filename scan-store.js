@@ -65,7 +65,8 @@ const ScanStore = (() => {
     // «Tự xóa ảnh trên máy» và «Tự tải ảnh về máy» ngược nhau -> không cho bật cùng lúc
     if (autoFree && autoImages) { setMsg('#scanStoreMsg', '❌ Không bật cùng lúc «Tự xóa ảnh trên máy» và «Tự tải ảnh về máy» — hãy chọn 1 trong 2.', true); return; }
     Y.setConfig({ mode, url2, autoFree, autoImages, imgNet, prefetchLimit });
-    let msg = '✅ Đã lưu cách lưu trữ.';
+    if (window.ScanHub) ScanHub.pushNow();   // nơi lưu mới được đẩy lên «hub» -> máy / tab khác tự nhận, khỏi cài lại
+    let msg = '✅ Đã lưu cách lưu trữ' + (mode !== 'off' ? ' (tự đồng bộ sang các máy khác).' : '.');
     // Đổi nơi lưu -> TỰ đẩy lại toàn bộ ảnh đang có trên máy sang nơi mới (không hỏi; ảnh ở nơi cũ không bị xóa)
     if (oldKey !== newKey && mode !== 'off') { const n = await resetCloudFlags(); msg += ` Đang tự đẩy ${n} phiếu sang nơi mới (chạy ngầm, không cần chờ).`; }
     else if (mode !== 'off') msg += ' Ảnh chưa lên Drive sẽ tự được đẩy lên.';
@@ -163,7 +164,7 @@ const ScanStore = (() => {
     free.insertAdjacentElement('beforebegin', imgs);
     const link = document.createElement('div'); link.className = 'ss-free ss-link';
     link.innerHTML = `<b>🔗 Dùng trên máy / trình duyệt / tab ẩn danh khác</b>
-<div class="hint">Cài 1 lần: tạo link rồi mở trên máy mới → tự nối Drive, tải dữ liệu nhẹ về, (nếu kèm mật khẩu) lấy luôn khóa Gemini. Link dùng cấu hình đã «Lưu».</div>
+<div class="hint">Thường KHÔNG cần: máy mới chỉ việc mở trang, cấu hình tự đồng bộ qua Apps Script chính. Link này dự phòng khi máy mới không nối được Apps Script chính.</div>
 <label class="ss-check"><input type="checkbox" id="scanLinkPass"> Kèm mật khẩu kho khóa Gemini <span class="hint">— link sẽ CHỨA mật khẩu: chỉ gửi cho chính mình (tin nhắn đã lưu), không đăng công khai.</span></label>
 <div class="sv-actions"><button type="button" class="btn btn-ghost btn-sm" id="btnMakeLink">🔗 Tạo link thiết lập</button><button type="button" class="btn btn-ghost btn-sm hidden" id="btnCopyLink">📋 Sao chép link</button></div>
 <input type="text" id="scanLinkOut" class="hidden" readonly>
@@ -217,12 +218,12 @@ const ScanStore = (() => {
     try {
       const withPass = !!q('#scanLinkPass').checked; let pass = '';
       if (withPass) {
-        pass = localStorage.getItem(PASS_KEY) || vaultPass();
-        if (pass.length < 6) throw new Error('Muốn kèm mật khẩu: hãy nhập mật khẩu kho khóa (≥ 6 ký tự) ở mục «Kho khóa Gemini» bên dưới, và đã đẩy key lên ít nhất 1 lần.');
+        pass = customPass() || vaultPass();       // đang dùng mật khẩu mặc định thì KHÔNG cần kèm — máy kia tự dùng mật khẩu mặc định
+        if (pass && pass.length < 6) throw new Error('Mật khẩu riêng phải từ 6 ký tự.');
       }
       const r = Y.makeSetupLink(withPass, pass), out = q('#scanLinkOut');
       out.value = r.link; out.classList.remove('hidden'); q('#btnCopyLink').classList.remove('hidden');
-      setMsg('#scanLinkMsg', r.withPass ? '✅ Đã tạo link (CÓ kèm mật khẩu). Mở link này 1 lần trên máy mới là xong.' : '✅ Đã tạo link. Mở trên máy mới; khóa Gemini sẽ lấy sau khi bạn nhập mật khẩu kho khóa ở máy đó.');
+      setMsg('#scanLinkMsg', r.withPass ? '✅ Đã tạo link (CÓ kèm mật khẩu). Mở link này 1 lần trên máy mới là xong.' : '✅ Đã tạo link. Mở trên máy mới; khóa Gemini tự lấy về (mật khẩu mặc định) hoặc nhập mật khẩu riêng nếu bạn đã đặt.');
     } catch (e) { setMsg('#scanLinkMsg', '❌ ' + esc(e.message || e), true); }
   }
   async function copyLink() {
@@ -241,9 +242,16 @@ const ScanStore = (() => {
     const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
     return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
   }
-  const vaultPass = () => (q('#scanVaultPass').value || '').trim();
+  /* Mật khẩu: MẶC ĐỊNH dùng chung «Md1234500@» -> key TỰ đồng bộ, không phải nhập gì. Muốn kín hơn: nhập mật khẩu RIÊNG (≥ 6 ký tự) ở ô bên dưới.
+     LƯU Ý: mật khẩu mặc định nằm trong mã nguồn công khai nên chỉ là lớp che — ai có URL Apps Script vẫn giải mã được. Dùng mật khẩu riêng nếu cần an toàn thật. */
+  const DEFAULT_PASS = 'Md1234500@';
+  const PASS_KEY = 'vehicleScanVaultPassV1', FP_KEY = 'vehicleScanVaultFpV1', SEEN_KEY = 'vehicleScanVaultSeenV1';
+  const customPass = () => { try { return localStorage.getItem(PASS_KEY) || ''; } catch (e) { return ''; } };
+  const effPass = (typed) => typed || customPass() || DEFAULT_PASS;
+  const vaultPass = () => (q('#scanVaultPass') ? q('#scanVaultPass').value : '').trim();
+  const sigOf = (arr) => arr.map(k => k.key + '|' + (k.enabled !== false)).sort().join('\n');
 
-  // Lấy + giải mã kho khóa trên Drive. Trả { exists:false } nếu chưa có; ném lỗi nếu sai mật khẩu / lỗi mạng.
+  // Lấy + giải mã kho khóa trên Drive. { exists:false } nếu chưa có; sai mật khẩu -> ném lỗi code 'BADPASS'.
   async function vaultFetch(pass) {
     let r;
     try { r = await Y.call({ action: 'scanTextGet', ...VAULT }); }
@@ -251,8 +259,8 @@ const ScanStore = (() => {
     const box = JSON.parse(r.text);
     let plain;
     try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(box.iv) }, await deriveKey(pass, unb64(box.salt)), unb64(box.data)); }
-    catch (e) { throw new Error('Sai mật khẩu hoặc dữ liệu kho khóa bị hỏng.'); }
-    return { exists: true, keys: JSON.parse(new TextDecoder().decode(plain)).keys || [] };
+    catch (e) { const err = new Error('Sai mật khẩu hoặc dữ liệu kho khóa bị hỏng.'); err.code = 'BADPASS'; throw err; }
+    return { exists: true, keys: JSON.parse(new TextDecoder().decode(plain)).keys || [], updated: r.updated || 0 };
   }
   // Thêm vào máy này các key còn thiếu; trả số key mới
   async function addMissingKeys(incoming) {
@@ -261,81 +269,117 @@ const ScanStore = (() => {
     if (added) S.keys.refreshUi();
     return added;
   }
-  // GỘP rồi đẩy: lấy key từ Drive về trước (không mất key của máy khác) rồi đẩy bản đầy đủ lên. Sai mật khẩu -> dừng, KHÔNG ghi đè kho.
-  async function vaultMerge(pass) {
-    const got = await vaultFetch(pass);
-    const added = got.exists ? await addMissingKeys(got.keys) : 0;
-    const keys = (await S.keys.listKeys()).map(k => ({ label: k.label, key: k.key, enabled: k.enabled }));
-    if (!keys.length) return { added, pushed: 0 };
+  // Bản online MỚI hơn và máy này không sửa gì -> bật/tắt key theo bản online
+  async function applyRemoteFlags(remote) {
+    const want = new Map(remote.map(k => [k.key, k.enabled !== false])); let n = 0;
+    for (const k of await S.keys.listKeys()) {
+      if (want.has(k.key) && (k.enabled !== false) !== want.get(k.key)) { await S.keys.patchKey(k.id, { enabled: want.get(k.key) }); n++; }
+    }
+    if (n) S.keys.refreshUi();
+    return n;
+  }
+  const localKeyList = async () => (await S.keys.listKeys()).map(k => ({ label: k.label, key: k.key, enabled: k.enabled }));
+  async function vaultPutRemote(pass, keys) {
     const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
-    const enc = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await deriveKey(pass, salt), new TextEncoder().encode(JSON.stringify({ keys })));
-    await Y.call({ action: 'scanPut', scanId: VAULT.scanId, kind: VAULT.kind, mime: 'application/json', plates: '', text: JSON.stringify({ v: 1, salt: b64(salt), iv: b64(iv), data: b64(new Uint8Array(enc)) }) });
-    return { added, pushed: keys.length };
+    const enc = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await deriveKey(pass, salt), new TextEncoder().encode(JSON.stringify({ keys, at: Date.now() })));
+    const r = await Y.call({ action: 'scanPut', scanId: VAULT.scanId, kind: VAULT.kind, mime: 'application/json', plates: '', text: JSON.stringify({ v: 1, salt: b64(salt), iv: b64(iv), data: b64(new Uint8Array(enc)) }) });
+    return r.updated || Date.now();
+  }
+  // ĐỒNG BỘ 2 CHIỀU: lấy key mới từ Drive (không mất key của máy khác) → bên nào đổi SAU thì thắng (trạng thái bật/tắt) → đẩy bản đầy đủ nếu khác.
+  // Sai mật khẩu -> dừng ngay, KHÔNG ghi đè kho. (Xóa key ở 1 máy không lan sang máy khác — cố ý, để không mất key.)
+  async function vaultSync(pass) {
+    const got = await vaultFetch(pass);
+    const localChanged = (await vaultFingerprint()) !== localStorage.getItem(FP_KEY), seen = Number(localStorage.getItem(SEEN_KEY) || 0);
+    let added = 0, flags = 0;
+    if (got.exists) {
+      added = await addMissingKeys(got.keys);
+      if (!localChanged && got.updated > seen) flags = await applyRemoteFlags(got.keys);
+    }
+    const keys = await localKeyList();
+    let pushed = 0, updated = got.updated || 0;
+    if (keys.length && (!got.exists || sigOf(keys) !== sigOf(got.keys))) { updated = await vaultPutRemote(pass, keys); pushed = keys.length; }
+    try { localStorage.setItem(FP_KEY, await vaultFingerprint()); localStorage.setItem(SEEN_KEY, String(updated)); } catch (e) { /* bỏ qua */ }
+    return { added, flags, pushed, total: keys.length };
   }
   const vaultReady = (msgId) => {
     if (!window.crypto || !crypto.subtle) { setMsg(msgId, '❌ Trình duyệt không hỗ trợ mã hóa (cần HTTPS).', true); return false; }
     if (!Y.online()) { setMsg(msgId, '❌ Chưa kết nối nơi lưu online (xem mục Lưu trữ phía trên).', true); return false; }
     return true;
   };
+  // Mật khẩu riêng thì nhớ trên máy này để tự đồng bộ tiếp; mật khẩu mặc định thì không cần nhớ
+  function rememberVault(pass) {
+    try { if (!pass || pass === DEFAULT_PASS) localStorage.removeItem(PASS_KEY); else localStorage.setItem(PASS_KEY, pass); } catch (e) { /* bỏ qua */ }
+    refreshVaultState();
+  }
+  function refreshVaultState() {
+    const el = q('#scanVaultState'); if (!el) return;
+    el.textContent = customPass() ? '🔒 Đang dùng MẬT KHẨU RIÊNG (nhớ trên máy này) — key tự đồng bộ.' : '🔓 Đang dùng mật khẩu mặc định — key TỰ đồng bộ giữa các máy, không cần nhập gì.';
+  }
   async function vaultPush() {
     if (!vaultReady('#scanVaultMsg')) return;
-    const pass = vaultPass(); if (pass.length < 6) { setMsg('#scanVaultMsg', '❌ Mật khẩu tối thiểu 6 ký tự.', true); return; }
+    const typed = vaultPass(); if (typed && typed.length < 6) { setMsg('#scanVaultMsg', '❌ Mật khẩu riêng tối thiểu 6 ký tự (hoặc để trống để dùng mật khẩu mặc định).', true); return; }
+    const pass = effPass(typed);
     try {
-      const r = await vaultMerge(pass);
-      if (!r.pushed) { setMsg('#scanVaultMsg', '❌ Máy này chưa có key nào để đẩy lên.', true); return; }
-      rememberVault(pass); await vaultFingerprintSave();
-      setMsg('#scanVaultMsg', `✅ Đã đẩy ${r.pushed} key lên (đã mã hóa)${r.added ? `, đồng thời lấy về ${r.added} key mới từ Drive` : ''}. Nhớ mật khẩu — quên là KHÔNG khôi phục được.`);
+      const r = await vaultSync(pass);
+      if (!r.total) { setMsg('#scanVaultMsg', '❌ Máy này chưa có key nào để đẩy lên.', true); return; }
+      rememberVault(pass);
+      setMsg('#scanVaultMsg', `✅ Kho khóa đã đồng bộ (${r.total} key${r.pushed ? ', đã đẩy lên' : ''}${r.added ? `, lấy về ${r.added} key mới` : ''}).${typed ? ' Nhớ mật khẩu riêng — quên là KHÔNG khôi phục được.' : ''}`);
     } catch (e) { setMsg('#scanVaultMsg', '❌ ' + esc(e.message || e), true); }
   }
   async function vaultPull() {
     if (!vaultReady('#scanVaultMsg')) return;
-    const pass = vaultPass(); if (!pass) { setMsg('#scanVaultMsg', '❌ Nhập mật khẩu đã dùng khi đẩy key lên.', true); return; }
+    const pass = effPass(vaultPass());
     try {
       const got = await vaultFetch(pass);
       if (!got.exists) throw new Error('Chưa có kho khóa trên Drive — hãy đẩy key lên từ máy đã có key.');
       const added = await addMissingKeys(got.keys);
-      rememberVault(pass); await vaultFingerprintSave();
+      rememberVault(pass); try { localStorage.setItem(FP_KEY, await vaultFingerprint()); localStorage.setItem(SEEN_KEY, String(got.updated)); } catch (e) { /* bỏ qua */ }
       setMsg('#scanVaultMsg', `✅ Đã lấy về ${added} key mới (bỏ qua ${got.keys.length - added} key đã có).`);
     } catch (e) { setMsg('#scanVaultMsg', '❌ ' + esc(e.message || e), true); }
   }
-
-  /* ---- Tự động đồng bộ key (tùy chọn): ghi nhớ mật khẩu kho khóa TRÊN MÁY NÀY để key luôn được sao lưu / khôi phục như ảnh ---- */
-  const PASS_KEY = 'vehicleScanVaultPassV1', FP_KEY = 'vehicleScanVaultFpV1';
-  const rememberOn = () => !!localStorage.getItem(PASS_KEY);
-  function rememberVault(pass) {
-    const cb = q('#scanVaultRemember'); if (!cb) return;
-    try { if (cb.checked) localStorage.setItem(PASS_KEY, pass); else { localStorage.removeItem(PASS_KEY); localStorage.removeItem(FP_KEY); } } catch (e) { /* bỏ qua */ }
+  // Kho cũ đặt mật khẩu riêng mà không nhớ -> ghi đè bằng key của MÁY NÀY + mật khẩu mặc định
+  async function vaultReset() {
+    if (!vaultReady('#scanVaultMsg')) return;
+    const keys = await localKeyList(); if (!keys.length) { setMsg('#scanVaultMsg', '❌ Máy này chưa có key nào — hãy làm việc này trên máy đang có key.', true); return; }
+    if (!confirm(`Ghi đè kho khóa trên Drive bằng ${keys.length} key của MÁY NÀY, dùng mật khẩu mặc định?\n\nKey chỉ có ở máy khác (chưa về máy này) sẽ không còn trong kho.`)) return;
+    try {
+      const updated = await vaultPutRemote(DEFAULT_PASS, keys); rememberVault('');
+      localStorage.setItem(FP_KEY, await vaultFingerprint()); localStorage.setItem(SEEN_KEY, String(updated));
+      setMsg('#scanVaultMsg', `✅ Đã đặt lại kho khóa (${keys.length} key, mật khẩu mặc định). Các máy khác sẽ tự lấy về.`);
+    } catch (e) { setMsg('#scanVaultMsg', '❌ ' + esc(e.message || e), true); }
   }
-  // Dấu vân tay danh sách key (SHA-256) để biết key có thay đổi hay chưa mà không lưu key ra chỗ khác
+
+  // Dấu vân tay danh sách key (SHA-256) để biết key có đổi hay chưa mà không lưu key ra chỗ khác
   async function vaultFingerprint() {
     const list = (await S.keys.listKeys()).map(k => k.key + '|' + (k.enabled !== false)).sort().join('\n');
     const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(list));
     return Array.from(new Uint8Array(h)).map(x => x.toString(16).padStart(2, '0')).join('');
   }
-  async function vaultFingerprintSave() { try { if (rememberOn()) localStorage.setItem(FP_KEY, await vaultFingerprint()); } catch (e) { /* bỏ qua */ } }
-  let vaultAutoBusy = false, vaultTriedEmpty = false;
-  async function vaultAuto() {
-    const pass = localStorage.getItem(PASS_KEY);
-    if (!pass || vaultAutoBusy || !window.crypto || !crypto.subtle || !Y.online() || !S.keys) return;
+  // TỰ ĐỘNG chạy ngầm trên mọi máy (không cần bật gì): key đổi -> đồng bộ ngay; ngoài ra 3 phút kiểm tra thay đổi từ máy khác 1 lần
+  let vaultAutoBusy = false, vaultLastCheck = 0, vaultWarned = false;
+  const tabLock = (fn) => (navigator.locks && navigator.locks.request) ? navigator.locks.request('scanVaultSync', { ifAvailable: true }, (l) => l ? fn() : undefined) : fn();
+  async function vaultAuto(force) {
+    if (vaultAutoBusy || !window.crypto || !crypto.subtle || !Y.online() || !S.keys) return;
     vaultAutoBusy = true;
     try {
-      const fp = await vaultFingerprint(), empty = !(await S.keys.listKeys()).length;
-      // Key đổi (thêm/xóa/bật/tắt) -> gộp + đẩy; máy chưa có key nào -> thử kéo từ Drive 1 lần mỗi phiên
-      if (fp !== localStorage.getItem(FP_KEY) || (empty && !vaultTriedEmpty)) {
-        if (empty) vaultTriedEmpty = true;
-        await vaultMerge(pass); localStorage.setItem(FP_KEY, await vaultFingerprint());
-      }
-    } catch (e) { console.warn('[scan-store] tự đồng bộ key:', e.message || e); }   // lỗi mạng/Drive: lần kiểm tra sau (30 giây) tự thử lại
-    finally { vaultAutoBusy = false; }
+      await Y.whenReady();                                   // chờ nhận xong cấu hình (nơi lưu) từ hub rồi mới đồng bộ key
+      if (force !== true && (await vaultFingerprint()) === localStorage.getItem(FP_KEY) && Date.now() - vaultLastCheck < 180000) return;
+      await tabLock(async () => { await vaultSync(effPass()); });
+      vaultLastCheck = Date.now(); vaultWarned = false;
+    } catch (e) {
+      if (e && e.code === 'BADPASS') {
+        vaultLastCheck = Date.now();
+        if (!vaultWarned) { vaultWarned = true; setMsg('#scanVaultMsg', '⚠ Kho khóa trên Drive đang dùng MẬT KHẨU RIÊNG. Nhập mật khẩu đó vào ô bên dưới rồi bấm «Lấy key về máy này» (hoặc «Đặt lại bằng mật khẩu mặc định» trên máy đang có key).', true); try { toast('Kho khóa Gemini cần mật khẩu riêng — xem Cài đặt → Kho khóa.', true); } catch (x) { /* bỏ qua */ } }
+      } else console.warn('[scan-store] tự đồng bộ key:', e.message || e);   // lỗi mạng/Drive: 30 giây sau tự thử lại
+    } finally { vaultAutoBusy = false; }
   }
   function injectVaultExtras() {
-    const pw = q('#scanVaultPass'); if (!pw || q('#scanVaultRemember')) return;
-    const lab = document.createElement('label'); lab.className = 'ss-check';
-    lab.innerHTML = '<input type="checkbox" id="scanVaultRemember"> Tự động sao lưu / khôi phục key (ghi nhớ mật khẩu trên máy này) <span class="hint">— chỉ bật trên máy cá nhân; mật khẩu lưu trong trình duyệt của máy này</span>';
-    pw.insertAdjacentElement('afterend', lab);
-    lab.querySelector('input').checked = rememberOn();
-    if (rememberOn()) pw.value = localStorage.getItem(PASS_KEY) || '';
-    lab.querySelector('input').addEventListener('change', (e) => { if (e.target.checked) { if (vaultPass().length < 6) { e.target.checked = false; setMsg('#scanVaultMsg', '❌ Nhập mật khẩu (≥ 6 ký tự) trước khi bật.', true); return; } rememberVault(vaultPass()); vaultAuto(); } else rememberVault(''); });
+    const pw = q('#scanVaultPass'); if (!pw || q('#btnVaultReset')) return;
+    pw.placeholder = 'Mật khẩu riêng (bỏ trống = dùng mật khẩu mặc định, tự đồng bộ)';
+    const btn = document.createElement('button'); btn.type = 'button'; btn.id = 'btnVaultReset'; btn.className = 'btn btn-ghost btn-sm'; btn.textContent = '♻ Đặt lại bằng mật khẩu mặc định';
+    btn.addEventListener('click', vaultReset); q('#btnVaultPull').insertAdjacentElement('afterend', btn);
+    const st = document.createElement('div'); st.id = 'scanVaultState'; st.className = 'hint'; (q('#scanVaultMsg') || pw).insertAdjacentElement('beforebegin', st);
+    refreshVaultState();
   }
 
   /* ====================================================================== */
@@ -524,7 +568,8 @@ const ScanStore = (() => {
 
   async function open() { K.limit = 50; openModal('scanStoreModal'); loadSettingsUi(); await reload(); }
   bind();
-  setInterval(vaultAuto, 30000); setTimeout(vaultAuto, 5000);   // chạy ngầm; lỗi thì 30 giây sau tự thử lại
+  setInterval(vaultAuto, 30000); setTimeout(vaultAuto, 3000);   // chạy ngầm; lỗi thì 30 giây sau tự thử lại
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) vaultAuto(true); });   // quay lại tab -> lấy thay đổi mới ngay
   return { open, reload, removeScan, removeBack };
 })();
 window.ScanStore = ScanStore;
