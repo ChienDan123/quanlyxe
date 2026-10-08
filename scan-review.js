@@ -510,13 +510,20 @@ const ScanReview = (() => {
     return `<input type="text" class="rv-edit" ${attrs} value="${escapeHtml(val)}">`;
   }
 
-  // Nút RIÊNG CỦA TỪNG TRƯỜNG: ✅ Đã kiểm với ảnh · ✅ Google Sheet đúng · ✅ Dữ liệu từ phiếu scan đúng
+  // Nút RIÊNG CỦA TỪNG TRƯỜNG — mỗi nút nằm NGAY TRONG ô/cột mà nó nói đến (hết mơ hồ «trên / dưới / cả phiếu»):
+  //   • tick   «🖼 Đã kiểm ảnh»        -> ô tên trường (cột trái)         = riêng trường này đã đối chiếu với ảnh
+  //   • scan   «✅ Phiếu scan đúng»    -> dưới ô GIÁ TRỊ TỪ PHIẾU          = trường này lấy theo phiếu (ghi vào Sheet)
+  //   • sheet  «✅ Google Sheet đúng»  -> dưới ô GIÁ TRỊ GOOGLE SHEET      = trường này giữ nguyên theo Sheet
+  // Nút «cả xe» (mọi trường) nằm riêng ở khung CẢ XE phía trên — xem quickBarHtml. Các data-act giữ nguyên nên logic xử lý không đổi.
   function fieldBtnsHtml(it, f, canSheet, canScan) {
-    const key = f.spec.key, id = escapeHtml(it.id), a = `data-id="${id}" data-field="${key}"`;
+    const key = f.spec.key, id = escapeHtml(it.id), a = `data-id="${id}" data-field="${key}"`, name = escapeHtml(f.spec.label);
     const src = it.source[key];
-    return `<div class="rv-field-btns"><label class="rv-tick rv-tick-sm" title="Đã đối chiếu RIÊNG trường này với ảnh phiếu"><input type="checkbox" data-act="tick-field" ${a} ${f.checked ? 'checked' : ''}> Đã kiểm với ảnh</label>` +
-      (canSheet ? `<button type="button" class="btn btn-sm ${src === 'sheet' ? 'btn-primary' : 'btn-secondary'}" data-act="field-sheet" ${a} title="Giữ nguyên giá trị Google Sheet cho trường này">✅ Google Sheet đúng</button>` : '') +
-      (canScan ? `<button type="button" class="btn btn-sm ${src === 'scan' ? 'btn-primary' : 'btn-secondary'}" data-act="field-scan" ${a} title="Ghi đúng giá trị từ phiếu vào Sheet cho trường này">✅ Dữ liệu từ phiếu scan đúng</button>` : '') + '</div>';
+    const pickBtn = (act, on, label, onLabel, title) => `<button type="button" class="btn btn-sm rv-pick ${on ? 'btn-primary is-on' : 'btn-secondary'}" data-act="${act}" ${a} aria-pressed="${on ? 'true' : 'false'}" title="${title}">${on ? onLabel : label}</button>`;
+    return {
+      tick: `<label class="rv-tick rv-tick-sm" title="Đã đối chiếu RIÊNG trường «${name}» với ảnh phiếu"><input type="checkbox" data-act="tick-field" ${a} ${f.checked ? 'checked' : ''}> 🖼 Đã kiểm ảnh</label>`,
+      scan: canScan ? pickBtn('field-scan', src === 'scan', '✅ Phiếu scan đúng', '✔ Đã chọn: Phiếu đúng', `Chỉ trường «${name}»: lấy giá trị bên PHIẾU và ghi vào Sheet`) : '',
+      sheet: canSheet ? pickBtn('field-sheet', src === 'sheet', '✅ Google Sheet đúng', '✔ Đã chọn: Sheet đúng', `Chỉ trường «${name}»: giữ nguyên giá trị Google Sheet`) : ''
+    };
   }
 
   function fieldRowHtml(it, f, v) {
@@ -526,7 +533,8 @@ const ScanReview = (() => {
     const canSheet = !f.spec.meta && isActionable(f.state);
     // Dòng "khớp" nhưng khác về định dạng (số 0 đầu, dấu, thiếu số cuối...) vẫn cho chọn lấy đúng từ phiếu
     const canScan = !f.spec.meta && (isActionable(f.state) || (f.state === 'same' && svT && svT !== dsT && key !== 'ghiChu'));
-    const btns = f.spec.meta ? '' : fieldBtnsHtml(it, f, canSheet, canScan);
+    const pick = f.spec.meta ? { tick: '', scan: '', sheet: '' } : fieldBtnsHtml(it, f, canSheet, canScan);
+    const btns = '';   // cột «Quyết định» không còn chứa nút chọn nguồn — chúng đã nằm dưới đúng cột nguồn (xem return)
     let dec = '';
     const revert = (f.edited || f.sheetEdit != null) ? `<button type="button" class="rv-revert" data-act="revert" data-id="${id}" data-field="${key}" title="Hoàn tác chỉnh sửa trường này">↺</button>` : '';
     // Trạng thái xe: hiện chữ gốc trên phiếu + nút thêm lựa chọn mới khi chưa có trong danh sách
@@ -553,26 +561,32 @@ const ScanReview = (() => {
         `<div class="rv-target ${willWrite(f) ? 'on' : ''}">${target}</div>` + btns +
         (willWrite(f) ? `<button type="button" class="btn btn-ghost btn-sm" data-act="apply-field" data-id="${id}" data-field="${key}" title="Chỉ ghi trường này, các trường khác giữ nguyên">⚡ Áp dụng riêng trường này</button>` : '');
     }
-    const right = orphan ? '<div class="rv-cell right na">— Không có trên Google Sheet —</div>'
-      : `<div class="rv-cell right ${f.sheetEdit != null ? 'edited' : ''}">${editorHtml(it, f, 'sheet')}</div>`;
-    return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}"><div class="rv-field">${escapeHtml(f.spec.label)}<div class="hint">cột «${escapeHtml(col)}»</div></div>
-      <div class="rv-cell left ${leftCls} ${f.edited ? 'edited' : ''}">${editorHtml(it, f, 'scan')}${revert}${scanExtra}</div>
+    const src = it.source[key];
+    const right = orphan ? '<div class="rv-cell right na"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>— Không có trên Google Sheet —</div>'
+      : `<div class="rv-cell right ${f.sheetEdit != null ? 'edited' : ''} ${src === 'sheet' ? 'picked' : ''}"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>${editorHtml(it, f, 'sheet')}${pick.sheet ? `<div class="rv-pick-row">${pick.sheet}</div>` : ''}</div>`;
+    return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}" data-field="${key}"><div class="rv-field"><b>${escapeHtml(f.spec.label)}</b><div class="hint">cột «${escapeHtml(col)}»</div>${pick.tick}</div>
+      <div class="rv-cell left ${leftCls} ${f.edited ? 'edited' : ''} ${src === 'scan' ? 'picked' : ''}"><span class="rv-src-tag scan">📷 PHIẾU SCAN</span>${editorHtml(it, f, 'scan')}${revert}${scanExtra}${pick.scan ? `<div class="rv-pick-row">${pick.scan}</div>` : ''}</div>
       ${right}
-      <div class="rv-dec-cell">${dec}</div></div>`;
+      <div class="rv-dec-cell"><span class="rv-src-tag dec">⚙ QUYẾT ĐỊNH</span>${dec}</div></div>`;
   }
 
-  // Thanh: tick "Đã kiểm với ảnh" + nút xác nhận nhanh. Phiếu đã khớp: Sheet đúng / Phiếu đúng / ký cam kết.
-  // Phiếu lạ: Phiếu đúng => ghi tab «PhieuLa» · Không ghi. Dùng cho cả thẻ lẫn khung ảnh.
+  // Khung «CẢ XE / CẢ PHIẾU»: các nút áp dụng cho TOÀN BỘ xe này (mọi trường khác biệt), tách hẳn khỏi nút của từng trường.
+  // Xe đã khớp: giữ hết Sheet / lấy hết phiếu / ký cam kết. Phiếu lạ: ghi tab «PhieuLa» / không ghi. Dùng cho cả thẻ lẫn khung ảnh.
   function quickBarHtml(it, found) {
-    const id = escapeHtml(it.id);
-    const tick = `<label class="rv-tick" title="Đánh dấu tiến độ: đã đối chiếu với ảnh phiếu (lưu ngay, làm dở có thể tiếp tục sau)"><input type="checkbox" data-act="tick-img" data-id="${id}" ${it.imgChecked ? 'checked' : ''}> Đã kiểm với ảnh</label>`;
-    if (found) return tick + ` <button type="button" class="btn btn-secondary btn-sm" data-act="quick-sheet" data-id="${id}" title="Mọi trường khác biệt: giữ nguyên Sheet">✅ Google Sheet đúng</button>
-      <button type="button" class="btn btn-primary btn-sm" data-act="quick-scan" data-id="${id}" title="Mọi trường khác biệt: lấy giá trị từ phiếu (đã chỉnh sửa nếu có)">✅ Dữ liệu từ phiếu scan đúng</button>
+    const id = escapeHtml(it.id), plate = escapeHtml(it.bienSoRaw || it.bienSo || '');
+    const tick = `<label class="rv-tick" title="Đánh dấu tiến độ cho CẢ PHIẾU: đã đối chiếu với ảnh (lưu ngay, làm dở có thể tiếp tục sau)"><input type="checkbox" data-act="tick-img" data-id="${id}" ${it.imgChecked ? 'checked' : ''}> 🖼 Đã xem ảnh cả phiếu</label>`;
+    const head = `<span class="rv-scope-title">🚗 CẢ XE${plate ? ' ' + plate : ''} <small>— áp dụng cho TẤT CẢ trường</small></span>`;
+    let btns;
+    if (found) btns = `<span class="rv-scope-lbl">Mọi trường khác biệt:</span>
+      <button type="button" class="btn btn-secondary btn-sm" data-act="quick-sheet" data-id="${id}" title="CẢ XE: mọi trường khác biệt giữ nguyên Google Sheet">📋 Cả xe: giữ hết Google Sheet</button>
+      <button type="button" class="btn btn-primary btn-sm" data-act="quick-scan" data-id="${id}" title="CẢ XE: mọi trường khác biệt lấy giá trị từ phiếu (đã chỉnh sửa nếu có)">📷 Cả xe: lấy hết từ phiếu scan</button>
       <button type="button" class="btn btn-ghost btn-sm" data-act="quick-sign" data-id="${id}" title="Đặt Tình trạng cam kết = ${escapeHtml(SIGNED)}">✍️ Phiếu đã ký cam kết</button>`;
-    return tick + (it.bienSo
-      ? ` <button type="button" class="btn btn-primary btn-sm" data-act="orphan-apply" data-id="${id}" title="Dữ liệu phiếu (đã chỉnh sửa) đúng: ghi vào tab PhieuLa, không đụng dữ liệu xe chính">✅ Dữ liệu từ phiếu scan đúng → ghi tab PhieuLa</button>
+    else btns = it.bienSo
+      ? `<span class="rv-scope-lbl">Xe chưa có trong danh sách:</span>
+      <button type="button" class="btn btn-primary btn-sm" data-act="orphan-apply" data-id="${id}" title="Dữ liệu phiếu (đã chỉnh sửa) đúng: ghi vào tab PhieuLa, không đụng dữ liệu xe chính">📷 Phiếu scan đúng → ghi tab PhieuLa</button>
       <button type="button" class="btn btn-ghost btn-sm" data-act="orphan-skip" data-id="${id}">⏭ Không ghi</button>`
-      : ' <span class="hint">Nhập biển số (ô bên trên) để đối chiếu / ghi.</span>');
+      : '<span class="hint">Nhập biển số (ô bên trên) để đối chiếu / ghi.</span>';
+    return `<div class="rv-scope">${head}<div class="rv-scope-body">${tick}<span class="rv-scope-sep" aria-hidden="true"></span>${btns}</div></div>`;
   }
 
   /* ---- Sửa BIỂN SỐ khi scan sai + tự tìm biển khớp trong danh sách ---- */
@@ -652,7 +666,7 @@ const ScanReview = (() => {
       </div>
       <div class="rv-quick">${quickBarHtml(it, v.found)}</div>
       ${plateSuggestHtml(v)}
-      <div class="rv-split"><div class="rv-split-head"><div></div><div class="left">📷 Dữ liệu từ phiếu scan <span class="hint">(sửa được)</span></div><div class="right">📋 Hiện có trên Google Sheet <span class="hint">(sửa được)</span></div><div>Quyết định · sẽ ghi vào đâu</div></div>${body}</div>
+      <div class="rv-split"><div class="rv-split-head"><div>Trường</div><div class="left src-scan">📷 TỪ PHIẾU SCAN <span class="hint">(sửa được)</span></div><div class="right src-sheet">📋 TRÊN GOOGLE SHEET <span class="hint">(sửa được)</span></div><div class="dec">⚙ Quyết định · ghi vào đâu</div></div>${body}</div>
       ${v.found ? `<div class="hint rv-result">Kết quả đối chiếu sẽ ghi: <i>${escapeHtml(buildResultText(v, plannedFromScan(v)))}</i></div>` : ''}
     </div>`;
   }

@@ -6,7 +6,8 @@
 <title>Quản lý Phương tiện &amp; Bản cam kết</title>
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="scan-review.css">
-<link rel="stylesheet" href="scan-store.css"><!-- giao diện cài đặt nơi lưu + kho ảnh --><!-- giao diện màn so sánh & xem phiếu scan -->
+<link rel="stylesheet" href="scan-store.css">
+<link rel="stylesheet" href="scan-review-ui.css"><!-- bố cục đối chiếu: 2 cột màu theo nguồn + khung «CẢ XE» --><!-- giao diện cài đặt nơi lưu + kho ảnh --><!-- giao diện màn so sánh & xem phiếu scan -->
 </head>
 <body>
 
@@ -624,7 +625,7 @@
         <label class="rv-tool-lbl" title="Ghi vào cột «Người thực hiện» của mỗi xe khi áp dụng (Sheet đã có người khác thì giữ nguyên)">👤 Người thực hiện:
           <select id="rvAssignee" class="row-inline-select"></select></label>
         <label class="chk-inline" title="Khi lấy dữ liệu từ phiếu, nối dấu «📷Phiếu dd/mm: CCCD, SĐT» vào cột Ghi Chú để sau này biết nguồn"><input type="checkbox" id="rvChkTag" checked> Ghi dấu 📷 nguồn phiếu</label>
-        <label class="chk-inline" title="Bấm «Google Sheet đúng» / «Dữ liệu từ phiếu scan đúng» là áp dụng luôn cho xe đó"><input type="checkbox" id="rvChkQuick" checked> Xác nhận nhanh = áp dụng luôn</label>
+        <label class="chk-inline" title="Bấm nút ở khung «CẢ XE» (Cả xe: giữ hết Google Sheet / lấy hết từ phiếu scan) là áp dụng luôn cho xe đó"><input type="checkbox" id="rvChkQuick" checked> Xác nhận nhanh = áp dụng luôn</label>
         <span id="rvPager" class="rv-pager"></span>
       </div>
       <!-- Vùng làm việc: [ảnh phiếu] cạnh [bảng so sánh] — ảnh chỉ hiện khi bấm «Xem ảnh phiếu» -->
