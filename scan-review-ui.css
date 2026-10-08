@@ -1,0 +1,71 @@
+/* =========================================================================
+   scan-review-ui.css — BỐ CỤC MÀN ĐỐI CHIẾU (nạp SAU scan-review.css để ghi đè)
+   Nguyên tắc: MỖI NÚT NẰM TRONG Ô MÀ NÓ NÓI ĐẾN.
+     • Màu theo NGUỒN: 📷 phiếu scan = xanh dương · 📋 Google Sheet = xanh lá · ⚙ quyết định = xám.
+     • Nút «Phiếu scan đúng» nằm dưới ô giá trị phiếu; «Google Sheet đúng» nằm dưới ô giá trị Sheet; tick «Đã kiểm ảnh» nằm ở ô tên trường.
+     • Nút áp dụng CẢ XE nằm trong khung riêng viền cam, có tiêu đề «CẢ XE», tách hẳn khỏi các nút từng trường.
+   ========================================================================= */
+:root {
+  --rv-scan: #2563eb; --rv-scan-bg: #eff6ff; --rv-scan-line: #93c5fd;
+  --rv-sheet: #15803d; --rv-sheet-bg: #f0fdf4; --rv-sheet-line: #86efac;
+  --rv-dec-bg: #f9fafb; --rv-dec-line: #d1d5db;
+  --rv-scope: #b45309; --rv-scope-bg: #fffbeb; --rv-scope-line: #fbbf24;
+}
+
+/* ---- Khung «CẢ XE / CẢ PHIẾU» ---- */
+.rv-scope { border: 1.5px dashed var(--rv-scope-line); background: var(--rv-scope-bg); border-radius: 10px; padding: 6px 10px 8px; margin: 6px 0; }
+.rv-scope-title { display: block; font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--rv-scope); margin-bottom: 4px; }
+.rv-scope-title small { font-weight: 500; opacity: .85; }
+.rv-scope-body { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.rv-scope-lbl { font-size: 12px; color: #6b7280; }
+.rv-scope-sep { width: 1px; align-self: stretch; background: var(--rv-scope-line); margin: 0 2px; }
+.rv-imgpane-actions .rv-scope { margin: 0; }                     /* trong khung ảnh: gọn lại */
+.rv-imgpane-actions .rv-scope-sep { display: none; }
+
+/* ---- Bảng 2 cột: [Trường | PHIẾU | SHEET | Quyết định] ---- */
+.rv-card .rv-split-head, .rv-card .rv-split .rv-row {
+  display: grid; grid-template-columns: 150px minmax(0, 1fr) minmax(0, 1fr) 210px; gap: 0 8px; align-items: stretch;
+}
+.rv-card .rv-split-head { position: sticky; top: 0; z-index: 2; font-size: 12px; font-weight: 700; padding: 0 0 4px; }
+.rv-card .rv-split-head > div { padding: 5px 8px; border-radius: 6px 6px 0 0; background: var(--rv-dec-bg); border-bottom: 3px solid var(--rv-dec-line); }
+.rv-card .rv-split-head > .src-scan { background: var(--rv-scan-bg); border-bottom-color: var(--rv-scan); color: var(--rv-scan); }
+.rv-card .rv-split-head > .src-sheet { background: var(--rv-sheet-bg); border-bottom-color: var(--rv-sheet); color: var(--rv-sheet); }
+.rv-card .rv-split-head .hint { font-weight: 400; }
+
+.rv-card .rv-split .rv-row { padding: 6px 0; border-bottom: 1px solid #e5e7eb; }
+.rv-card .rv-split .rv-field { display: flex; flex-direction: column; gap: 2px; padding: 2px 4px; }
+.rv-card .rv-split .rv-field .rv-tick { margin-top: 4px; font-size: 12px; }
+
+/* Ô giá trị: viền trái đậm theo màu nguồn (nền giữ theo trạng thái khớp / khác của scan-review.css) */
+.rv-card .rv-split .rv-cell.left { border-left: 4px solid var(--rv-scan); border-radius: 6px; padding: 6px 8px; }
+.rv-card .rv-split .rv-cell.right { border-left: 4px solid var(--rv-sheet); border-radius: 6px; padding: 6px 8px; }
+.rv-card .rv-split .rv-cell.right.na { border-left-color: #d1d5db; color: #6b7280; font-style: italic; }
+.rv-card .rv-split .rv-dec-cell { border-left: 4px solid var(--rv-dec-line); background: var(--rv-dec-bg); border-radius: 6px; padding: 6px 8px; }
+
+/* Nút chọn nguồn của TỪNG TRƯỜNG — nằm dưới ô giá trị tương ứng */
+.rv-pick-row { margin-top: 6px; }
+.rv-pick { width: 100%; justify-content: center; white-space: normal; }
+.rv-cell.left .rv-pick.is-on { background: var(--rv-scan); border-color: var(--rv-scan); color: #fff; }
+.rv-cell.right .rv-pick.is-on { background: var(--rv-sheet); border-color: var(--rv-sheet); color: #fff; }
+/* Nguồn đã chọn: viền bao quanh ô để nhìn một cái biết trường này đang lấy từ đâu */
+.rv-card .rv-split .rv-cell.left.picked { outline: 2px solid var(--rv-scan); outline-offset: -1px; }
+.rv-card .rv-split .rv-cell.right.picked { outline: 2px solid var(--rv-sheet); outline-offset: -1px; }
+
+/* Nhãn nguồn nhỏ trong mỗi ô: chỉ hiện khi bảng xếp dọc (không còn dòng tiêu đề cột nhìn thấy) */
+.rv-src-tag { display: none; font-size: 11px; font-weight: 700; margin-bottom: 3px; }
+.rv-src-tag.scan { color: var(--rv-scan); } .rv-src-tag.sheet { color: var(--rv-sheet); } .rv-src-tag.dec { color: #6b7280; }
+
+/* ---- Khung ảnh đang mở (bảng hẹp): ô «Quyết định» xuống hàng riêng ---- */
+.rv-work.with-pane .rv-card .rv-split-head, .rv-work.with-pane .rv-card .rv-split .rv-row { grid-template-columns: 110px minmax(0, 1fr) minmax(0, 1fr); }
+.rv-work.with-pane .rv-card .rv-split-head > .dec { display: none; }
+.rv-work.with-pane .rv-card .rv-split .rv-dec-cell { grid-column: 1 / -1; margin-top: 6px; }
+.rv-work.with-pane .rv-card .rv-split .rv-dec-cell .rv-src-tag.dec { display: block; }
+
+/* ---- Màn hình hẹp / điện thoại: xếp dọc, mỗi ô có nhãn nguồn ---- */
+@media (max-width: 800px) {
+  .rv-card .rv-split-head { display: none; }
+  .rv-card .rv-split .rv-row, .rv-work.with-pane .rv-card .rv-split .rv-row { grid-template-columns: 1fr; gap: 6px; }
+  .rv-card .rv-split .rv-cell, .rv-card .rv-split .rv-dec-cell { grid-column: auto !important; }
+  .rv-src-tag, .rv-work.with-pane .rv-card .rv-split .rv-dec-cell .rv-src-tag.dec { display: block; }
+  .rv-pick { padding: 10px 8px; }                                 /* nút to hơn cho ngón tay */
+}
