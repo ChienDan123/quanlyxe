@@ -467,6 +467,8 @@ const ScanApp = (() => {
             tinhTrang: { type: S, enum: TINH_TRANG },
             tinhTrangGhiTrenPhieu: { type: S },
             ghiChu: { type: S },
+            tenDKX: { type: S },            // «Tên trong ĐKX» của dòng xe = CHỦ PHƯƠNG TIỆN
+            nguoiMuaSuDung: { type: S },    // dòng «Tên người mua / người sử dụng» của dòng xe
           },
           required: ['bienSo', 'tinhTrang'],
         },
@@ -493,7 +495,9 @@ QUY TẮC:
    - tinhTrang: chọn 1 giá trị: dang_hoat_dong | da_ban_chua_sang_ten | mat_cap | het_nien_han | mua_chua_sang_ten | khac | khong_ro. Căn cứ ô được tích/gạch hoặc chữ ghi tay cạnh xe đó.
    - tinhTrangGhiTrenPhieu: chép nguyên văn dòng/ô tình trạng viết trên phiếu cho xe đó.
    - ghiChu: ghi chú riêng của xe đó (nếu có).
-3. chuHo: họ tên chủ hộ/chủ xe, giữ nguyên dấu tiếng Việt.
+   - tenDKX: họ tên ghi ở ô «Tên trong ĐKX» của DÒNG XE đó (đây là CHỦ PHƯƠNG TIỆN thật sự). Dòng xe không ghi tên thì "" — TUYỆT ĐỐI không tự điền tên chủ hộ vào.
+   - nguoiMuaSuDung: họ tên ghi ở dòng «Tên người mua / người sử dụng» ngay dưới của xe đó (người đang sử dụng / mua xe hiện tại). Không ghi thì "".
+3. chuHo: họ tên CHỦ PHIẾU / chủ hộ ở phần đầu phiếu (người khai). Người này có thể KHÔNG phải chủ xe — chủ xe của từng xe là tenDKX. Giữ nguyên dấu tiếng Việt.
 4. cccd: số CCCD/CMND/MST, CHỈ gồm chữ số đúng như trên phiếu. Nếu thiếu số hoặc mờ, chép phần đọc được — KHÔNG tự thêm số.
 5. sdt: số điện thoại, chỉ chữ số.
 6. ghiChuTay: toàn bộ chữ viết tay/ghi chú thêm không thuộc ô in sẵn. Không có thì "".
