@@ -207,12 +207,12 @@ function scanDispatch_(d) {
 
 
 /* =========================================================================
-   PHẦN 5 — PHIẾU LẠ: GHI VÀO HÀNG TRỐNG MỚI CỦA SHEET ĐANG LÀM VIỆC (thay cho tab riêng «PhieuLa») + XÓA HÀNG KHI TRÙNG XE CÓ SẴN
+   PHẦN 5 — PHIẾU LẠ: GHI VÀO CỘT AL–AP Ở HÀNG TRỐNG MỚI CỦA SHEET ĐANG LÀM VIỆC + XÓA HÀNG KHI TRÙNG XE CÓ SẴN
    Việc cần làm: dán PHẦN 5 này vào dự án, thêm 2 case trong scanDispatch_ (đã có ở trên nếu bạn dùng bản file này), Deploy PHIÊN BẢN MỚI.
-   Cách chọn sheet: (1) tên sheet web gửi lên (sheetName) → (2) Script property «SCAN_MAIN_SHEET» (nếu bạn đặt) → (3) tự dò: tab đầu tiên
+   Cách chọn sheet: (1) tên sheet web gửi lên (sheetName) → (2) Script property «SCAN_MAIN_SHEET» (nếu bạn đặt) → (3) hằng SHEET_NAME trong Code.gs (nếu có) → (4) tab «Tong hop» → (5) tự dò: tab đầu tiên
    có dòng tiêu đề chứa cột «Biển số» (bỏ qua tab «PhieuLa»). Kết quả trả về luôn kèm tên sheet đã dùng để người dùng kiểm tra.
-   An toàn: ghi/xóa chỉ nhận dạng hàng bằng (biển số + «mã phiếu» trong cột «Phiếu scan») nên gửi lại nhiều lần KHÔNG tạo hàng trùng
-   và KHÔNG xóa nhầm hàng xe thật.
+   An toàn: hàng phiếu lạ nhận dạng bằng «Phiếu lạ - Biển số» (cột AL) nên gửi lại nhiều lần KHÔNG tạo hàng trùng; khi xóa chỉ xóa hàng
+   mà mọi cột ngoài AL–AP đều trống nên KHÔNG xóa nhầm hàng xe thật.
    ========================================================================= */
 function scanKey_(s) { return String(s == null ? '' : s).toLowerCase().replace(/đ/g, 'd').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, ''); }
 function scanPlate_(s) { return String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -227,7 +227,8 @@ function scanFindCol_(headers, spec) {
 // Tìm sheet đang làm việc + dòng tiêu đề (dò 10 dòng đầu). Trả { sh, headerRow(1-based), headers[] } hoặc null
 function scanMainSheet_(ss, name, plateSpec) {
   var cands = [], pn = PropertiesService.getScriptProperties().getProperty('SCAN_MAIN_SHEET');
-  [name, pn].forEach(function (n) { var s = n && ss.getSheetByName(n); if (s) cands.push(s); });
+  var mainName = (typeof SHEET_NAME !== 'undefined') ? SHEET_NAME : '';   // hằng SHEET_NAME của Code.gs (cùng phạm vi toàn cục) = đúng sheet web đang đọc
+  [name, pn, mainName, 'Tong hop'].forEach(function (n) { var s = n && ss.getSheetByName(n); if (s && cands.indexOf(s) < 0) cands.push(s); });
   ss.getSheets().forEach(function (s) { if (s.getName() !== 'PhieuLa' && cands.indexOf(s) < 0) cands.push(s); });
   for (var c = 0; c < cands.length; c++) {
     var sh = cands[c], lastC = sh.getLastColumn(), lastR = Math.min(10, sh.getLastRow());
@@ -246,80 +247,124 @@ function scanColValues_(sh, headerRow, col0) {
   return n > 0 ? sh.getRange(headerRow + 1, col0 + 1, n, 1).getValues().map(function (r) { return String(r[0]); }) : [];
 }
 
-// p = { sheetName, rows:[{ scanId8, plateRaw, cells:[{key, header, aliases[], value}] }] }
+/* ---- PHIẾU LẠ → 5 cột cố định AL–AP của sheet «Tong hop» ----
+   AL «Phiếu lạ - Biển số» · AM «Phiếu lạ - Họ tên» · AN «Phiếu lạ - CCCD» · AO «Phiếu lạ - Địa chỉ» · AP «Phiếu lạ - Số điện thoại»
+   Tìm cột theo TIÊU ĐỀ trước; không thấy thì dùng đúng vị trí AL–AP (chỉ số 0-based 37–41). Mọi cột khác của hàng phiếu lạ để TRỐNG. */
+var SCAN_ORPHAN_COLS_ = [
+  { key: 'bienSo', header: 'Phiếu lạ - Biển số',        fixed: 37 },   // AL
+  { key: 'hoTen',  header: 'Phiếu lạ - Họ tên',         fixed: 38 },   // AM
+  { key: 'cccd',   header: 'Phiếu lạ - CCCD',           fixed: 39 },   // AN
+  { key: 'diaChi', header: 'Phiếu lạ - Địa chỉ',        fixed: 40 },   // AO
+  { key: 'sdt',    header: 'Phiếu lạ - Số điện thoại',  fixed: 41 }    // AP
+];
+// Trả { cols: {key: idx0}, newHeaders: [{idx, header}] } hoặc { error }
+function scanOrphanCols_(headers) {
+  var cols = {}, newHeaders = [], i, c;
+  for (i = 0; i < SCAN_ORPHAN_COLS_.length; i++) {
+    c = SCAN_ORPHAN_COLS_[i];
+    var idx = scanFindCol_(headers, { header: c.header, aliases: [] });
+    if (idx < 0) {
+      var cur = String(headers[c.fixed] == null ? '' : headers[c.fixed]).trim();
+      if (cur !== '') return { error: 'Cột thứ ' + (c.fixed + 1) + ' đang có tiêu đề «' + cur + '», không phải «' + c.header + '». Hãy đặt lại tiêu đề cột AL–AP đúng tên.' };
+      idx = c.fixed; newHeaders.push({ idx: idx, header: c.header });   // ô tiêu đề trống đúng vị trí AL–AP -> điền tiêu đề
+    }
+    cols[c.key] = idx;
+  }
+  return { cols: cols, newHeaders: newHeaders };
+}
+// Chỉ số (0-based, trong dữ liệu dưới tiêu đề) của hàng cuối CÓ giá trị ở 1 trong các cột cho trước; -1 nếu chưa có
+function scanLastFilled_(sh, headerRow, colIdxList) {
+  var last = -1;
+  colIdxList.forEach(function (ci) {
+    var v = scanColValues_(sh, headerRow, ci);
+    for (var i = v.length - 1; i > last; i--) if (v[i].trim() !== '') { last = i; break; }
+  });
+  return last;
+}
+
+// p = { sheetName, plate:{header,aliases}, rows:[{ plateRaw, cells:{bienSo, hoTen, cccd, diaChi, sdt} }] }
+// Ghi mỗi phiếu lạ vào HÀNG TRỐNG MỚI, CHỈ các cột AL–AP. Cùng biển phiếu lạ đã có -> cập nhật AM–AP của hàng đó (không tạo hàng trùng).
 function scanOrphanUpsert_(p) {
   if (!p || !p.rows || !p.rows.length) return { ok: true, results: [] };
+  if (!p.plate) return { ok: false, error: 'Thiếu thông tin cột Biển số để tìm sheet.' };
   var lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var plateCell = null; p.rows[0].cells.forEach(function (c) { if (c.key === 'bienSo') plateCell = c; });
-    if (!plateCell) return { ok: false, error: 'Thiếu ô Biển số trong dữ liệu gửi lên.' };
-    var ms = scanMainSheet_(ss, p.sheetName, plateCell);
-    if (!ms) return { ok: false, error: 'Không tìm thấy sheet có cột «' + plateCell.header + '». Đặt Script property SCAN_MAIN_SHEET = tên sheet đang làm việc.' };
+    var ms = scanMainSheet_(ss, p.sheetName, p.plate);
+    if (!ms) return { ok: false, error: 'Không tìm thấy sheet có cột «' + p.plate.header + '». Đặt Script property SCAN_MAIN_SHEET = tên sheet đang làm việc.' };
     var sh = ms.sh, headerRow = ms.headerRow, headers = ms.headers.slice();
-    var colOf = {}, nextCol = 0, i;                       // nextCol = số cột đã dùng (vị trí cột trống đầu tiên, 0-based)
-    for (i = 0; i < headers.length; i++) if (headers[i] !== '') nextCol = i + 1;
-    // Gom mọi cột cần dùng; thiếu thì TẠO MỚI ở cột trống đầu tiên (riêng Biển số bắt buộc phải có sẵn)
-    var created = [];
-    p.rows.forEach(function (row) {
-      row.cells.forEach(function (c) {
-        if (colOf[c.key] != null) return;
-        var idx = scanFindCol_(headers, c);
-        if (idx < 0) { idx = nextCol++; headers[idx] = c.header; created.push({ idx: idx, header: c.header }); }
-        colOf[c.key] = idx;
-      });
-    });
-    if (created.length) {
-      if (nextCol > sh.getMaxColumns()) sh.insertColumnsAfter(sh.getMaxColumns(), nextCol - sh.getMaxColumns());
-      created.forEach(function (c) { sh.getRange(headerRow, c.idx + 1).setValue(c.header); });
+    var oc = scanOrphanCols_(headers);
+    if (oc.error) return { ok: false, error: oc.error };
+    var cols = oc.cols, i;
+    if (oc.newHeaders.length) {
+      var maxIdx = 0; oc.newHeaders.forEach(function (h) { if (h.idx + 1 > maxIdx) maxIdx = h.idx + 1; });
+      if (maxIdx > sh.getMaxColumns()) sh.insertColumnsAfter(sh.getMaxColumns(), maxIdx - sh.getMaxColumns());
+      oc.newHeaders.forEach(function (h) { sh.getRange(headerRow, h.idx + 1).setValue(h.header); });
     }
-    // Cột để nhận dạng hàng đã ghi (chống trùng khi gửi lại)
-    var plateVals = scanColValues_(sh, headerRow, colOf.bienSo);
-    var phieuVals = colOf.phieuScan != null ? scanColValues_(sh, headerRow, colOf.phieuScan) : [];
-    var lastDataIdx = -1;                                  // chỉ số (0-based, trong mảng plateVals) của hàng cuối CÓ biển số
-    for (i = plateVals.length - 1; i >= 0; i--) if (plateVals[i].trim() !== '') { lastDataIdx = i; break; }
+    var plateCol = scanFindCol_(headers, p.plate);                       // cột «Biển số» của xe thật (chỉ để biết hàng cuối có dữ liệu)
+    var orphanPlates = scanColValues_(sh, headerRow, cols.bienSo);
+    var lastIdx = scanLastFilled_(sh, headerRow, plateCol >= 0 ? [plateCol, cols.bienSo] : [cols.bienSo]);
     var results = [], toAppend = [];
     p.rows.forEach(function (row) {
-      var pk = scanPlate_(row.plateRaw), existing = -1;
-      for (i = 0; i < plateVals.length; i++) if (scanPlate_(plateVals[i]) === pk && String(phieuVals[i] || '').indexOf('mã ' + row.scanId8) >= 0) { existing = i; break; }
-      if (existing >= 0) { results.push({ plateRaw: row.plateRaw, row: headerRow + 1 + existing, existed: true }); return; }
+      var pk = scanPlate_(row.plateRaw || (row.cells && row.cells.bienSo)), existing = -1;
+      for (i = 0; i < orphanPlates.length; i++) if (pk && scanPlate_(orphanPlates[i]) === pk) { existing = i; break; }
+      if (existing >= 0) {                                               // đã có hàng phiếu lạ cùng biển -> chỉ cập nhật ô có dữ liệu (AM–AP)
+        ['hoTen', 'cccd', 'diaChi', 'sdt'].forEach(function (k) {
+          var v = row.cells && row.cells[k] != null ? String(row.cells[k]).trim() : '';
+          if (v === '') return;
+          var rg = sh.getRange(headerRow + 1 + existing, cols[k] + 1);
+          if (/^\d+$/.test(v)) rg.setNumberFormat('@');                  // giữ số 0 đầu CCCD / SĐT
+          rg.setValue(v);
+        });
+        results.push({ plateRaw: row.plateRaw, row: headerRow + 1 + existing, existed: true });
+        return;
+      }
       toAppend.push(row);
     });
     if (toAppend.length) {
-      var firstRow = headerRow + 1 + lastDataIdx + 1;     // hàng TRỐNG đầu tiên ngay dưới hàng dữ liệu cuối
+      var firstRow = headerRow + 1 + lastIdx + 1;                       // hàng TRỐNG đầu tiên dưới hàng cuối có dữ liệu
       var need = firstRow + toAppend.length - 1;
       if (need > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
-      var byCol = {};                                       // ghi theo từng CỘT (ít lệnh hơn, không đụng ô khác trong hàng như công thức có sẵn)
-      toAppend.forEach(function (row, k) {
-        row.cells.forEach(function (c) { (byCol[colOf[c.key]] = byCol[colOf[c.key]] || {})[k] = String(c.value); });
-        results.push({ plateRaw: row.plateRaw, row: firstRow + k, existed: false });
-      });
-      Object.keys(byCol).forEach(function (ci) {
+      Object.keys(cols).forEach(function (k) {                          // ghi từng cột AL..AP, KHÔNG đụng ô nào khác trong hàng
         var vals = [], anyDigits = false;
-        for (var k = 0; k < toAppend.length; k++) { var v = byCol[ci][k] == null ? '' : byCol[ci][k]; if (/^\d+$/.test(v)) anyDigits = true; vals.push([v]); }
-        var rg = sh.getRange(firstRow, Number(ci) + 1, toAppend.length, 1);
-        if (anyDigits) rg.setNumberFormat('@');             // giữ số 0 đầu của CCCD / SĐT
+        toAppend.forEach(function (row) {
+          var v = row.cells && row.cells[k] != null ? String(row.cells[k]).trim() : '';
+          if (/^\d+$/.test(v)) anyDigits = true;
+          vals.push([v]);
+        });
+        var rg = sh.getRange(firstRow, cols[k] + 1, toAppend.length, 1);
+        if (anyDigits) rg.setNumberFormat('@');
         rg.setValues(vals);
       });
+      toAppend.forEach(function (row, n) { results.push({ plateRaw: row.plateRaw, row: firstRow + n, existed: false }); });
     }
     SpreadsheetApp.flush();
-    return { ok: true, sheet: sh.getName(), results: results, createdCols: created.map(function (c) { return c.header; }) };
+    return { ok: true, sheet: sh.getName(), results: results, createdCols: oc.newHeaders.map(function (h) { return h.header; }) };
   } finally { lock.releaseLock(); }
 }
 
-// p = { sheetName, scanId8, plateRaw, plate:{header,aliases}, phieu:{header,aliases} } — xóa CHÍNH XÁC hàng phiếu lạ đã ghi
+// p = { sheetName, plateRaw, plate:{header,aliases} } — xóa hàng phiếu lạ có «Phiếu lạ - Biển số» = plateRaw.
+// AN TOÀN: chỉ xóa hàng mà MỌI cột ngoài AL–AP đều trống (không bao giờ xóa nhầm hàng xe thật).
 function scanOrphanDelete_(p) {
-  if (!p || !p.scanId8 || !p.plateRaw || !p.plate || !p.phieu) return { ok: false, error: 'Thiếu thông tin để xác định hàng cần xóa.' };
+  if (!p || !p.plateRaw || !p.plate) return { ok: false, error: 'Thiếu thông tin để xác định hàng cần xóa.' };
   var lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var ms = scanMainSheet_(ss, p.sheetName, p.plate);
     if (!ms) return { ok: false, error: 'Không tìm thấy sheet đang làm việc.' };
-    var sh = ms.sh, pc = scanFindCol_(ms.headers, p.plate), fc = scanFindCol_(ms.headers, p.phieu);
-    if (pc < 0 || fc < 0) return { ok: true, deleted: 0, sheet: sh.getName() };   // chưa có cột Phiếu scan -> chưa từng ghi hàng nào bằng cách này, không xóa gì
-    var plates = scanColValues_(sh, ms.headerRow, pc), phieus = scanColValues_(sh, ms.headerRow, fc), pk = scanPlate_(p.plateRaw), rows = [];
-    for (var i = 0; i < plates.length; i++) if (scanPlate_(plates[i]) === pk && String(phieus[i]).indexOf('mã ' + p.scanId8) >= 0) rows.push(ms.headerRow + 1 + i);
-    for (var k = rows.length - 1; k >= 0; k--) sh.deleteRow(rows[k]);     // xóa từ dưới lên để chỉ số dòng không lệch
+    var sh = ms.sh, oc = scanOrphanCols_(ms.headers);
+    if (oc.error || oc.newHeaders.length) return { ok: true, deleted: 0, sheet: sh.getName() };   // chưa có cột AL–AP -> chưa từng ghi phiếu lạ
+    var n = sh.getLastRow() - ms.headerRow;
+    if (n <= 0) return { ok: true, deleted: 0, sheet: sh.getName() };
+    var data = sh.getRange(ms.headerRow + 1, 1, n, sh.getLastColumn()).getValues();
+    var isOrphanCol = {}; Object.keys(oc.cols).forEach(function (k) { isOrphanCol[oc.cols[k]] = true; });
+    var pk = scanPlate_(p.plateRaw), rows = [];
+    data.forEach(function (r, i) {
+      if (scanPlate_(r[oc.cols.bienSo]) !== pk) return;
+      for (var c = 0; c < r.length; c++) if (!isOrphanCol[c] && String(r[c]).trim() !== '') return;   // có dữ liệu cột khác -> là xe thật, bỏ qua
+      rows.push(ms.headerRow + 1 + i);
+    });
+    for (var k = rows.length - 1; k >= 0; k--) sh.deleteRow(rows[k]);   // xóa từ dưới lên để chỉ số dòng không lệch
     SpreadsheetApp.flush();
     return { ok: true, deleted: rows.length, rows: rows, sheet: sh.getName() };
   } finally { lock.releaseLock(); }

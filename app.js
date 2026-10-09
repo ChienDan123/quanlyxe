@@ -951,6 +951,9 @@ function processRows(rows) {
     const match = FIELD_MAP.find(f => normalizeHeader(f.header) === norm);
     if (match) headerToKey[h] = match.key;
   });
+  // Module Quét phiếu: khớp 4 cột «Người sử dụng xe - Họ tên / Địa chỉ / Số CCCD / Số điện thoại» (AH–AK, sheet «Tong hop») theo tiêu đề thực tế
+  // khi tên cột lệch nhẹ (hàm do scan-review.js định nghĩa; chưa nạp thì bỏ qua — cột khớp đúng tên vẫn tự nhận bình thường).
+  if (typeof window.resolveUserColumns === 'function') window.resolveUserColumns(sampleHeaders, headerToKey);
 
   // Xác định cột "gia đình" (cột Y): ưu tiên tìm theo tên cột có chứa "gia đình",
   // nếu không thấy thì lấy đúng theo VỊ TRÍ cột Y (index 24) làm phương án dự phòng.

@@ -94,3 +94,22 @@
 .rv-party-f { display: flex; flex-direction: column; gap: 2px; font-size: 12px; font-weight: 600; }
 .rv-party-f input { width: 100%; box-sizing: border-box; }
 .rv-party-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+
+/* ---- Khung «Thêm thông tin mới» (trường người dùng tự thêm) ---- */
+.rv-custom { border: 1.5px dashed #5eead4; background: #f0fdfa; border-radius: 10px; padding: 6px 10px 8px; margin: 6px 0; }
+.rv-custom.on { border-style: solid; }
+.rv-custom-head { font-size: 12px; font-weight: 700; color: #0f766e; margin-bottom: 6px; }
+.rv-custom-head small { font-weight: 400; color: #6b7280; }
+.rv-cf-row { display: grid; grid-template-columns: 180px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 6px 0; border-bottom: 1px solid #ccfbf1; }
+.rv-cf-name { font-size: 12px; font-weight: 700; color: #115e59; padding-top: 6px; word-break: break-word; }
+.rv-cf-val { display: flex; flex-direction: column; gap: 2px; }
+.rv-cf-val input { width: 100%; box-sizing: border-box; }
+.rv-cf-act { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
+.rv-cf-add { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1.4fr) auto; gap: 8px; align-items: center; margin-top: 8px; }
+.rv-cf-add input { width: 100%; box-sizing: border-box; }
+.rv-cf-add [data-act="cf-apply-all"] { grid-column: 1 / -1; justify-self: start; }
+@media (max-width: 800px) {
+  .rv-cf-row, .rv-cf-add { grid-template-columns: 1fr; }
+  .rv-cf-act { justify-content: flex-start; }
+  .rv-cf-name { padding-top: 0; }
+}
