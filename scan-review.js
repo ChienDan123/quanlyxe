@@ -12,8 +12,9 @@
         Sheet; mỗi trường khác/thiếu có quyết định: Cập nhật / Không / Để kiểm sau.
      3. "Áp dụng": ghi qua updateSingleRowFields() -> LOCAL-FIRST rồi đồng bộ NGẦM lên
         Google Sheet bằng hàng đợi sẵn có của app (không phá luồng cũ).
-     4. Biển số KHÔNG có trong danh sách ("phiếu lạ") KHÔNG bao giờ được thêm vào dữ liệu
-        xe chính => không làm tăng số xe cần rà soát; chỉ đẩy sang tab riêng "PhieuLa".
+     4. Biển số KHÔNG có trong danh sách ("phiếu lạ"): khi bấm Cập nhật -> ghi 1 HÀNG TRỐNG MỚI vào sheet đang làm việc
+        (cột thiếu tự tạo, ô chưa có dữ liệu để trống; gửi lại không tạo hàng trùng). Nếu sau đó xác định trùng xe đã có
+        (đổi biển) -> chuyển dữ liệu về đúng dòng xe đó rồi XÓA hàng phiếu lạ.
    ========================================================================= */
 const ScanReview = (() => {
   'use strict';
@@ -85,10 +86,12 @@ const ScanReview = (() => {
      «Người mua - Họ tên / Địa chỉ / Số CCCD / Số điện thoại» và «Người sử dụng xe - …». Cột chưa có thì Apps Script (updateRow_) tự tạo thêm ở cột trống đầu tiên. */
   const PARTY_ROLES = { buyer: { label: 'Người mua', prefix: 'nguoiMua' }, user: { label: 'Người sử dụng xe', prefix: 'nguoiSuDung' } };
   const PARTY_FIELDS = [
-    { k: 'ten', suffix: 'Ten', label: 'Họ tên', from: 'chuXe' },          // from = khóa trong scanData dùng làm giá trị mặc định
+    // from = khóa trong scanData dùng làm giá trị mặc định (partyTen/partyCccd/partySdt do buildScanData tính theo quy tắc ĐKX);
+    // legacy = khóa của mục tạo từ bản cũ (chưa có partyXxx) -> vẫn dùng được
+    { k: 'ten', suffix: 'Ten', label: 'Họ tên', from: 'partyTen', legacy: 'chuXe' },
     { k: 'diaChi', suffix: 'DiaChi', label: 'Địa chỉ', from: null },       // phiếu chưa đọc địa chỉ -> người dùng nhập tay
-    { k: 'cccd', suffix: 'Cccd', label: 'Số CCCD', from: 'cccd' },
-    { k: 'sdt', suffix: 'Sdt', label: 'Số điện thoại', from: 'soDienThoai' },
+    { k: 'cccd', suffix: 'Cccd', label: 'Số CCCD', from: 'partyCccd', legacy: 'cccd' },
+    { k: 'sdt', suffix: 'Sdt', label: 'Số điện thoại', from: 'partySdt', legacy: 'soDienThoai' },
   ];
   const PARTY_OWNER_KEYS = ['chuXe', 'cccd', 'soDienThoai'];               // các trường «chủ xe» không còn so sánh khi phiếu là của người mua / người sử dụng
   const partyKey = (role, f) => PARTY_ROLES[role].prefix + f.suffix;
@@ -112,9 +115,20 @@ const ScanReview = (() => {
   }
   ensurePartyFields();
   // Giá trị đang định ghi cho 1 ô của người mua / người sử dụng: ưu tiên chỗ người dùng đã sửa, không thì lấy từ phiếu
-  const partyValue = (it, f) => String((it.partyEdits && f.k in it.partyEdits) ? it.partyEdits[f.k] : (f.from ? (it.scanData[f.from] || '') : '')).trim();
+  const partyDefault = (it, f) => !f.from ? '' : (f.from in it.scanData ? (it.scanData[f.from] || '') : (f.legacy ? (it.scanData[f.legacy] || '') : ''));
+  const partyValue = (it, f) => String((it.partyEdits && f.k in it.partyEdits) ? it.partyEdits[f.k] : partyDefault(it, f)).trim();
 
-  // Dữ liệu của 1 xe trên phiếu (thông tin chủ hộ dùng chung cho mọi xe cùng phiếu)
+  /* ---- QUY TẮC ĐỌC PHIẾU (chủ phiếu ≠ chủ phương tiện) ----
+     • «Chủ hộ» đầu phiếu = CHỦ PHIẾU (người khai) — có thể KHÔNG phải chủ xe.
+     • Từng dòng xe: «Tên trong ĐKX» = CHỦ PHƯƠNG TIỆN (chủ xe thật sự); dòng «Tên người mua / người sử dụng» = người đang dùng / mua xe.
+     • CHỈ KHI dòng xe không ghi tên ĐKX mới coi tên chủ phiếu là chủ phương tiện.
+     • CCCD / SĐT đầu phiếu thuộc CHỦ PHIẾU: chỉ đem so với chủ xe khi chủ phiếu chính là chủ xe; ngược lại chuyển sang «người mua / sử dụng».
+     Khóa trên từng xe do scan.js (prompt Gemini) trả về; chấp nhận vài tên gọi để không vỡ khi đổi tên khóa. */
+  const VEH_OWNER_KEYS = ['tenDKX', 'tenTrongDKX', 'chuPhuongTien', 'chuXe'];
+  const VEH_USER_KEYS = ['nguoiMuaSuDung', 'nguoiMua', 'nguoiSuDung', 'tenNguoiMua', 'tenNguoiSuDung'];
+  const pickStr = (o, keys) => { for (const k of keys) { const t = String((o && o[k]) == null ? '' : o[k]).trim(); if (t) return t; } return ''; };
+
+  // Dữ liệu của 1 xe trên phiếu (thông tin chủ phiếu dùng chung cho mọi xe cùng phiếu)
   function buildScanData(ex, v) {
     const code = v.tinhTrang || 'khong_ro';
     const label = S.TINH_TRANG_LABEL[code] || code;
@@ -122,8 +136,18 @@ const ScanReview = (() => {
     if (NOTEWORTHY(code)) notes.push(label);           // VD: "Đã bán chưa sang tên", "Mất cắp"
     if (v.ghiChu) notes.push(v.ghiChu);
     if (ex.ghiChu) notes.push(ex.ghiChu);              // ghi chú tay + ghi chú mặt 2
+    const chuPhieu = String(ex.chuHo || '').trim();
+    const tenDKX = pickStr(v, VEH_OWNER_KEYS), nguoiDung = pickStr(v, VEH_USER_KEYS);
+    const ownerName = tenDKX || chuPhieu;                                   // dòng xe không ghi tên ĐKX -> tên chủ phiếu là chủ phương tiện
+    const holderIsOwner = !tenDKX || (!!C.flat(tenDKX) && C.flat(tenDKX) === C.flat(chuPhieu));
     return {
-      chuXe: ex.chuHo || '', cccd: ex.cccd || '', soDienThoai: ex.sdt || '',
+      chuXe: ownerName,
+      cccd: holderIsOwner ? (pickStr(v, ['cccd']) || ex.cccd || '') : '',    // CCCD / SĐT của chủ phiếu chỉ so với chủ xe khi chủ phiếu = chủ xe
+      soDienThoai: holderIsOwner ? (pickStr(v, ['sdt', 'soDienThoai']) || ex.sdt || '') : '',
+      chuPhieu, tenDKX, nguoiDung, ownerFromHead: !tenDKX,
+      // Gợi ý «người mua / sử dụng»: tên ghi ở dòng xe; nếu không có mà chủ phiếu ≠ chủ xe thì chính chủ phiếu là người đang dùng
+      partyTen: nguoiDung || (holderIsOwner ? '' : chuPhieu),
+      partyCccd: holderIsOwner ? '' : (ex.cccd || ''), partySdt: holderIsOwner ? '' : (ex.sdt || ''),
       ghiChu: notes.join('; '),
       tinhTrangCamKet: (ex.loaiPhieu === 'ban_cam_ket' && ex.backHasContent) ? 'Đã ký cam kết' : '',
       tinhTrangCode: code, tinhTrangLabel: label, tinhTrangGoc: v.tinhTrangGhiTrenPhieu || '',
@@ -220,6 +244,7 @@ const ScanReview = (() => {
     it.edits = it.edits || {}; it.sheetEdits = it.sheetEdits || {}; it.fixed = it.fixed || {};
     it.decisions = it.decisions || {}; it.applied = it.applied || {}; it.imgChecked = !!it.imgChecked;
     it.source = it.source || {}; it.fieldChecked = it.fieldChecked || {}; it.sheetOk = it.sheetOk || {};
+    it.orphanSheet = !!it.orphanSheet; it.orphanStale = it.orphanStale || null;   // phiếu lạ đã ghi thành hàng mới / hàng thừa chờ xóa
     it.partyRole = it.partyRole || ''; it.partyEdits = it.partyEdits || {}; it.partyDoneAt = it.partyDoneAt || null;   // người mua / người sử dụng
     return it;
   }
@@ -436,22 +461,51 @@ const ScanReview = (() => {
     return { writes: wrote.length };
   }
 
-  // Đẩy các phiếu lạ lên tab riêng "PhieuLa" (cần patch Apps Script — xem AppsScript_ScanPatch.gs)
+  /* ---- PHIẾU LẠ → ghi 1 HÀNG TRỐNG MỚI vào chính sheet đang làm việc (không còn tab «PhieuLa») ----
+     Gửi theo TIÊU ĐỀ CỘT (kèm bí danh) để Apps Script tự khớp cột đúng; cột chưa có thì tự tạo ở cột trống đầu tiên; ô chưa có dữ liệu để trống.
+     Apps Script nhận dạng hàng bằng (biển số đã ghi + «mã phiếu» trong cột Phiếu scan) nên GỬI LẠI nhiều lần cũng không tạo hàng trùng
+     => phiếu lạ từng bị lỗi trước đây chỉ cần bấm «Cập nhật» lại là ghi được. */
+  const colSpec = (key) => {
+    const e = FIELD_MAP.find(f => f.key === key) || {}, al = [];
+    for (const p of Object.keys(e)) if (Array.isArray(e[p])) e[p].forEach(x => { if (typeof x === 'string') al.push(x); });   // bí danh tiêu đề (nếu app.js có)
+    return { key, header: e.header || key, aliases: [...new Set(al)] };
+  };
+  const currentSheetName = () => { try { return String((state && (state.sheetName || state.sheet || state.activeSheet)) || ''); } catch (e) { return ''; } };
+  const id8 = (it) => String(it.scanId).slice(0, 8);
+  const orphanPhieuText = (it) => `Có — ${it.sheetLabel} (mã ${id8(it)})`;      // cùng định dạng với meta khi áp dụng xe đã có
+  // Các ô của hàng phiếu lạ (chỉ ô có dữ liệu; Người mua / sử dụng chỉ ghi khi đã chọn vai trò)
+  function orphanCells(it) {
+    const val = {
+      bienSo: it.bienSoRaw || it.bienSo,
+      chuXe: scanValue(it, 'chuXe'), cccd: scanValue(it, 'cccd'), soDienThoai: scanValue(it, 'soDienThoai'),
+      trangThaiXe: scanValue(it, 'trangThaiXe') || (it.scanData.tinhTrangCode !== 'khong_ro' ? it.scanData.tinhTrangLabel : ''),
+      ghiChu: scanValue(it, 'ghiChu'), tinhTrangCamKet: scanValue(it, 'tinhTrangCamKet'), nguoiThucHien: scanValue(it, 'nguoiThucHien'),
+      phieuScan: orphanPhieuText(it), kiemPhieu: 'Đã kiểm',
+      ketQuaPhieu: [it.scanData.tinhTrangCode !== 'khong_ro' ? it.scanData.tinhTrangLabel : '', 'Phiếu lạ — chưa có trong DS', it.imgChecked ? '✔ đã kiểm với ảnh' : ''].filter(Boolean).join(' · '),
+    };
+    if (it.partyRole && PARTY_ROLES[it.partyRole]) PARTY_FIELDS.forEach(f => { val[partyKey(it.partyRole, f)] = partyValue(it, f); });
+    return Object.keys(val).filter(k => k === 'bienSo' || String(val[k] == null ? '' : val[k]).trim() !== '')
+      .map(k => ({ ...colSpec(k), value: String(val[k]) }));
+  }
+  const reloadSheetData = () => { try { const b = document.getElementById('btnReload'); if (b) b.click(); } catch (e) { /* bỏ qua */ } };
+  const gasErr = (res, def) => (res && res.error) || def;
+  const needPatch = (m) => /Unknown POST action/i.test(m) ? 'Apps Script chưa có action mới — dán PHẦN 5 của AppsScript_ScanPatch.gs, thêm 2 case vào scanDispatch_ rồi Deploy PHIÊN BẢN MỚI.' : m;
+
   async function pushOrphans(items) {
     if (!items.length) return { ok: true, n: 0 };
     if (!isWriteConnected()) return { ok: false, error: 'Chưa kết nối Apps Script 2 chiều.' };
-    const rows = items.map(it => ({
-      thoiGian: new Date().toLocaleString('vi-VN'), bienSo: it.bienSoRaw || it.bienSo,
-      chuHo: scanValue(it, 'chuXe'), cccd: scanValue(it, 'cccd'), sdt: scanValue(it, 'soDienThoai'),
-      tinhTrang: scanValue(it, 'trangThaiXe') || it.scanData.tinhTrangLabel, ghiChu: scanValue(it, 'ghiChu'), nguon: it.sheetLabel,
-      maPhieu: it.scanId.slice(0, 8), kiem: it.review === 'da_kiem' ? 'Đã kiểm' : 'Chưa kiểm',
-      nguoiThucHien: scanValue(it, 'nguoiThucHien'),
-    }));
     try {
-      const res = await gasRequest(state.gasUrl, { action: 'appendScanOrphans', rows });
-      if (!res || res.ok === false) return { ok: false, error: (res && res.error) || 'Apps Script chưa hỗ trợ action appendScanOrphans (xem AppsScript_ScanPatch.gs).' };
-      return { ok: true, n: rows.length };
-    } catch (e) { return { ok: false, error: String(e.message || e) }; }
+      const res = await gasRequest(state.gasUrl, { action: 'scanOrphanUpsert', sheetName: currentSheetName(),
+        rows: items.map(it => ({ scanId8: id8(it), plateRaw: String(it.bienSoRaw || it.bienSo), cells: orphanCells(it) })) });
+      if (!res || res.ok === false) return { ok: false, error: needPatch(gasErr(res, 'Apps Script không phản hồi.')) };
+      const by = {}; (res.results || []).forEach(r => { by[r.plateRaw] = r; });
+      items.forEach(it => {   // nhớ biển ĐÃ GHI + dòng, để sau này xóa đúng hàng nếu hóa ra trùng xe đã có
+        const r = by[String(it.bienSoRaw || it.bienSo)] || {};
+        it.orphanSheet = true; it.orphanSheetPlateRaw = String(it.bienSoRaw || it.bienSo); it.orphanSheetRow = r.row || null; it.orphanSheetName = res.sheet || '';
+      });
+      reloadSheetData();   // nạp lại để hàng mới hiện trong danh sách
+      return { ok: true, n: items.length, sheet: res.sheet };
+    } catch (e) { return { ok: false, error: needPatch(String(e.message || e)) }; }
   }
 
   async function applyOrphanItems(vs) {
@@ -460,16 +514,56 @@ const ScanReview = (() => {
       const it = v.it, dec = it.orphanDecision || 'later';
       it.orphan = true;
       it.result = [it.scanData.tinhTrangCode !== 'khong_ro' ? it.scanData.tinhTrangLabel : '', 'Chưa có trong DS'].filter(Boolean).join(' · ');
-      if (dec === 'apply' && it.bienSo && !it.orphanPushed) toPush.push(it);
+      if (dec === 'apply' && it.bienSo && !it.orphanSheet) toPush.push(it);
       // 'skip' = đã xem và quyết định không ghi => coi là đã kiểm; 'later' = để kiểm sau
-      it.review = (dec === 'later' || (dec === 'apply' && !it.orphanPushed)) ? 'chua_kiem' : 'da_kiem';
+      it.review = (dec === 'later' || (dec === 'apply' && !it.orphanSheet)) ? 'chua_kiem' : 'da_kiem';
     }
     if (toPush.length) {
       const r = await pushOrphans(toPush);
       toPush.forEach(it => { if (r.ok) { it.orphanPushed = true; it.review = 'da_kiem'; it.pushError = ''; } else { it.pushError = r.error; it.review = 'chua_kiem'; } });
       if (!r.ok) toast('Chưa ghi được phiếu lạ lên Sheet: ' + r.error, true);
+      else toast(`Đã ghi ${toPush.length} phiếu lạ vào hàng mới của sheet${r.sheet ? ' «' + r.sheet + '»' : ''}.`);
     }
-    for (const v of vs) { v.it.done = true; v.it.dirty = false; await saveItem(v.it); await recomputeLink(v.it.bienSo); }
+    for (const v of vs) {
+      const it = v.it, failed = it.orphanDecision === 'apply' && !!it.bienSo && !it.orphanSheet;
+      // Ghi lỗi => giữ ở trạng thái CHỜ ÁP DỤNG (trước đây bị đánh dấu xong nên bấm «Cập nhật» lại không thử lại được)
+      it.done = !failed; it.dirty = failed;
+      await saveItem(it); await recomputeLink(it.bienSo);
+    }
+  }
+
+  /* ---- PHIẾU LẠ THỰC RA TRÙNG XE ĐÃ CÓ: xóa đúng hàng phiếu lạ đã ghi ----
+     Server chỉ xóa hàng thỏa CẢ HAI: biển số đúng bằng biển đã ghi + cột Phiếu scan chứa đúng mã phiếu này. Không khớp thì không đụng gì. */
+  async function deleteOrphanRow(ref) {
+    if (!isWriteConnected()) return { ok: false, error: 'Chưa kết nối Apps Script 2 chiều.' };
+    try {
+      const res = await gasRequest(state.gasUrl, { action: 'scanOrphanDelete', sheetName: ref.sheetName || currentSheetName(), scanId8: ref.scanId8, plateRaw: ref.plateRaw,
+        plate: colSpec('bienSo'), phieu: colSpec('phieuScan') });
+      if (!res || res.ok === false) return { ok: false, error: needPatch(gasErr(res, 'Apps Script không phản hồi.')) };
+      return { ok: true, deleted: res.deleted || 0 };
+    } catch (e) { return { ok: false, error: needPatch(String(e.message || e)) }; }
+  }
+  // Thử xóa hàng phiếu lạ còn tồn đọng (it.orphanStale) — dùng khi đổi sang xe có sẵn hoặc bấm «Xóa hàng phiếu lạ»
+  async function cleanupOrphanRow(it) {
+    if (!it.orphanStale) return true;
+    const r = await deleteOrphanRow(it.orphanStale);
+    if (!r.ok) { it.pushError = 'Chưa xóa được hàng phiếu lạ: ' + r.error; await saveItem(it); toast(it.pushError, true); return false; }
+    it.orphanStale = null; it.pushError = ''; await saveItem(it);
+    reloadSheetData();   // hàng bị xóa làm dòng phía dưới dịch lên -> nạp lại để chỉ số dòng không lệch
+    toast(r.deleted ? 'Đã xóa hàng phiếu lạ trên Sheet.' : 'Hàng phiếu lạ không còn trên Sheet (đã xóa trước đó).');
+    return true;
+  }
+  // Sau khi đổi biển sang xe CÓ SẴN: chuyển dữ liệu phiếu vào đúng dòng xe đó (chỉ điền ô TRỐNG; ô khác biệt để người dùng quyết định, không ghi đè)
+  async function moveOrphanDataToExisting(it) {
+    const v = computeView(it); if (!v.found) return 0;
+    const fillKeys = v.fields.filter(f => !f.spec.meta && f.state === 'fill' && f.decision === 'apply' && f.writeVal != null).map(f => f.spec.key);
+    const r = await applyFoundItem(v, fillKeys);          // luôn ghi kèm Phiếu scan / Kiểm phiếu / Kết quả đối chiếu vào dòng xe có sẵn
+    if (it.partyRole && PARTY_ROLES[it.partyRole]) {      // người mua / sử dụng: cũng chỉ điền cột đang trống
+      const pw = {};
+      PARTY_FIELDS.forEach(f => { const k = partyKey(it.partyRole, f), nv = partyValue(it, f); if (nv && !String(v.row[k] || '').trim()) pw[k] = nv; });
+      if (Object.keys(pw).length) await updateSingleRowFields(v.row, pw);
+    }
+    return r.writes;
   }
 
   /* ------------------------------------------------------------------ */
@@ -628,7 +722,7 @@ const ScanReview = (() => {
       if (goc && it.scanData.tinhTrangCode !== 'khong_ro') scanExtra += `<div class="hint">Phiếu ghi: “${escapeHtml(goc)}”</div>`;
       if (isUnknownStatus(f.scanVal)) scanExtra += `<button type="button" class="btn btn-secondary btn-sm" data-act="add-status" data-id="${id}" data-field="${key}" title="Thêm vào danh sách Trạng thái xe ở trang chủ">➕ Thêm «${escapeHtml(f.scanVal)}» vào danh sách Trạng thái xe</button>`;
     }
-    if (orphan) dec = `<span class="hint">${f.spec.meta ? 'Ghi kèm khi lưu phiếu lạ.' : 'Xe chưa có trong DS — chỉ lưu vào tab «PhieuLa».'}</span>${btns}`;
+    if (orphan) dec = `<span class="hint">${f.spec.meta ? 'Ghi kèm khi lưu phiếu lạ.' : 'Xe chưa có trong DS — sẽ thêm thành hàng mới khi cập nhật.'}</span>${btns}`;
     else if (f.state === 'empty') dec = `<span class="hint">${key === 'nguoiThucHien' ? 'Chọn người thực hiện bên trái để ghi.' : 'Phiếu không có giá trị — nhập/chọn bên trái nếu nhìn ảnh thấy.'}</span>${btns}`;
     else if (f.state === 'same') dec = '<span class="rv-same">✔ Khớp</span>' + (f.note ? `<div class="hint">${escapeHtml(f.note)}</div>` : '') + btns;
     else {
@@ -722,7 +816,7 @@ const ScanReview = (() => {
   }
 
   // Khung «CẢ XE / CẢ PHIẾU»: các nút áp dụng cho TOÀN BỘ xe này (mọi trường khác biệt), tách hẳn khỏi nút của từng trường.
-  // Xe đã khớp: giữ hết Sheet / lấy hết phiếu / ký cam kết. Phiếu lạ: ghi tab «PhieuLa» / không ghi. Dùng cho cả thẻ lẫn khung ảnh.
+  // Xe đã khớp: giữ hết Sheet / lấy hết phiếu / ký cam kết. Phiếu lạ: thêm hàng mới vào sheet / không ghi. Dùng cho cả thẻ lẫn khung ảnh.
   function quickBarHtml(it, found) {
     const id = escapeHtml(it.id), plate = escapeHtml(it.bienSoRaw || it.bienSo || '');
     // Không còn ô tick «Đã kiểm ảnh»: trạng thái này tự bật khi người dùng xác nhận chọn nguồn (chỉ hiển thị, không bấm được)
@@ -735,7 +829,7 @@ const ScanReview = (() => {
       <button type="button" class="btn btn-ghost btn-sm" data-act="quick-sign" data-id="${id}" title="Đặt Tình trạng cam kết = ${escapeHtml(SIGNED)}">✍️ Phiếu đã ký cam kết</button>`;
     else btns = it.bienSo
       ? `<span class="rv-scope-lbl">Xe chưa có trong danh sách:</span>
-      <button type="button" class="btn btn-primary btn-sm" data-act="orphan-apply" data-id="${id}" title="Dữ liệu phiếu (đã chỉnh sửa) đúng: ghi vào tab PhieuLa, không đụng dữ liệu xe chính (sẽ hỏi xác nhận)">📷 Dữ liệu từ phiếu scan đúng → ghi tab PhieuLa</button>
+      <button type="button" class="btn btn-primary btn-sm" data-act="orphan-apply" data-id="${id}" title="Dữ liệu phiếu (đã chỉnh sửa) đúng: ghi thành 1 HÀNG MỚI ở cuối sheet đang làm việc, ô chưa có dữ liệu để trống (sẽ hỏi xác nhận)">📷 Dữ liệu từ phiếu scan đúng → thêm hàng mới</button>
       <button type="button" class="btn btn-ghost btn-sm" data-act="orphan-skip" data-id="${id}">⏭ Không ghi</button>`
       : '<span class="hint">Nhập biển số (ô bên trên) để đối chiếu / ghi.</span>';
     return `<div class="rv-scope">${head}<div class="rv-scope-body">${tick}<span class="rv-scope-sep" aria-hidden="true"></span>${btns}</div></div>`;
@@ -772,11 +866,20 @@ const ScanReview = (() => {
       cands.map(c => `<button type="button" class="btn btn-secondary btn-sm" data-act="pick-plate" data-id="${escapeHtml(it.id)}" data-plate="${escapeHtml(c.row.bienSo)}" title="${escapeHtml(c.row.chuXe || '')}">${escapeHtml(c.row.bienSo)}${c.row.chuXe ? ' · ' + escapeHtml(c.row.chuXe) : ''}</button>`).join(' ')
       : '<span class="hint">🔎 Không có biển nào khớp / gần giống trong DS — sửa lại biển số nếu scan sai, hoặc xử lý như phiếu lạ.</span>'}</div>`;
   }
+  const staleRow = (ref) => !!ref;
   async function onEditPlate(it, raw) {
     const rawT = String(raw || '').trim().toUpperCase(), plate = norm(rawT), oldPlate = it.bienSo;
     if (plate === it.bienSo && rawT === (it.bienSoRaw || '')) return;
     if (it.done && !confirm('Mục này đã được áp dụng cho biển «' + (it.bienSoRaw || '?') + '». Đổi biển số sẽ đối chiếu lại từ đầu (dữ liệu đã ghi trước đó KHÔNG tự hoàn tác — dùng «Quay lại bước trước» nếu cần). Tiếp tục?')) { rerenderCard(it); return; }
+    // Phiếu lạ ĐÃ ghi thành hàng mới trên Sheet mà nay đổi sang biển khác -> hàng đó thành thừa, phải xóa (nếu trùng xe có sẵn thì chuyển dữ liệu trước)
+    const staleRef = (it.orphanSheet && it.orphanSheetPlateRaw && norm(it.orphanSheetPlateRaw) !== plate)
+      ? { scanId8: id8(it), plateRaw: it.orphanSheetPlateRaw, sheetName: it.orphanSheetName || '' } : null;
+    const dupTarget = !!(staleRow(staleRef) && plate && dsIndex().has(plate));
+    if (staleRef && !confirm(dupTarget
+      ? `Biển «${rawT}» ĐÃ CÓ trong danh sách xe.\n\n• Dữ liệu phiếu sẽ được chuyển vào đúng dòng xe «${rawT}» (chỉ điền ô đang trống; ô khác biệt để bạn quyết định, không ghi đè).\n• Sau đó HÀNG PHIẾU LẠ «${staleRef.plateRaw}» đã ghi trước đó sẽ bị XÓA khỏi Sheet.\n\nTiếp tục?`
+      : `Phiếu «${staleRef.plateRaw}» đã được ghi thành hàng mới trên Sheet. Đổi sang biển «${rawT || '(trống)'}» (chưa có trong danh sách) sẽ XÓA hàng cũ đó; bạn bấm «Cập nhật» lại để ghi hàng mới với biển đúng. Tiếp tục?`)) { rerenderCard(it); return; }
     await track(it, `Sửa biển số ${it.bienSoRaw || '?'} → ${rawT || '?'}`, async () => {
+      if (staleRef) { it.orphanStale = staleRef; it.orphanSheet = false; it.orphanSheetPlateRaw = ''; it.orphanSheetRow = null; }
       it.bienSoRaw = rawT; it.bienSo = plate; it.plateEdited = true;
       // Đổi xe đích = đối chiếu lại từ đầu (giữ giá trị phiếu đã sửa tay; xác nhận đối chiếu ảnh cũ không còn đúng với xe mới nên xóa)
       it.fieldChecked = {}; it.imgChecked = false; it.imgCheckedAt = null;
@@ -785,6 +888,12 @@ const ScanReview = (() => {
       await saveItem(it);
     });
     await recomputeLink(oldPlate); await recomputeLink(plate);
+    if (staleRef) {
+      try {
+        if (dupTarget) await moveOrphanDataToExisting(it);            // 1) chuyển dữ liệu về đúng xe có sẵn  2) CHỈ KHI ghi xong mới xóa hàng lạ
+        await cleanupOrphanRow(it);
+      } catch (e) { it.pushError = 'Chuyển dữ liệu lỗi, CHƯA xóa hàng phiếu lạ: ' + (e.message || e); await saveItem(it); toast(it.pushError, true); }
+    }
     refreshMainTable(); rerenderCard(it);
     const found = plate && dsIndex().has(plate);
     toast(!plate ? 'Đã xóa biển số.' : (found ? `✔ Tìm thấy ${rawT} trong danh sách — đã tự đối chiếu.` : `Không có «${rawT}» trong danh sách — xem gợi ý biển gần giống.`), !plate ? false : !found);
@@ -796,16 +905,22 @@ const ScanReview = (() => {
     const badges = [`<span class="rv-badge ${cat}">${CAT_LABEL[cat]}${cat === 'diff' ? ` (${v.actionable})` : ''}</span>`,
       `<span class="rv-badge ${it.review}">${it.review === 'da_kiem' ? '✔ Đã kiểm' : '○ Chưa kiểm'}</span>`];
     if (it.imgChecked) badges.push('<span class="rv-badge applied">🖼 Đã kiểm với ảnh</span>');
+    if (it.scanData.partyTen && !it.partyRole) badges.push(`<span class="rv-badge warn" title="Theo phiếu: người mua / sử dụng ≠ chủ xe đứng tên ĐKX. Chọn mục «Thông tin trên phiếu là của» để ghi sang cột riêng.">👥 Người mua / sử dụng: ${escapeHtml(it.scanData.partyTen)}</span>`);
     if (v.rowCount > 1) badges.push(`<span class="rv-badge warn" title="Có ${v.rowCount} dòng cùng biển trên Sheet; chỉ cập nhật dòng đầu">⚠ ${v.rowCount} dòng trùng biển</span>`);
     if (it.done && !it.dirty) badges.push('<span class="rv-badge applied">Đã áp dụng</span>');
     let body = v.fields.map(f => fieldRowHtml(it, f, v)).join('');
+    if (it.orphanSheet && v.found) {   // hàng phiếu lạ đã ghi và đã tải lại -> vẫn cho xử lý nếu hóa ra trùng xe có sẵn
+      const cands = findPlateCandidates(it.bienSo);
+      body = `<div class="rv-row"><div class="rv-sugg" style="grid-column: 1 / -1"><span class="hint">🆕 Đây là hàng PHIẾU LẠ vừa thêm vào Sheet${it.orphanSheetRow ? ' (dòng ' + it.orphanSheetRow + ')' : ''}. Nếu thực ra là xe đã có, ${cands.length ? 'bấm biển gần giống:' : 'sửa biển số ở trên thành biển đúng'} — dữ liệu sẽ chuyển về xe đó và hàng này bị xóa.</span> ` +
+        cands.map(c => `<button type="button" class="btn btn-secondary btn-sm" data-act="pick-plate" data-id="${escapeHtml(it.id)}" data-plate="${escapeHtml(c.row.bienSo)}">${escapeHtml(c.row.bienSo)}${c.row.chuXe ? ' · ' + escapeHtml(c.row.chuXe) : ''}</button>`).join(' ') + '</div></div>' + body;
+    }
     if (cat === 'orphan') {   // phiếu lạ: vẫn đủ các trường để xem/sửa như phiếu đã khớp, thêm 1 dòng quyết định xử lý
       const dec = it.orphanDecision || 'later';
       body += `<div class="rv-row rv-orphan-row"><div class="rv-field">Xử lý phiếu lạ</div>
-        <div class="rv-cell left" style="grid-column: 2 / 4"><b>Không có trong danh sách xe.</b><div class="hint">Không tự gán sang biển gần giống. Sẽ KHÔNG thêm vào dữ liệu xe chính nên không tăng số xe cần rà soát; sửa biển số ở trên nếu scan sai.</div></div>
+        <div class="rv-cell left" style="grid-column: 2 / 4"><b>Không có trong danh sách xe.</b><div class="hint">Không tự gán sang biển gần giống. Khi bấm «Cập nhật» sẽ thêm 1 HÀNG MỚI cuối sheet (cột chưa có tự tạo, ô chưa có dữ liệu để trống). Nếu thực ra là xe đã có: bấm biển gần giống / sửa biển số ở trên — dữ liệu chuyển về đúng xe và hàng mới bị xóa.</div></div>
         <div class="rv-dec-cell">${it.bienSo ? `<select class="row-inline-select rv-dec rv-dec-${dec}" data-act="decide-orphan" data-id="${escapeHtml(it.id)}">` +
-          [['apply', '📥 Ghi vào tab "PhieuLa"'], ['skip', '⏭ Không ghi'], ['later', '🕓 Để kiểm sau']].map(([k, l]) => `<option value="${k}" ${dec === k ? 'selected' : ''}>${l}</option>`).join('') + '</select>' : '<span class="hint">Chưa có biển số — chỉ lưu local</span>'}
-          ${it.pushError ? `<div class="error-text">${escapeHtml(it.pushError)}</div>` : ''}${it.orphanPushed ? '<div class="rv-same">✔ Đã ghi lên tab PhieuLa</div>' : ''}</div></div>`;
+          [['apply', '📥 Thêm hàng mới vào sheet'], ['skip', '⏭ Không ghi'], ['later', '🕓 Để kiểm sau']].map(([k, l]) => `<option value="${k}" ${dec === k ? 'selected' : ''}>${l}</option>`).join('') + '</select>' : '<span class="hint">Chưa có biển số — chỉ lưu local</span>'}
+          ${it.pushError ? `<div class="error-text">${escapeHtml(it.pushError)}</div>` : ''}${it.orphanSheet ? `<div class="rv-same">✔ Đã ghi thành hàng mới${it.orphanSheetRow ? ' (dòng ' + it.orphanSheetRow + ')' : ''}</div>` : ''}${it.orphanStale ? `<div class="error-text">Còn hàng phiếu lạ «${escapeHtml(it.orphanStale.plateRaw)}» chưa xóa khỏi Sheet. <button type="button" class="btn btn-secondary btn-sm" data-act="orphan-cleanup" data-id="${escapeHtml(it.id)}">🧹 Xóa hàng phiếu lạ</button></div>` : ''}</div></div>`;
     }
     const focus = R.pane.open && R.pane.id === it.id ? ' rv-focus' : '';
     return `<div class="rv-card rv-${cat}${focus}" data-id="${escapeHtml(it.id)}">
@@ -868,7 +983,7 @@ const ScanReview = (() => {
     for (const v of todo) {
       const P = escapeHtml(v.it.bienSoRaw);
       if (!v.found) {
-        if ((v.it.orphanDecision) === 'apply' && v.it.bienSo) { orphanPush++; lines.push(`<li><b>${P}</b> (phiếu lạ) → thêm 1 dòng vào tab <b>PhieuLa</b></li>`); }
+        if ((v.it.orphanDecision) === 'apply' && v.it.bienSo) { orphanPush++; lines.push(`<li><b>${P}</b> (phiếu lạ) → thêm 1 <b>hàng mới</b> vào sheet</li>`); }
         continue;
       }
       let has = false;
@@ -1251,11 +1366,12 @@ const ScanReview = (() => {
         rerenderCard(it);
       }
       else if (act === 'orphan-apply' || act === 'orphan-skip') {
-        if (act === 'orphan-apply' && !confirmSource('scan', 'Xe chưa có trong danh sách' + (it.bienSoRaw ? ' ' + it.bienSoRaw : '') + ' — ghi vào tab PhieuLa')) return;
-        await mutateThenMaybeApply(it, act === 'orphan-apply' ? 'Phiếu lạ: ghi tab PhieuLa' : 'Phiếu lạ: không ghi', undefined, async () => {
+        if (act === 'orphan-apply' && !confirmSource('scan', 'Xe chưa có trong danh sách' + (it.bienSoRaw ? ' ' + it.bienSoRaw : '') + ' — thêm 1 hàng mới vào sheet đang làm việc')) return;
+        await mutateThenMaybeApply(it, act === 'orphan-apply' ? 'Phiếu lạ: thêm hàng mới vào sheet' : 'Phiếu lạ: không ghi', undefined, async () => {
           it.orphanDecision = act === 'orphan-apply' ? 'apply' : 'skip'; if (act === 'orphan-apply') it.imgChecked = true;
         });
       }
+      else if (act === 'orphan-cleanup') { await cleanupOrphanRow(it); rerenderCard(it); }
       else if (act === 'party-apply') await onPartyApply(it);
       else if (act === 'field-scan') await setFieldSource(it, b.dataset.field, 'scan');
       else if (act === 'field-sheet') await setFieldSource(it, b.dataset.field, 'sheet');
