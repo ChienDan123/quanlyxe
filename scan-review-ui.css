@@ -2,7 +2,8 @@
    scan-review-ui.css — BỐ CỤC MÀN ĐỐI CHIẾU (nạp SAU scan-review.css để ghi đè)
    Nguyên tắc: MỖI NÚT NẰM TRONG Ô MÀ NÓ NÓI ĐẾN.
      • Màu theo NGUỒN: 📷 phiếu scan = xanh dương · 📋 Google Sheet = xanh lá · ⚙ quyết định = xám.
-     • Nút «Phiếu scan đúng» nằm dưới ô giá trị phiếu; «Google Sheet đúng» nằm dưới ô giá trị Sheet; tick «Đã kiểm ảnh» nằm ở ô tên trường.
+     • Nút «Dữ liệu từ phiếu scan đúng» nằm dưới ô giá trị phiếu; «Google Sheet đúng» nằm dưới ô giá trị Sheet. Bấm nút nào cũng hỏi xác nhận;
+       xác nhận = đã đối chiếu ảnh, nên chỉ còn huy hiệu «🖼 Đã đối chiếu ảnh» (không bấm được) thay cho ô tick cũ.
      • Nút áp dụng CẢ XE nằm trong khung riêng viền cam, có tiêu đề «CẢ XE», tách hẳn khỏi các nút từng trường.
    ========================================================================= */
 :root {
@@ -51,6 +52,14 @@
 .rv-card .rv-split .rv-cell.left.picked { outline: 2px solid var(--rv-scan); outline-offset: -1px; }
 .rv-card .rv-split .rv-cell.right.picked { outline: 2px solid var(--rv-sheet); outline-offset: -1px; }
 
+/* Huy hiệu «đã đối chiếu ảnh» (chỉ hiển thị, không phải nút) */
+.rv-checked, .rv-unchecked { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; line-height: 1.5; }
+.rv-checked { background: #dcfce7; color: #166534; }
+.rv-unchecked { background: #f3f4f6; color: #6b7280; font-weight: 500; }
+.rv-card .rv-split .rv-field .rv-checked { margin-top: 4px; align-self: flex-start; }
+/* Nút chọn nguồn: tách khỏi ô nhập để khó bấm nhầm */
+.rv-pick-row { padding-top: 6px; border-top: 1px dashed #d1d5db; }
+
 /* Nhãn nguồn nhỏ trong mỗi ô: chỉ hiện khi bảng xếp dọc (không còn dòng tiêu đề cột nhìn thấy) */
 .rv-src-tag { display: none; font-size: 11px; font-weight: 700; margin-bottom: 3px; }
 .rv-src-tag.scan { color: var(--rv-scan); } .rv-src-tag.sheet { color: var(--rv-sheet); } .rv-src-tag.dec { color: #6b7280; }
@@ -69,3 +78,19 @@
   .rv-src-tag, .rv-work.with-pane .rv-card .rv-split .rv-dec-cell .rv-src-tag.dec { display: block; }
   .rv-pick { padding: 10px 8px; }                                 /* nút to hơn cho ngón tay */
 }
+
+/* ---- Biển số hiện ngay trên thanh sticky (ô đầu tiên của tiêu đề cột) ---- */
+.rv-card .rv-split-head > .rv-head-plate { background: #111827; color: #fff; border-bottom-color: #111827; font-size: 13px; letter-spacing: .03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- Tick «Chủ xe đã chết» trong ô Google Sheet ---- */
+.rv-dead { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 12px; color: #6b7280; cursor: pointer; }
+.rv-dead.on { color: #991b1b; font-weight: 700; }
+
+/* ---- Khung «Người mua / Người sử dụng xe» ---- */
+.rv-party { border: 1.5px dashed #c4b5fd; background: #faf5ff; border-radius: 10px; padding: 6px 10px 8px; margin: 6px 0; }
+.rv-party.on { border-style: solid; }
+.rv-party-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: #6d28d9; }
+.rv-party-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; margin-top: 6px; }
+.rv-party-f { display: flex; flex-direction: column; gap: 2px; font-size: 12px; font-weight: 600; }
+.rv-party-f input { width: 100%; box-sizing: border-box; }
+.rv-party-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }

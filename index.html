@@ -618,8 +618,16 @@
           <option value="da_kiem">Đã kiểm</option>
           <option value="img_chua">🖼 Chưa kiểm với ảnh</option>
           <option value="img_da">🖼 Đã kiểm với ảnh</option>
+          <option value="later">🕓 Để kiểm sau</option>
+          <option value="pending">⏳ Chờ áp dụng</option>
+          <option value="applied">✔ Đã áp dụng</option>
+          <option value="party">👥 Có người mua / người sử dụng</option>
+          <option value="party_todo">👥 Chưa cập nhật người mua / sử dụng</option>
+          <option value="dead">⚰ Chủ xe đã chết</option>
           <option value="all">Tất cả</option>
         </select>
+        <!-- Lọc theo tên người kiểm (= Người thực hiện); danh sách được script nạp -->
+        <select id="rvChecker" class="tpl-input" style="width:auto" title="Lọc theo người kiểm"></select>
         <input id="rvSearch" class="tpl-input" type="search" placeholder="Tìm biển số / chủ xe…" style="max-width:220px">
         <!-- Người thực hiện: cùng danh sách với cột «Người thực hiện» ở bảng chính; ghi kèm khi áp dụng -->
         <label class="rv-tool-lbl" title="Ghi vào cột «Người thực hiện» của mỗi xe khi áp dụng (Sheet đã có người khác thì giữ nguyên)">👤 Người thực hiện:
