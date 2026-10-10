@@ -577,7 +577,13 @@ const ScanReview = (() => {
     try { r = await gasCall({ action: 'scanPing' }); } catch (e) { return String(e.message || e); }
     if (!r || r.ok === false) {
       const m = gasErr(r, '');
-      return /Unknown POST action/i.test(m) ? 'Apps Script chưa nối doPost với scanDispatch_ (báo «Unknown POST action»). Dán AppsScript_DoPost.gs vào dự án (chỉ được có 1 hàm doPost) → Deploy phiên bản mới.' : (m || 'Apps Script không phản hồi đúng.');
+      if (/Unknown POST action/i.test(m)) {
+        const id = ((String(state.gasUrl || '').match(/\/s\/([^/]+)\//) || [])[1]) || '';
+        const tail = id ? id.slice(0, 6) + '…' + id.slice(-8) : String(state.gasUrl || '(chưa có URL)');
+        // Code mới đã chạy đúng trong trình soạn thảo mà web vẫn báo lỗi này ⇒ web đang gọi bản triển khai CŨ / dự án khác
+        return 'Bản triển khai mà web đang gọi (ID ' + tail + ') chưa chạy code mới (nó trả: «' + m + '»). Vào Apps Script → Triển khai → Quản lý bản triển khai: bản có ID đó phải được sửa sang «Phiên bản mới»; nếu danh sách không có ID đó, hãy tạo «Bản triển khai mới» rồi dán URL /exec mới vào ô kết nối của web.';
+      }
+      return m || 'Apps Script không phản hồi đúng.';
     }
     if (!(r.actions || []).includes('scanOrphanUpsert') || Number(r.version || 0) < 6)
       return 'Apps Script đang chạy BẢN CŨ (version ' + (r.version || '?') + '). Xóa sạch file «Ma lenh luu anh.gs», dán lại AppsScript_ScanPatch.gs rồi Deploy → Phiên bản mới (không dùng «Bản triển khai mới»).';
