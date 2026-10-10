@@ -554,15 +554,46 @@ const ScanReview = (() => {
   }
   const reloadSheetData = () => { try { const b = document.getElementById('btnReload'); if (b) b.click(); } catch (e) { /* bỏ qua */ } };
   const gasErr = (res, def) => (res && res.error) || def;
-  const needPatch = (m) => /Unknown POST action/i.test(m) ? 'Apps Script chưa có action mới — dán PHẦN 5 của AppsScript_ScanPatch.gs, thêm 2 case vào scanDispatch_ rồi Deploy PHIÊN BẢN MỚI.' : m;
+  const needPatch = (m) => /Unknown POST action/i.test(m) ? 'doPost của Apps Script chưa nối với scanDispatch_ — dán AppsScript_DoPost.gs vào dự án (trong dự án chỉ được có 1 hàm doPost), rồi Deploy PHIÊN BẢN MỚI.' : m;
+
+  // Gọi Apps Script (POST text/plain như gasRequest) nhưng NÉM LỖI RÕ RÀNG khi mạng hỏng / trả về trang HTML (chưa cấp quyền, sai URL, lỗi code)
+  async function gasCall(payload) {
+    let text;
+    try {
+      const res = await fetch(state.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
+      text = await res.text();
+    } catch (e) { throw new Error('Không gọi được Apps Script (mất mạng, URL sai, hoặc bản triển khai chưa đặt «Ai cũng truy cập được»): ' + (e.message || e)); }
+    try { return JSON.parse(text); }
+    catch (e) {
+      const t = String(text || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+      throw new Error('Apps Script trả về trang lỗi thay vì dữ liệu: «' + t + '». Thường do: chưa cấp quyền khi Deploy, URL không phải bản /exec đã triển khai, hoặc code Apps Script bị lỗi.');
+    }
+  }
+  // Hỏi Apps Script «bạn đang chạy bản nào» TRƯỚC khi ghi phiếu lạ → báo ĐÚNG nguyên nhân thay vì im lặng. Trả null nếu ổn, ngược lại trả câu báo lỗi.
+  let _orphanBackendOk = false;
+  async function checkOrphanBackend() {
+    if (_orphanBackendOk) return null;
+    let r;
+    try { r = await gasCall({ action: 'scanPing' }); } catch (e) { return String(e.message || e); }
+    if (!r || r.ok === false) {
+      const m = gasErr(r, '');
+      return /Unknown POST action/i.test(m) ? 'Apps Script chưa nối doPost với scanDispatch_ (báo «Unknown POST action»). Dán AppsScript_DoPost.gs vào dự án (chỉ được có 1 hàm doPost) → Deploy phiên bản mới.' : (m || 'Apps Script không phản hồi đúng.');
+    }
+    if (!(r.actions || []).includes('scanOrphanUpsert') || Number(r.version || 0) < 6)
+      return 'Apps Script đang chạy BẢN CŨ (version ' + (r.version || '?') + '). Xóa sạch file «Ma lenh luu anh.gs», dán lại AppsScript_ScanPatch.gs rồi Deploy → Phiên bản mới (không dùng «Bản triển khai mới»).';
+    _orphanBackendOk = true; return null;
+  }
 
   async function pushOrphans(items) {
     if (!items.length) return { ok: true, n: 0 };
-    if (!isWriteConnected()) return { ok: false, error: 'Chưa kết nối Apps Script 2 chiều.' };
+    if (!isWriteConnected()) return { ok: false, error: 'Chưa kết nối Apps Script 2 chiều (đang ở chế độ chỉ đọc) — vào «Kết nối» và chọn chế độ Apps Script.' };
+    const bad = await checkOrphanBackend();                       // báo đúng nguyên nhân nếu Apps Script chưa sẵn sàng
+    if (bad) return { ok: false, error: bad };
     try {
-      const res = await gasRequest(state.gasUrl, { action: 'scanOrphanUpsert', sheetName: currentSheetName(), plate: colSpec('bienSo'),
+      const res = await gasCall({ action: 'scanOrphanUpsert', sheetName: currentSheetName(), plate: colSpec('bienSo'),
         rows: items.map(it => ({ plateRaw: String(it.bienSoRaw || it.bienSo), cells: orphanCells(it) })) });
       if (!res || res.ok === false) return { ok: false, error: needPatch(gasErr(res, 'Apps Script không phản hồi.')) };
+      if (!Array.isArray(res.results) || res.results.length < items.length) return { ok: false, error: 'Apps Script trả về thiếu kết quả (' + (res.results || []).length + '/' + items.length + ') — chưa chắc đã ghi, hãy bấm lại.' };
       const by = {}; (res.results || []).forEach(r => { by[r.plateRaw] = r; });
       items.forEach(it => {   // nhớ biển ĐÃ GHI + dòng, để sau này xóa đúng hàng nếu hóa ra trùng xe đã có
         const r = by[String(it.bienSoRaw || it.bienSo)] || {};
@@ -572,28 +603,31 @@ const ScanReview = (() => {
     } catch (e) { return { ok: false, error: needPatch(String(e.message || e)) }; }
   }
 
+  // Trả về { pushed, failed, error, sheet, notes[] } — applyViews gom lại thành 1 thông báo (trước đây toast lỗi bị toast «Đã áp dụng» ghi đè nên người dùng thấy như im lặng).
   async function applyOrphanItems(vs) {
-    const toPush = [];
+    const toPush = [], out = { pushed: 0, failed: 0, error: '', sheet: '', notes: [] };
     for (const v of vs) {
       const it = v.it, dec = it.orphanDecision || 'later';
       it.orphan = true;
       it.result = [it.scanData.tinhTrangCode !== 'khong_ro' ? it.scanData.tinhTrangLabel : '', 'Chưa có trong DS'].filter(Boolean).join(' · ');
       if (dec === 'apply' && it.bienSo && !it.orphanSheet) toPush.push(it);
+      else if (dec === 'apply' && !it.bienSo) out.notes.push(`«${it.bienSoRaw || '(chưa có biển)'}»: chưa có biển số nên KHÔNG ghi được — nhập biển số rồi bấm lại`);
+      else if (dec === 'later') out.notes.push(`«${it.bienSoRaw || it.bienSo}»: đang ở «Để kiểm sau» nên CHƯA ghi — bấm nút «📷 Dữ liệu từ phiếu scan đúng → ghi phiếu lạ» để ghi`);
       // 'skip' = đã xem và quyết định không ghi => coi là đã kiểm; 'later' = để kiểm sau
       it.review = (dec === 'later' || (dec === 'apply' && !it.orphanSheet)) ? 'chua_kiem' : 'da_kiem';
     }
     if (toPush.length) {
       const r = await pushOrphans(toPush);
       toPush.forEach(it => { if (r.ok) { it.orphanPushed = true; it.review = 'da_kiem'; it.pushError = ''; } else { it.pushError = r.error; it.review = 'chua_kiem'; } });
-      if (!r.ok) toast('Chưa ghi được phiếu lạ lên Sheet: ' + r.error, true);
-      else toast(`Đã ghi ${toPush.length} phiếu lạ vào cột AL–AP (hàng mới) của sheet${r.sheet ? ' «' + r.sheet + '»' : ''}.`);
+      if (r.ok) { out.pushed = toPush.length; out.sheet = r.sheet || ''; } else { out.failed = toPush.length; out.error = r.error; }
     }
     for (const v of vs) {
       const it = v.it, failed = it.orphanDecision === 'apply' && !!it.bienSo && !it.orphanSheet;
-      // Ghi lỗi => giữ ở trạng thái CHỜ ÁP DỤNG (trước đây bị đánh dấu xong nên bấm «Cập nhật» lại không thử lại được)
+      // Ghi lỗi => giữ ở trạng thái CHỜ ÁP DỤNG (để bấm «Cập nhật» lại là thử lại)
       it.done = !failed; it.dirty = failed;
       await saveItem(it); await recomputeLink(it.bienSo);
     }
+    return out;
   }
 
   /* ---- PHIẾU LẠ THỰC RA TRÙNG XE ĐÃ CÓ: xóa đúng hàng phiếu lạ đã ghi ----
@@ -601,7 +635,7 @@ const ScanReview = (() => {
   async function deleteOrphanRow(ref) {
     if (!isWriteConnected()) return { ok: false, error: 'Chưa kết nối Apps Script 2 chiều.' };
     try {
-      const res = await gasRequest(state.gasUrl, { action: 'scanOrphanDelete', sheetName: ref.sheetName || currentSheetName(), scanId8: ref.scanId8, plateRaw: ref.plateRaw,
+      const res = await gasCall({ action: 'scanOrphanDelete', sheetName: ref.sheetName || currentSheetName(), scanId8: ref.scanId8, plateRaw: ref.plateRaw,
         plate: colSpec('bienSo') });
       if (!res || res.ok === false) return { ok: false, error: needPatch(gasErr(res, 'Apps Script không phản hồi.')) };
       return { ok: true, deleted: res.deleted || 0 };
@@ -1210,7 +1244,7 @@ const ScanReview = (() => {
   // pre (tùy chọn) = { [itemId]: bản chụp mục TRƯỚC thao tác chọn nguồn } để gộp "chọn + áp dụng" thành 1 bước lịch sử
   async function applyViews(vs, label, onlyKeys, pre) {
     R.busy = true; renderFooter(); updateHistoryButtons();
-    let ok = 0, writes = 0;
+    let ok = 0, writes = 0, orphanRes = null;
     const orphans = vs.filter(v => !v.found);
     const founds = vs.filter(v => v.found);
     const changes = [];
@@ -1224,13 +1258,22 @@ const ScanReview = (() => {
       }
       if (orphans.length) {
         const olds = orphans.map(v => clone(v.it));
-        await applyOrphanItems(orphans);
+        orphanRes = await applyOrphanItems(orphans);
         orphans.forEach((v, i) => changes.push({ id: v.it.id, before: olds[i], after: clone(v.it) }));
       }
     } finally { R.busy = false; }
     record(onlyKeys ? 'Áp dụng riêng 1 trường' : (vs.length === 1 ? 'Áp dụng xe ' + (vs[0].it.bienSoRaw || '') : `Áp dụng ${vs.length} mục`), changes);
     R.items = (await DB.dbGetAll(ST_ITEMS)).map(normItem);
-    toast(`Đã áp dụng ${ok + orphans.length} mục (${writes} trường cập nhật). ` + (isWriteConnected() ? 'Đang đồng bộ ngầm lên Google Sheet…' : 'Mới lưu trên máy (chưa kết nối ghi Sheet).'));
+    // Thông báo TRUNG THỰC: phiếu lạ ghi lỗi / chưa ghi thì báo ĐỎ, không nói «đã áp dụng»
+    const parts = [];
+    if (ok) parts.push(`Đã áp dụng ${ok} xe (${writes} trường cập nhật)` + (isWriteConnected() ? ', đang đồng bộ ngầm lên Google Sheet' : ', mới lưu trên máy'));
+    if (orphanRes && orphanRes.pushed) parts.push(`Đã ghi ${orphanRes.pushed} phiếu lạ vào cột AL–AP (hàng mới) của sheet${orphanRes.sheet ? ' «' + orphanRes.sheet + '»' : ''}`);
+    if (orphanRes && orphanRes.failed) parts.push(`CHƯA ghi được ${orphanRes.failed} phiếu lạ lên Sheet: ${orphanRes.error}`);
+    if (orphanRes && orphanRes.notes.length) parts.push(orphanRes.notes.join('; '));
+    if (!parts.length) parts.push('Không có gì để áp dụng.');
+    const orphanProblem = !!orphanRes && (orphanRes.failed > 0 || (!orphanRes.pushed && orphanRes.notes.length > 0));
+    toast(parts.join('. ') + '.', orphanProblem);
+    if (orphanProblem) { clearTimeout(toast._t); toast._t = setTimeout(() => { const el = $('#toast'); if (el) el.classList.add('hidden'); }, 12000); }   // lỗi hiển thị lâu hơn để kịp đọc
     renderReview();
     refreshMainTable();
     updateHistoryButtons();
@@ -1293,11 +1336,11 @@ const ScanReview = (() => {
 
   const isWriteConnectedOrLocal = () => state.rawData.length > 0; // local-first: vẫn áp dụng được khi chưa nối Sheet 2 chiều
   // Chạy thao tác chọn nguồn rồi (nếu bật «Xác nhận nhanh») áp dụng luôn; cả hai gộp thành 1 bước lịch sử.
-  async function mutateThenMaybeApply(it, label, onlyKeys, fn) {
+  async function mutateThenMaybeApply(it, label, onlyKeys, fn, force) {   // force = true: ghi NGAY dù ô «áp dụng ngay» đang tắt
     const before = clone(it);
     await fn();
     it.dirty = true; await saveItem(it);
-    if (prefs.quick && isWriteConnectedOrLocal()) await applyViews([computeView(it)], 'Đang áp dụng', onlyKeys, { [it.id]: before });
+    if ((force || prefs.quick) && isWriteConnectedOrLocal()) await applyViews([computeView(it)], 'Đang áp dụng', onlyKeys, { [it.id]: before });
     else { record(label, [{ id: it.id, before, after: clone(it) }]); rerenderCard(it); }
   }
 
@@ -1531,9 +1574,11 @@ const ScanReview = (() => {
       }
       else if (act === 'orphan-apply' || act === 'orphan-skip') {
         if (act === 'orphan-apply' && !confirmSource('scan', 'Xe chưa có trong danh sách' + (it.bienSoRaw ? ' ' + it.bienSoRaw : '') + ' — thêm 1 hàng mới vào sheet đang làm việc')) return;
+        // «Ghi phiếu lạ» là thao tác CHỦ ĐỘNG (đã hỏi xác nhận) → ghi lên Sheet ngay. Server nhận dạng hàng theo biển số nên gửi lại không tạo hàng trùng.
         await mutateThenMaybeApply(it, act === 'orphan-apply' ? 'Phiếu lạ: thêm hàng mới vào sheet' : 'Phiếu lạ: không ghi', undefined, async () => {
-          it.orphanDecision = act === 'orphan-apply' ? 'apply' : 'skip'; if (act === 'orphan-apply') it.imgChecked = true;
-        });
+          it.orphanDecision = act === 'orphan-apply' ? 'apply' : 'skip';
+          if (act === 'orphan-apply') { it.imgChecked = true; it.orphanSheet = false; it.pushError = ''; }   // bỏ cờ «đã ghi» cũ (có thể sót từ lần lỗi) để gửi lại thật sự
+        }, act === 'orphan-apply');
       }
       else if (act === 'orphan-cleanup') { await cleanupOrphanRow(it); rerenderCard(it); }
       else if (act === 'party-apply') await onPartyApply(it);
