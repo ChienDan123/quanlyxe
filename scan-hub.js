@@ -17,7 +17,10 @@ const ScanHub = (() => {
   const LS = 'vehicleScanHubV1';                       // trạng thái đồng bộ của máy này (mốc thời gian từng phần)
   const PREF_KEY = 'vehicleScanPrefsV1';               // trùng PREF_KEY trong scan-review.js
   const ASK_KEY = 'vehicleScanImgAskV1';               // đã hỏi «tải ảnh về máy?» chưa
-  const GEM_IDS = { model: 'geminiModel', timeout: 'geminiTimeout', maxWait: 'geminiMaxWait' };
+  const GEM_IDS = { model: 'geminiModel', fallback: 'geminiFallback', timeout: 'geminiTimeout', maxWait: 'geminiMaxWait' };
+  const GEM_OPTIONAL = { fallback: 1 };               // ô được phép để TRỐNG (vd. người dùng cố ý xóa hết model dự phòng)
+  const GEM_VER = 2;                                   // v2: có thêm model dự phòng + mặc định mới (gemini-3.8-flash)
+  const OLD_DEFAULT_MODEL = 'gemini-2.5-flash';        // mặc định cũ — cấu hình v1 trên hub mang giá trị này thì KHÔNG được đè model mới của máy
   const TICK_MS = 180000;                              // kiểm tra thay đổi từ máy khác mỗi 3 phút (1 request rất nhẹ)
   const H = { busy: false, again: false, error: '', lastOk: 0 };
   let applying = false;                                // đang tự điền ô nhập từ hub -> không coi là người dùng sửa
@@ -36,7 +39,12 @@ const ScanHub = (() => {
   /* ---- Cài đặt Gemini: đọc/ghi qua ô nhập trên màn Cài đặt (scan.js tự lưu khi nhận sự kiện change) ---- */
   function readGem() {
     const o = {};
-    for (const k of Object.keys(GEM_IDS)) { const el = document.getElementById(GEM_IDS[k]); if (!el || el.value === '') return null; o[k] = el.value; }
+    for (const k of Object.keys(GEM_IDS)) {
+      const el = document.getElementById(GEM_IDS[k]);
+      if (!el || (el.value === '' && !GEM_OPTIONAL[k])) return null;   // ô bắt buộc chưa nạp xong -> bỏ qua lượt này
+      o[k] = el.value;
+    }
+    o.ver = GEM_VER;
     return o;
   }
   function applyGem(g) {
@@ -44,7 +52,7 @@ const ScanHub = (() => {
     try {
       for (const k of Object.keys(GEM_IDS)) {
         const el = document.getElementById(GEM_IDS[k]);
-        if (!el || g[k] == null || el.value === String(g[k])) continue;
+        if (!el || g[k] == null || el.value === String(g[k])) continue;   // hub chưa có khóa này (bản cũ) -> giữ giá trị máy
         el.value = g[k]; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
       }
     } finally { applying = false; }
@@ -104,7 +112,15 @@ const ScanHub = (() => {
       const gem = readGem();
       if (gem) {
         if (!remote.gem && L.gemAt === undefined) L.gemAt = Date.now();                   // hub chưa có gì -> lấy giá trị hiện tại của máy này làm gốc
-        if (remote.gem && remote.gem.at > (L.gemAt || 0)) { applyGem(remote.gem.val); L.gemAt = remote.gem.at; applied.push('cài đặt Gemini'); }
+        if (remote.gem && remote.gem.at > (L.gemAt || 0)) {
+          const rv = { ...remote.gem.val };
+          // Cấu hình v1 trên hub còn giữ model mặc định cũ (2.5-flash): không áp xuống, nếu không sẽ kéo máy đã nâng cấp quay về model cũ hay bị 503
+          const stale = !rv.ver && rv.model === OLD_DEFAULT_MODEL;
+          if (stale) delete rv.model;
+          applyGem(rv); applied.push('cài đặt Gemini');
+          if (stale) { L.gemAt = Date.now(); doc.gem = { val: readGem() || gem, at: L.gemAt }; push = true; }   // đẩy bản đã nâng cấp lên hub cho các máy khác
+          else L.gemAt = remote.gem.at;
+        }
         else if ((L.gemAt || 0) > ((remote.gem && remote.gem.at) || 0)) { doc.gem = { val: gem, at: L.gemAt }; push = true; }
       }
 

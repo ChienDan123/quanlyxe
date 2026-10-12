@@ -6,7 +6,8 @@
    Sprint 1 gồm:
      1. Schema IndexedDB riêng cho module quét (scans / apiKeys / settings).
      2. Quản lý nhiều API key Gemini (thêm/xóa/bật-tắt/kiểm tra) trong Cài đặt.
-     3. Hàm gọi Gemini có XOAY KEY + cooldown + chờ quota + phân loại lỗi.
+     3. Hàm gọi Gemini có XOAY KEY + XOAY MODEL (fallback) + cooldown + chờ quota + phân loại lỗi
+        (503 = model quá tải -> cooldown MODEL 30–90s, không phạt key; 429 -> cooldown theo cặp key×model).
      4. Form thử 1 phiếu (mặt 1 + mặt 2 tuỳ chọn) -> Gemini -> JSON -> panel debug.
 
    ---- CHỌN CSDL: IndexedDB (API gốc, KHÔNG dùng Dexie) ----
@@ -52,8 +53,8 @@ const ScanApp = (() => {
        matchedBienSo: string[]        // Sprint 2-3: biển khớp DS xe
      }
      apiKeys: { id, label, key, enabled, status:'ok'|'invalid', lastUsed,
-                errorCount, cooldownUntil, lastError, createdAt }
-     settings: { name:'main', model, timeoutSec, maxWaitRounds, maxEdgePx } */
+                errorCount, cooldownUntil, quotaCooldowns:{[model]:{until,count}}, lastError, createdAt }
+     settings: { name:'main', model, fallbackModels[], timeoutSec, maxWaitRounds, maxEdgePx, settingsVer } */
   let _dbPromise = null;
   function openDb() {
     if (_dbPromise) return _dbPromise;
@@ -248,18 +249,53 @@ const ScanApp = (() => {
   }
 
   /* ---------------------------- 3. CÀI ĐẶT MODULE ---------------------------- */
+  // Model mặc định + danh sách dự phòng (thử lần lượt khi model trước bị 503 quá tải / 429 hết quota / 404 không tồn tại)
+  const DEFAULT_MODEL = 'gemini-3.8-flash';
+  const DEFAULT_FALLBACK_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
+  const OLD_DEFAULT_MODEL = 'gemini-2.5-flash';   // mặc định cũ -> tự nâng lên mặc định mới (xem loadSettings)
+  const SETTINGS_VER = 2;                         // v2: thêm fallbackModels + đổi model mặc định
+
   const DEFAULT_SETTINGS = {
     name: 'main',
-    model: 'gemini-2.5-flash', // sửa được trong Cài đặt (tên model Gemini thay đổi theo thời gian)
+    model: DEFAULT_MODEL,                      // model CHÍNH — sửa được trong Cài đặt (tên model Gemini thay đổi theo thời gian)
+    fallbackModels: [...DEFAULT_FALLBACK_MODELS], // model DỰ PHÒNG theo thứ tự ưu tiên — sửa được trong Cài đặt
     timeoutSec: 90,
-    maxWaitRounds: 4,          // số lần chờ khi MỌI key đang cooldown, rồi mới báo lỗi
+    maxWaitRounds: 4,          // số lần chờ khi MỌI (model × key) đang cooldown, rồi mới báo lỗi
     maxEdgePx: 2000,
     pagesPerSheet: 2,          // 2 = mỗi tờ gồm 2 trang/ảnh liên tiếp (mặt trước + sau); 1 = mỗi trang là 1 tờ
     skipDuplicates: true,      // bỏ qua tờ đã quét (trùng hash ảnh mặt 1)
   };
+
+  // Chuẩn hóa tên model: bỏ tiền tố "models/", chỉ giữ ký tự hợp lệ, bỏ trùng. Nhận mảng hoặc chuỗi "a, b, c".
+  function normalizeModelList(v) {
+    const arr = Array.isArray(v) ? v : String(v == null ? '' : v).split(/[,;\n\s]+/);
+    const out = [];
+    for (let m of arr) {
+      m = String(m || '').trim().replace(/^models\//i, '');
+      if (m && /^[A-Za-z0-9._-]+$/.test(m) && !out.includes(m)) out.push(m);
+    }
+    return out;
+  }
+  // Chuỗi model sẽ thử: model chính rồi tới các model dự phòng (không trùng)
+  const modelChain = (st) => normalizeModelList([st.model || DEFAULT_MODEL, ...(st.fallbackModels || [])]);
+  let _chainCache = [];   // chuỗi model gần nhất (để chip trạng thái key biết đang xét model nào)
+
   async function loadSettings() {
-    try { return { ...DEFAULT_SETTINGS, ...((await dbGet(ST_SETTINGS, 'main')) || {}) }; }
-    catch (e) { return { ...DEFAULT_SETTINGS }; }
+    let stored = {};
+    try { stored = (await dbGet(ST_SETTINGS, 'main')) || {}; } catch (e) { return { ...DEFAULT_SETTINGS, fallbackModels: [...DEFAULT_FALLBACK_MODELS] }; }
+    const st = { ...DEFAULT_SETTINGS, ...stored };
+    // Migrate 1 lần: người dùng cũ đang lưu 'gemini-2.5-flash' (mặc định cũ) -> đổi sang mặc định mới.
+    // Model do người dùng TỰ ĐẶT khác mặc định cũ thì giữ nguyên.
+    if ((stored.settingsVer || 0) < SETTINGS_VER) {
+      if (!stored.model || stored.model === OLD_DEFAULT_MODEL) st.model = DEFAULT_MODEL;
+      if (!Array.isArray(stored.fallbackModels)) st.fallbackModels = [...DEFAULT_FALLBACK_MODELS];
+      st.settingsVer = SETTINGS_VER;
+      try { await dbPut(ST_SETTINGS, { ...st, name: 'main' }); } catch (e) { /* bỏ qua, lần sau migrate lại */ }
+    }
+    st.model = normalizeModelList(st.model)[0] || DEFAULT_MODEL;
+    st.fallbackModels = normalizeModelList(st.fallbackModels);
+    _chainCache = modelChain(st);
+    return st;
   }
   async function saveSettings(s) { await dbPut(ST_SETTINGS, { ...DEFAULT_SETTINGS, ...s, name: 'main' }); }
 
@@ -292,9 +328,11 @@ const ScanApp = (() => {
     constructor(kind, message, extra = {}) { super(message); this.kind = kind; Object.assign(this, extra); }
   }
   // kind:
-  //  'quota'     429 hết quota          -> cooldown key (lũy thừa), thử key khác
+  //  'quota'     429 hết quota          -> cooldown theo cặp key×model (lũy thừa), thử key/model khác
   //  'invalid'   key sai / bị khóa      -> loại key khỏi vòng, báo đỏ
-  //  'transient' 5xx / mạng / timeout   -> cooldown ngắn, thử key khác
+  //  'overload'  503 (high demand) và 500/502/504 -> cooldown MODEL 30–90s, KHÔNG phạt key, chuyển model dự phòng
+  //  'nomodel'   404 model không tồn tại/không hỗ trợ -> bỏ qua model này, thử model kế (không phải lỗi vĩnh viễn của cả yêu cầu)
+  //  'transient' mạng / timeout / 5xx lạ -> cooldown ngắn theo key, thử key khác
   //  'fatal'     lỗi do yêu cầu (model sai, JSON schema sai...) -> dừng, KHÔNG phạt key
   //  'blocked'   Gemini chặn nội dung   -> dừng (không do key)
   //  'parse'     trả về không phải JSON hợp lệ
@@ -314,8 +352,11 @@ const ScanApp = (() => {
     if (status === 429 || errStatus === 'RESOURCE_EXHAUSTED') return new GeminiError('quota', `429 hết quota: ${msg}`, { retrySec });
     if (status === 401 || status === 403 || /API key not valid|API_KEY_INVALID|API key expired/i.test(msg))
       return new GeminiError('invalid', `Key không hợp lệ/bị từ chối (${status}): ${msg}`);
-    if (status === 404) return new GeminiError('fatal', `Model không tồn tại hoặc không hỗ trợ (404): ${msg}`);
+    if (status === 404) return new GeminiError('nomodel', `Model không tồn tại hoặc không hỗ trợ (404): ${msg}`);
     if (status === 400) return new GeminiError('fatal', `Yêu cầu bị từ chối (400): ${msg}`);
+    // 503 "high demand" là lỗi TẠM THỜI của model, không liên quan key -> kind riêng 'overload'
+    if (status === 503 || status === 500 || status === 502 || status === 504 || errStatus === 'UNAVAILABLE')
+      return new GeminiError('overload', `Lỗi máy chủ Gemini (${status}): ${msg}`, { httpStatus: status });
     if (status >= 500) return new GeminiError('transient', `Lỗi máy chủ Gemini (${status}): ${msg}`);
     return new GeminiError('fatal', `HTTP ${status}: ${msg}`);
   }
@@ -355,25 +396,63 @@ const ScanApp = (() => {
     }
   }
 
-  // Ghi kết quả của 1 lần gọi vào record key (cooldown / loại key / reset lỗi).
-  async function recordKeyResult(keyRec, err) {
+  /* ---- TRẠNG THÁI MODEL (trong bộ nhớ, mất khi tải lại trang — cooldown chỉ 30–90s nên không cần lưu) ----
+     _modelState: model -> { until, overloadCount, dead }
+       - until > now && !dead : model đang nghỉ do 503 (cooldown ngắn 30s -> 60s -> 90s theo số lần liên tiếp)
+       - dead                 : model báo 404 (không tồn tại/không hỗ trợ) -> bỏ qua ~30 phút để khỏi gọi lại vô ích */
+  const OVERLOAD_COOLDOWN_SEC = [30, 60, 90];
+  const MODEL_DEAD_MS = 30 * 60000;
+  const _modelState = new Map();
+  let _lastUsed = null;    // { model, keyLabel, fallback, at } — lần gọi thành công gần nhất (hiển thị trong Cài đặt)
+
+  const isModelDead = (m, now = Date.now()) => { const s = _modelState.get(m); return !!(s && s.dead && s.until > now); };
+  const modelCoolUntil = (m, now = Date.now()) => { const s = _modelState.get(m); return s && !s.dead && s.until > now ? s.until : 0; };
+  function markModelOverload(m) {
+    const n = ((_modelState.get(m) || {}).overloadCount || 0) + 1;
+    const sec = OVERLOAD_COOLDOWN_SEC[Math.min(n - 1, OVERLOAD_COOLDOWN_SEC.length - 1)];
+    _modelState.set(m, { overloadCount: n, until: Date.now() + sec * 1000, dead: false });
+    return sec;
+  }
+  const markModelDead = (m) => _modelState.set(m, { overloadCount: 0, until: Date.now() + MODEL_DEAD_MS, dead: true });
+  const markModelOk = (m) => _modelState.delete(m);
+  function resetModelState() { _modelState.clear(); notifyKeysChanged(); }
+
+  // Cooldown quota (429) của 1 key trên 1 model cụ thể — lưu trong record key để bền qua tải lại trang
+  const quotaUntil = (k, m, now = Date.now()) => { const q = k.quotaCooldowns && k.quotaCooldowns[m]; return q && q.until > now ? q.until : 0; };
+  const hasQuotaCooldown = (k) => Object.keys(k.quotaCooldowns || {}).some(m => quotaUntil(k, m) > 0);
+  // Số giây key bị chặn trên MỌI model của chuỗi hiện tại (0 = vẫn còn model dùng được)
+  function keyQuotaBlockedSec(k, now = Date.now()) {
+    if (!_chainCache.length) return 0;
+    let min = Infinity;
+    for (const m of _chainCache) { const u = quotaUntil(k, m, now); if (!u) return 0; min = Math.min(min, u - now); }
+    return Math.ceil(min / 1000);
+  }
+
+  // Ghi kết quả của 1 lần gọi (key × model) vào record key (cooldown / loại key / reset lỗi).
+  async function recordKeyResult(keyRec, err, model) {
+    const cur = (await dbGet(ST_KEYS, keyRec.id)) || keyRec;
+    const qc = { ...(cur.quotaCooldowns || {}) };
     if (!err) {
-      await patchKey(keyRec.id, { lastUsed: Date.now(), errorCount: 0, cooldownUntil: 0, lastError: '', status: 'ok' });
+      if (model) delete qc[model];   // gọi được -> hết phạt quota của cặp này
+      await patchKey(keyRec.id, { lastUsed: Date.now(), errorCount: 0, cooldownUntil: 0, lastError: '', status: 'ok', quotaCooldowns: qc });
       return;
     }
     const n = (keyRec.errorCount || 0) + 1;
     if (err.kind === 'invalid') {
       await patchKey(keyRec.id, { status: 'invalid', errorCount: n, lastError: err.message, lastUsed: Date.now() });
     } else if (err.kind === 'quota') {
-      // Cooldown lũy thừa: 60s, 120s, 240s... tối đa 15 phút; nếu Gemini gợi ý
-      // retryDelay dài hơn thì lấy giá trị đó.
-      const backoff = Math.min(60000 * Math.pow(2, n - 1), 15 * 60000);
+      // 429: quota tính THEO MODEL -> chỉ cooldown cặp key×model này (model khác của key vẫn dùng được).
+      // Lũy thừa: 60s, 120s, 240s... tối đa 15 phút; nếu Gemini gợi ý retryDelay dài hơn thì lấy giá trị đó.
+      const c = ((qc[model] || {}).count || 0) + 1;
+      const backoff = Math.min(60000 * Math.pow(2, c - 1), 15 * 60000);
       const wait = Math.max(backoff, (err.retrySec || 0) * 1000);
-      await patchKey(keyRec.id, { errorCount: n, cooldownUntil: Date.now() + wait, lastError: err.message, lastUsed: Date.now() });
+      if (model) qc[model] = { until: Date.now() + wait, count: c };
+      await patchKey(keyRec.id, { quotaCooldowns: qc, lastError: err.message, lastUsed: Date.now() });
     } else if (err.kind === 'transient') {
       const wait = Math.min(15000 * Math.pow(2, Math.min(n - 1, 3)), 5 * 60000); // 15s..2 phút
       await patchKey(keyRec.id, { errorCount: n, cooldownUntil: Date.now() + wait, lastError: err.message, lastUsed: Date.now() });
     }
+    // overload (503) / nomodel (404): lỗi của MODEL, KHÔNG phạt key (cooldown nằm ở _modelState).
     // fatal / blocked / parse / cancelled: lỗi do yêu cầu, KHÔNG phạt key.
   }
 
@@ -387,17 +466,24 @@ const ScanApp = (() => {
     }
   }
 
-  /* XOAY KEY — thuật toán:
-     1. Lấy các key: bật + chưa 'invalid'. Không còn key nào -> lỗi NO_KEY.
-     2. Trong số đó chọn key KHÔNG cooldown, dùng lâu nhất (lastUsed nhỏ nhất)
-        => xoay vòng đều, không dồn quota vào 1 key.
-     3. Gọi. Lỗi quota/transient -> key vào cooldown, vòng lặp tự chọn key kế.
-        Lỗi invalid -> loại key. Lỗi fatal -> dừng ngay.
-     4. Nếu MỌI key đang cooldown -> chờ đến lúc key sớm nhất hồi (tối thiểu 5s),
-        báo UI "Đang chờ quota…", tối đa maxWaitRounds lần rồi mới bỏ cuộc.
+  /* XOAY MODEL + KEY — thuật toán:
+     1. Chuỗi model = [model chính, ...model dự phòng]. Lấy các key: bật + chưa 'invalid'. Không có key -> lỗi NO_KEY.
+     2. Duyệt model THEO THỨ TỰ ƯU TIÊN; với mỗi model bỏ qua nếu đang cooldown (503) hoặc 'dead' (404).
+        Trong model đó chọn key không cooldown (cả cooldown key lẫn quota 429 của cặp key×model),
+        dùng lâu nhất (lastUsed nhỏ nhất) => xoay vòng đều các key, luôn ưu tiên model chính.
+     3. Gọi. Kết quả lỗi:
+          503/5xx  -> cooldown MODEL 30/60/90s (không phạt key) -> vòng sau tự chọn model dự phòng,
+                      hết cooldown thì model chính được thử lại.
+          429      -> cooldown cặp key×model -> thử key khác của model đó, hoặc model kế.
+          404      -> model bị bỏ qua ~30 phút -> thử model kế.
+          401/403  -> loại key. 400 / blocked / parse -> dừng ngay (lỗi do yêu cầu).
+     4. Nếu MỌI (model × key) đều đang cooldown -> chờ tới lúc sớm nhất hồi (tối thiểu 5s),
+        báo UI "Đang chờ…", tối đa maxWaitRounds lần rồi mới bỏ cuộc (kind 'quota' -> hàng đợi tạm dừng).
+        Nếu MỌI model đều 'dead' (sai tên) -> dừng với kind 'nomodel'.
      Chạy TUẦN TỰ (mỗi lần 1 request) theo đúng yêu cầu, không song song. */
   async function geminiGenerate({ parts, schema, onStatus, signal, systemInstruction }) {
     const st = await loadSettings();
+    const chain = modelChain(st);
     const say = (m, level) => { if (onStatus) onStatus(m, level || 'info'); };
     const body = {
       contents: [{ role: 'user', parts }],
@@ -414,38 +500,64 @@ const ScanApp = (() => {
       const usable = (await listKeys()).filter(k => k.enabled && k.status !== 'invalid');
       if (!usable.length) throw new GeminiError('nokey', 'Chưa có API key Gemini nào dùng được. Thêm key trong ⚙️ Cài đặt.');
       const now = Date.now();
-      const ready = usable.filter(k => (k.cooldownUntil || 0) <= now).sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0));
-      if (!ready.length) {
-        if (waitRound >= st.maxWaitRounds) throw new GeminiError('quota', `Mọi key đều hết quota/đang lỗi sau ${waitRound} lần chờ.`);
-        const soonest = Math.min(...usable.map(k => k.cooldownUntil || 0));
-        const wait = Math.max(5000, soonest - now);
+      const alive = chain.filter(m => !isModelDead(m, now));
+      if (!alive.length) throw new GeminiError('nomodel', `Không model nào dùng được (đều báo không tồn tại/không hỗ trợ): ${chain.join(', ')}. Kiểm tra lại tên model trong ⚙️ Cài đặt.`);
+
+      // Chọn cặp (model, key): model ưu tiên cao nhất đang sẵn sàng + key rảnh lâu nhất
+      let pick = null;
+      for (const model of alive) {
+        if (modelCoolUntil(model, now)) continue;
+        const key = usable
+          .filter(k => (k.cooldownUntil || 0) <= now && !quotaUntil(k, model, now))
+          .sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0))[0];
+        if (key) { pick = { model, key }; break; }
+      }
+
+      if (!pick) {
+        // Mọi (model × key) đều đang nghỉ -> chờ cặp sớm hồi nhất
+        if (waitRound >= st.maxWaitRounds) throw new GeminiError('quota', `Mọi model/key đều đang quá tải hoặc hết quota sau ${waitRound} lần chờ.`);
+        const times = [];
+        for (const m of alive) for (const k of usable) times.push(Math.max(modelCoolUntil(m, now), k.cooldownUntil || 0, quotaUntil(k, m, now)));
+        const wait = Math.max(5000, Math.min(...times) - now);
         waitRound++;
-        await waitWithCountdown(wait, (s) => say(`Đang chờ quota… thử lại sau ${s}s (lần chờ ${waitRound}/${st.maxWaitRounds})`, 'warn'), signal);
+        await waitWithCountdown(wait, (s) => say(`Các model đang quá tải/hết quota… thử lại sau ${s}s (lần chờ ${waitRound}/${st.maxWaitRounds})`, 'warn'), signal);
         continue;
       }
-      const key = ready[0];
-      say(`Gọi ${st.model} bằng "${key.label}"…`);
+
+      const { model, key } = pick, isFallback = model !== chain[0];
+      say(`Gọi ${model}${isFallback ? ' (dự phòng)' : ''} bằng "${key.label}"…`, isFallback ? 'warn' : 'info');
       const t0 = performance.now();
       try {
-        const data = await requestOnce(key, st.model, body, st.timeoutSec * 1000, signal);
+        const data = await requestOnce(key, model, body, st.timeoutSec * 1000, signal);
         const cand = data.candidates && data.candidates[0];
         const block = data.promptFeedback && data.promptFeedback.blockReason;
         if (block) throw new GeminiError('blocked', `Gemini chặn nội dung: ${block}`);
         const txt = cand && cand.content && cand.content.parts
           ? cand.content.parts.map(p => p.text || '').join('') : '';
         if (!txt.trim()) throw new GeminiError('parse', `Gemini trả rỗng (finishReason=${cand && cand.finishReason})`);
-        await recordKeyResult(key, null);
+        await recordKeyResult(key, null, model);
+        markModelOk(model);   // gọi được -> reset đếm quá tải của model
+        _lastUsed = { model, keyLabel: key.label, fallback: isFallback, at: Date.now() };
         return {
           text: txt, usage: data.usageMetadata || null, finishReason: cand && cand.finishReason,
-          model: st.model, keyId: key.id, keyLabel: key.label, ms: Math.round(performance.now() - t0),
+          model, primaryModel: chain[0], fallbackUsed: isFallback,   // model THỰC SỰ trả lời (lưu vào phiếu)
+          keyId: key.id, keyLabel: key.label, ms: Math.round(performance.now() - t0),
         };
       } catch (e) {
         if (!(e instanceof GeminiError)) throw e;
-        await recordKeyResult(key, e);
+        await recordKeyResult(key, e, model);
         if (e.kind === 'cancelled' || e.kind === 'fatal' || e.kind === 'blocked' || e.kind === 'parse') throw e;
         if (e.kind === 'invalid') say(`Key "${key.label}" KHÔNG HỢP LỆ — đã loại khỏi vòng. ${e.message}`, 'error');
+        else if (e.kind === 'overload') {
+          const sec = markModelOverload(model);   // 503: nghỉ MODEL, key vẫn tốt
+          say(`${model} quá tải (${e.httpStatus || 503}) → nghỉ ${sec}s, thử model/key khác. ${e.message}`, 'warn');
+        } else if (e.kind === 'nomodel') {
+          markModelDead(model);
+          say(`Model "${model}" không tồn tại/không hỗ trợ → bỏ qua, thử model kế. ${e.message}`, 'error');
+        } else if (e.kind === 'quota') say(`Key "${key.label}" hết quota ở ${model} → thử key/model khác`, 'warn');
         else say(`Key "${key.label}": ${e.message} → đổi key`, 'warn');
-        // quota / transient / invalid: quay lại đầu vòng, chọn key khác
+        notifyKeysChanged();
+        // overload / nomodel / quota / transient / invalid: quay lại đầu vòng, chọn cặp (model, key) kế
       }
     }
   }
@@ -604,7 +716,7 @@ ${hasBack
           res = await analyzeOnce(f, b, onStatus, signal);
           if (normDeg(res.json.huongMat1) || (b && normDeg(res.json.huongMat2))) say('  ⚠ Sau khi xoay máy vẫn thấy ảnh lệch — hãy kiểm tra lại ảnh.', 'warn');
         } catch (e) {
-          if (['cancelled', 'quota', 'nokey'].includes(e && e.kind)) throw e;   // lỗi hạ tầng: để hàng đợi tạm dừng như thường
+          if (['cancelled', 'quota', 'nokey', 'nomodel'].includes(e && e.kind)) throw e;   // lỗi hạ tầng: để hàng đợi tạm dừng như thường
           say('  Đọc lại sau khi xoay bị lỗi (' + (e.message || e) + ') → dùng kết quả lần 1, bỏ vùng xe.', 'warn');
           stripRegions(res.json); res.extracted = toExtracted(res.json);   // tọa độ lần 1 thuộc ảnh chưa xoay → không dùng
         }
@@ -613,17 +725,20 @@ ${hasBack
     return { ...res, front: f, back: b, rotated };
   }
 
-  // Kiểm tra 1 key còn sống không (gọi 1 câu ngắn, không schema)
+  // Kiểm tra 1 key còn sống không (gọi 1 câu ngắn, không schema) — thử trên model CHÍNH
   async function testKey(id) {
     const k = await dbGet(ST_KEYS, id);
     if (!k) throw new Error('Không tìm thấy key');
     const st = await loadSettings();
     try {
       await requestOnce(k, st.model, { contents: [{ role: 'user', parts: [{ text: 'Trả lời đúng 1 từ: OK' }] }] }, 30000);
-      await recordKeyResult(k, null);
-      return { ok: true, message: 'Key hoạt động tốt' };
+      await recordKeyResult(k, null, st.model);
+      return { ok: true, message: 'Key hoạt động tốt (' + st.model + ')' };
     } catch (e) {
-      if (e instanceof GeminiError) await recordKeyResult(k, e);
+      if (e instanceof GeminiError) await recordKeyResult(k, e, st.model);
+      // 503/404 là lỗi của MODEL: Google đã chấp nhận key nên không báo "key hỏng"
+      if (e.kind === 'overload') return { ok: true, message: `Key không bị từ chối, nhưng ${st.model} đang quá tải (${e.httpStatus || 503}) — khi quét hệ thống tự chuyển model dự phòng.`, kind: e.kind };
+      if (e.kind === 'nomodel') return { ok: false, message: `Key không bị từ chối, nhưng model "${st.model}" không tồn tại/không hỗ trợ — sửa tên model trong Cài đặt.`, kind: e.kind };
       return { ok: false, message: e.message, kind: e.kind };
     }
   }
@@ -635,6 +750,8 @@ ${hasBack
     const now = Date.now();
     if (k.status === 'invalid') return '<span class="scan-chip scan-chip-err" title="' + escapeHtml(k.lastError) + '">❌ Không hợp lệ</span>';
     if (!k.enabled) return '<span class="scan-chip scan-chip-off">⏸ Tắt</span>';
+    const qs = keyQuotaBlockedSec(k, now);   // hết quota (429) trên mọi model trong chuỗi
+    if (qs) return '<span class="scan-chip scan-chip-warn" title="' + escapeHtml(k.lastError) + '">⏳ Hết quota mọi model ' + (qs >= 60 ? Math.ceil(qs / 60) + ' phút' : qs + 's') + '</span>';
     if ((k.cooldownUntil || 0) > now) {
       const s = Math.ceil((k.cooldownUntil - now) / 1000);
       return '<span class="scan-chip scan-chip-warn" title="' + escapeHtml(k.lastError) + '">⏳ Cooldown ' + (s >= 60 ? Math.ceil(s / 60) + ' phút' : s + 's') + '</span>';
@@ -661,19 +778,20 @@ ${hasBack
           ${keyStatusChip(k)}
           <span class="scan-key-actions">
             <button type="button" class="btn btn-ghost btn-sm" data-act="test">Kiểm tra</button>
-            ${k.status === 'invalid' || k.cooldownUntil > Date.now() ? '<button type="button" class="btn btn-ghost btn-sm" data-act="reset" title="Xóa cooldown / trạng thái lỗi">↺ Reset</button>' : ''}
+            ${k.status === 'invalid' || k.cooldownUntil > Date.now() || hasQuotaCooldown(k) ? '<button type="button" class="btn btn-ghost btn-sm" data-act="reset" title="Xóa cooldown / trạng thái lỗi">↺ Reset</button>' : ''}
             <button type="button" class="btn btn-ghost btn-sm" data-act="del">🗑️</button>
           </span>
         </div>`).join('');
     }
     updateScanKeySummary(keys);
+    renderModelStatus(keys);
   }
 
   function updateScanKeySummary(keys) {
     const el = $('#scanKeySummary');
     if (!el) return;
     const now = Date.now();
-    const ok = keys.filter(k => k.enabled && k.status !== 'invalid' && (k.cooldownUntil || 0) <= now).length;
+    const ok = keys.filter(k => k.enabled && k.status !== 'invalid' && (k.cooldownUntil || 0) <= now && !keyQuotaBlockedSec(k, now)).length;
     const usable = keys.filter(k => k.enabled && k.status !== 'invalid').length;
     el.textContent = keys.length
       ? `Gemini: ${ok} key sẵn sàng / ${usable} đang bật / ${keys.length} tổng`
@@ -681,15 +799,69 @@ ${hasBack
     el.className = 'badge ' + (ok ? 'scan-badge-ok' : 'scan-badge-bad');
   }
 
+  /* ---- Khối UI Model dự phòng + bảng trạng thái ----
+     Nếu index.html chưa có #geminiFallback / #geminiModelStatus thì tự chèn ngay dưới ô #geminiModel
+     (không cần sửa HTML). Muốn tự bố trí: thêm sẵn 2 phần tử có id đó vào index.html, code sẽ dùng lại. */
+  function ensureModelUi() {
+    const modelEl = $('#geminiModel');
+    if (!modelEl || $('#geminiModelExtra')) return;
+    const wrap = document.createElement('div');
+    wrap.id = 'geminiModelExtra';
+    wrap.style.cssText = 'flex-basis:100%;grid-column:1/-1;width:100%;margin:8px 0';
+    wrap.innerHTML = ($('#geminiFallback') ? '' : `
+      <label for="geminiFallback" style="display:block;font-weight:600;margin-bottom:4px">Model dự phòng <span class="hint" style="font-weight:400">(thử lần lượt khi model chính bị 503 quá tải / 429 hết quota; cách nhau bằng dấu phẩy)</span></label>
+      <input type="text" id="geminiFallback" style="width:100%" autocomplete="off" spellcheck="false" placeholder="${DEFAULT_FALLBACK_MODELS.join(', ')}">`) +
+      ($('#geminiModelStatus') ? '' : `<div id="geminiModelStatus" style="margin-top:8px"></div>`) + `
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+        <button type="button" class="btn btn-ghost btn-sm" id="btnGeminiModelDefault" title="Đặt lại model chính + dự phòng về mặc định">↺ Model mặc định</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnGeminiModelReset" title="Xóa cooldown/đánh dấu lỗi của các model">↺ Xóa cooldown model</button>
+      </div>`;
+    const anchor = modelEl.closest('label') || modelEl.closest('.form-group, .field, .form-row') || modelEl;
+    anchor.insertAdjacentElement('afterend', wrap);
+  }
+
+  const fmtSec = (s) => s >= 60 ? Math.ceil(s / 60) + ' phút' : s + 's';
+  // Bảng: thứ tự model, vai trò (chính/dự phòng), trạng thái, model đang dùng
+  async function renderModelStatus(keysIn) {
+    const box = $('#geminiModelStatus');
+    if (!box) return;
+    let st, keys;
+    try { st = await loadSettings(); keys = keysIn || await listKeys(); } catch (e) { return; }
+    const now = Date.now(), chain = modelChain(st);
+    const usable = keys.filter(k => k.enabled && k.status !== 'invalid');
+    const rows = chain.map((m, i) => {
+      let state, cls;
+      if (isModelDead(m, now)) { state = '❌ Không tồn tại/không hỗ trợ (tạm bỏ qua)'; cls = 'scan-chip-err'; }
+      else if (modelCoolUntil(m, now)) { state = '⏳ Quá tải (503) — nghỉ ' + fmtSec(Math.ceil((modelCoolUntil(m, now) - now) / 1000)); cls = 'scan-chip-warn'; }
+      else if (usable.length && usable.every(k => quotaUntil(k, m, now))) { state = '⏳ Hết quota (mọi key)'; cls = 'scan-chip-warn'; }
+      else if (!usable.length) { state = '⏸ Chưa có key dùng được'; cls = 'scan-chip-off'; }
+      else { state = '✅ Sẵn sàng'; cls = 'scan-chip-ok'; }
+      return { m, role: i === 0 ? 'Chính' : 'Dự phòng ' + i, state, cls, ready: cls === 'scan-chip-ok' };
+    });
+    const cur = rows.find(r => r.ready);   // model sẽ được dùng cho lần gọi kế tiếp
+    box.innerHTML = '<div style="font-weight:600;margin-bottom:4px">Thứ tự model khi quét</div>' + rows.map(r => `
+      <div class="scan-key-row">
+        <b class="scan-key-label" style="min-width:110px">${r.role}</b>
+        <code>${escapeHtml(r.m)}</code>
+        <span class="scan-chip ${r.cls}">${r.state}</span>
+        ${cur && cur.m === r.m ? '<span class="scan-chip scan-chip-ok">▶ ĐANG DÙNG</span>' : ''}
+      </div>`).join('') +
+      (cur ? '' : '<div class="hint">Hiện chưa model nào sẵn sàng — hệ thống sẽ tự chờ rồi thử lại khi quét.</div>') +
+      (_lastUsed ? `<div class="hint">Lần gọi thành công gần nhất: <b>${escapeHtml(_lastUsed.model)}</b>${_lastUsed.fallback ? ' (đã dùng model DỰ PHÒNG)' : ''} bằng "${escapeHtml(_lastUsed.keyLabel)}"</div>` : '');
+  }
+
   async function fillScanSettingsForm() {
+    ensureModelUi();
     const st = await loadSettings();
     $('#geminiModel').value = st.model;
+    if ($('#geminiFallback')) $('#geminiFallback').value = st.fallbackModels.join(', ');
     $('#geminiTimeout').value = st.timeoutSec;
     $('#geminiMaxWait').value = st.maxWaitRounds;
     renderKeyList();
   }
 
   function bindSettingsUI() {
+    ensureModelUi();
     // Mở Cài đặt -> nạp form key (app.js đã tự mở modal ở listener của nó)
     $('#btnSettings').addEventListener('click', fillScanSettingsForm);
 
@@ -714,7 +886,7 @@ ${hasBack
         if (!confirm('Xóa key này?')) return;
         await removeKey(id); renderKeyList();
       } else if (act === 'reset') {
-        await patchKey(id, { status: 'ok', errorCount: 0, cooldownUntil: 0, lastError: '' });
+        await patchKey(id, { status: 'ok', errorCount: 0, cooldownUntil: 0, lastError: '', quotaCooldowns: {} });
       } else if (act === 'test') {
         btn.disabled = true; btn.textContent = 'Đang thử…';
         const r = await testKey(id);
@@ -730,12 +902,23 @@ ${hasBack
     // Thông số: lưu ngay khi đổi
     const saveParams = async () => {
       const st = await loadSettings();
-      st.model = $('#geminiModel').value.trim() || DEFAULT_SETTINGS.model;
+      st.model = normalizeModelList($('#geminiModel').value)[0] || DEFAULT_MODEL;
+      if ($('#geminiFallback')) st.fallbackModels = normalizeModelList($('#geminiFallback').value).filter(m => m !== st.model);
       st.timeoutSec = Math.max(10, parseInt($('#geminiTimeout').value, 10) || DEFAULT_SETTINGS.timeoutSec);
       st.maxWaitRounds = Math.max(0, parseInt($('#geminiMaxWait').value, 10) || 0);
       await saveSettings(st);
+      await fillScanSettingsForm();   // hiển thị lại giá trị đã chuẩn hóa + bảng trạng thái model
     };
-    ['#geminiModel', '#geminiTimeout', '#geminiMaxWait'].forEach(sel => $(sel).addEventListener('change', saveParams));
+    ['#geminiModel', '#geminiFallback', '#geminiTimeout', '#geminiMaxWait'].forEach(sel => { const el = $(sel); if (el) el.addEventListener('change', saveParams); });
+    const btnDef = $('#btnGeminiModelDefault'), btnRst = $('#btnGeminiModelReset');
+    if (btnDef) btnDef.addEventListener('click', async () => {
+      const st = await loadSettings();
+      st.model = DEFAULT_MODEL; st.fallbackModels = [...DEFAULT_FALLBACK_MODELS];
+      await saveSettings(st); await fillScanSettingsForm(); toast('Đã đặt lại model mặc định + dự phòng.');
+    });
+    if (btnRst) btnRst.addEventListener('click', () => { resetModelState(); renderModelStatus(); toast('Đã xóa cooldown model.'); });
+    // Đếm ngược cooldown trên bảng trạng thái khi đang mở Cài đặt
+    setInterval(() => { const m = $('#settingsModal'); if (m && !m.classList.contains('hidden')) renderModelStatus(); }, 2000);
 
     // Làm tươi trạng thái cooldown khi vòng xoay đổi key
     _onKeysChanged = () => {
@@ -882,8 +1065,8 @@ ${hasBack
       dbgLog(`  ✔ ${platesText(job) || '(không đọc được biển số)'} — ${tt || '—'}` + (match ? ` — ${match.filter(m => m.found).length}/${match.length} biển khớp DS` : ' — chưa tải DS xe'), 'ok');
     } catch (e) {
       const kind = e && e.kind;
-      if (rec) { rec.status = (kind === 'quota' || kind === 'nokey' || kind === 'cancelled') ? 'pending' : 'error'; rec.error = e.message; try { await dbPut(ST_SCANS, rec); } catch (x) { /* bỏ qua */ } }
-      if (kind === 'quota' || kind === 'nokey' || kind === 'cancelled') {
+      if (rec) { rec.status = (kind === 'quota' || kind === 'nokey' || kind === 'nomodel' || kind === 'cancelled') ? 'pending' : 'error'; rec.error = e.message; try { await dbPut(ST_SCANS, rec); } catch (x) { /* bỏ qua */ } }
+      if (kind === 'quota' || kind === 'nokey' || kind === 'nomodel' || kind === 'cancelled') {
         // Lỗi KHÔNG phải do tờ giấy -> giữ tờ ở trạng thái chờ và TẠM DỪNG hàng đợi (tránh đốt hết cả lốc vào lỗi).
         job.status = 'wait'; job.error = e.message; Q.paused = true;
         dbgLog(kind === 'cancelled' ? 'Đã dừng tờ hiện tại.' : `Tạm dừng hàng đợi: ${e.message}`, 'warn');
@@ -1118,7 +1301,8 @@ ${hasBack
     db: { openDb, tx, dbGetAll, dbGet, dbPut, dbDelete, dbCount, ST_SCANS, ST_KEYS, ST_ITEMS, ST_LINKS },
     on, emit, yieldToUi,
     keys: { listKeys, addKey, patchKey, removeKey, testKey, refreshUi: () => { renderKeyList(); notifyKeysChanged(); } },   // refreshUi: scan-store.js gọi sau khi nhập key từ kho khóa
-    settings: { loadSettings, saveSettings },
+    settings: { loadSettings, saveSettings, modelChain, DEFAULT_MODEL, DEFAULT_FALLBACK_MODELS },
+    models: { resetState: resetModelState, renderStatus: renderModelStatus },
     prepareImageFile, openPdf, renderPdfPage, analyzeSheet, geminiGenerate, normalizeBienSo, normalizeCccd, sha256Hex, uid,
     TINH_TRANG_LABEL,
   };

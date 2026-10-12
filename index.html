@@ -112,11 +112,21 @@
       <div class="scan-params">
         <div><label class="hint-label" for="geminiModel">Model</label>
           <input id="geminiModel" type="text" class="tpl-input" list="geminiModelList">
-          <datalist id="geminiModelList"><option value="gemini-2.5-flash"><option value="gemini-2.5-flash-lite"><option value="gemini-2.5-pro"><option value="gemini-2.0-flash"></datalist></div>
+          <datalist id="geminiModelList"><option value="gemini-3.8-flash"><option value="gemini-3.6-flash"><option value="gemini-3.5-flash-lite"><option value="gemini-2.5-flash"><option value="gemini-2.5-flash-lite"><option value="gemini-2.5-pro"></datalist></div>
         <div><label class="hint-label" for="geminiTimeout">Timeout (giây)</label>
           <input id="geminiTimeout" type="number" min="10" class="tpl-input"></div>
         <div><label class="hint-label" for="geminiMaxWait">Số lần chờ quota tối đa</label>
           <input id="geminiMaxWait" type="number" min="0" class="tpl-input"></div>
+      </div>
+      <!-- Model dự phòng + bảng trạng thái model (scan.js điền nội dung). Khi gặp 503 quá tải / 429 hết quota, tự thử lần lượt các model này. -->
+      <div id="geminiModelExtra" style="margin:10px 0 18px;">
+        <label class="hint-label" for="geminiFallback">Model dự phòng <span class="hint">(thử lần lượt khi model chính bị 503/429, cách nhau bằng dấu phẩy)</span></label>
+        <input id="geminiFallback" type="text" class="tpl-input" style="width:100%;" autocomplete="off" spellcheck="false" placeholder="gemini-3.6-flash, gemini-3.5-flash-lite, gemini-2.5-flash">
+        <div id="geminiModelStatus" style="margin-top:8px;"></div>
+        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" id="btnGeminiModelDefault" class="btn btn-ghost btn-sm" title="Đặt lại model chính + dự phòng về mặc định">↺ Model mặc định</button>
+          <button type="button" id="btnGeminiModelReset" class="btn btn-ghost btn-sm" title="Xóa cooldown/đánh dấu lỗi của các model">↺ Xóa cooldown model</button>
+        </div>
       </div>
 
       <div class="section-title">☁️ Lưu trữ ảnh / PDF phiếu scan</div>
