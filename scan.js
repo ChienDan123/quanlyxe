@@ -186,8 +186,12 @@ const ScanApp = (() => {
   async function prepareImageFile(file, maxEdge) {
     if (!isImageFile(file)) throw new Error(`Định dạng "${file.type || file.name}" chưa hỗ trợ (dùng JPG/PNG/WebP/PDF).`);
     let bmp;
-    try { bmp = await createImageBitmap(file); }
-    catch (e) { throw new Error('Không đọc được ảnh "' + file.name + '" (file hỏng hoặc quá lớn): ' + e.message); }
+    // imageOrientation:'from-image' = áp EXIF (ảnh chụp bằng điện thoại xoay ngang/dọc). Trình duyệt cũ không hiểu tùy chọn -> thử lại không tham số.
+    try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+    catch (e1) {
+      try { bmp = await createImageBitmap(file); }
+      catch (e) { throw new Error('Không đọc được ảnh "' + file.name + '" (file hỏng hoặc quá lớn): ' + e.message); }
+    }
     const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(bmp.width * scale); canvas.height = Math.round(bmp.height * scale);
@@ -469,8 +473,10 @@ const ScanApp = (() => {
             ghiChu: { type: S },
             tenDKX: { type: S },            // «Tên trong ĐKX» của dòng xe = CHỦ PHƯƠNG TIỆN
             nguoiMuaSuDung: { type: S },    // dòng «Tên người mua / người sử dụng» của dòng xe
+            // Khung chữ nhật bao khối thông tin của xe trên MẶT 1, chuẩn hóa 0–1000 (gốc trên-trái) — màn So sánh dùng để bấm ảnh ↔ xe
+            vungY0: { type: 'INTEGER' }, vungX0: { type: 'INTEGER' }, vungY1: { type: 'INTEGER' }, vungX1: { type: 'INTEGER' },
           },
-          required: ['bienSo', 'tinhTrang'],
+          required: ['bienSo', 'tinhTrang', 'vungY0', 'vungX0', 'vungY1', 'vungX1'],
         },
       },
       chuHo: { type: S },
@@ -480,8 +486,10 @@ const ScanApp = (() => {
       backHasContent: { type: 'BOOLEAN' },
       backNote: { type: S },
       truongKhongRo: { type: 'ARRAY', items: { type: S } },
+      huongMat1: { type: 'INTEGER' },   // độ xoay THUẬN chiều kim đồng hồ cần để MẶT 1 đứng thẳng: 0 | 90 | 180 | 270
+      huongMat2: { type: 'INTEGER' },   // như trên cho MẶT 2 (không có mặt 2 -> 0)
     },
-    required: ['loaiPhieu', 'danhSachXe', 'chuHo', 'cccd', 'sdt', 'ghiChuTay', 'backHasContent'],
+    required: ['loaiPhieu', 'danhSachXe', 'chuHo', 'cccd', 'sdt', 'ghiChuTay', 'backHasContent', 'huongMat1', 'huongMat2'],
   };
 
   function buildPrompt(hasBack) {
@@ -503,6 +511,8 @@ QUY TẮC:
 6. ghiChuTay: toàn bộ chữ viết tay/ghi chú thêm không thuộc ô in sẵn. Không có thì "".
 7. truongKhongRo: liệt kê tên trường (VD "cccd", "bienSo xe 2") mà chữ mờ/khó đọc, để con người kiểm tra lại.
 8. TUYỆT ĐỐI không bịa dữ liệu. Chỗ không có/không đọc được -> chuỗi rỗng.
+10. HƯỚNG ẢNH: huongMat1${hasBack ? ' / huongMat2' : ''} = số độ cần xoay ảnh THEO CHIỀU KIM ĐỒNG HỒ để chữ in đứng thẳng, đọc xuôi từ trái sang phải: 0 (ảnh đã đúng chiều), 90 (đầu phiếu đang nằm bên TRÁI ảnh), 180 (ảnh bị lộn ngược), 270 (đầu phiếu đang nằm bên PHẢI ảnh). Ảnh gần như trắng/không có chữ -> 0.${hasBack ? '' : ' Đặt huongMat2 = 0.'}
+11. VÙNG XE: với mỗi xe, vungY0, vungX0, vungY1, vungX1 là khung chữ nhật bao TOÀN BỘ khối thông tin của xe đó trên MẶT 1 (dòng biển số, tình trạng, tên trong ĐKX, tên người mua / sử dụng). Tọa độ chuẩn hóa 0–1000 so với cả ảnh MẶT 1, gốc ở góc TRÊN-TRÁI (Y = chiều dọc, X = chiều ngang, Y0<Y1, X0<X1), tính theo ảnh đúng như được gửi. Các xe khác nhau phải có khung khác nhau, không chồng lên nhau.
 ${hasBack
   ? `9. Có 2 ảnh: MẶT 1 (thông tin chính) và MẶT 2. backHasContent = true nếu mặt 2 có chữ/chữ ký/dấu/ghi chú đáng kể; = false nếu trống hoặc gần như trắng. Nếu true, tóm tắt ngắn vào backNote (VD "có chữ ký người kê khai"). Thông tin xe/chủ hộ vẫn lấy chủ yếu từ mặt 1.`
   : `9. Chỉ có 1 ảnh (mặt 1). Đặt backHasContent = false.`}`;
@@ -545,9 +555,28 @@ ${hasBack
     };
   }
 
-  // Phân tích 1 tờ: trả { extracted, geminiRaw, meta }. Dùng lại cho batch ở Sprint 2.
-  async function analyzeSheet({ front, back, onStatus, signal }) {
-    // Chốt chặn: tổng base64 vượt trần -> báo rõ thay vì để Gemini trả 400 mơ hồ.
+  /* ---- TỰ XOAY ẢNH CHO ĐÚNG CHIỀU ----
+     Gemini báo huongMat1/huongMat2 (0/90/180/270 độ thuận chiều kim đồng hồ). Nếu có mặt nào lệch: xoay ảnh bằng canvas rồi ĐỌC LẠI 1 lần
+     (để chữ + tọa độ vùng xe tính trên ảnh đã đúng chiều). Ảnh đúng chiều -> chỉ 1 lần gọi như cũ. EXIF đã được áp ở prepareImageFile. */
+  const normDeg = (n) => { n = Math.round(Number(n) || 0); n = ((n % 360) + 360) % 360; return [0, 90, 180, 270].includes(n) ? n : (Math.round(n / 90) * 90) % 360; };
+  async function rotatePrepared(page, deg) {
+    const bmp = await createImageBitmap(page.blob);
+    const w0 = bmp.width, h0 = bmp.height, swap = deg === 90 || deg === 270;
+    const canvas = document.createElement('canvas');
+    canvas.width = swap ? h0 : w0; canvas.height = swap ? w0 : h0;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (deg === 90) ctx.translate(h0, 0); else if (deg === 180) ctx.translate(w0, h0); else if (deg === 270) ctx.translate(0, w0);
+    ctx.rotate(deg * Math.PI / 180);
+    ctx.drawImage(bmp, 0, 0);
+    if (bmp.close) bmp.close();
+    const out = await canvasToPrepared(canvas, page.name, page.original);
+    canvas.width = canvas.height = 0;
+    return out;
+  }
+  const stripRegions = (j) => { (j.danhSachXe || []).forEach(v => { delete v.vungY0; delete v.vungX0; delete v.vungY1; delete v.vungX1; }); };
+
+  async function analyzeOnce(front, back, onStatus, signal) {
     const total = front.base64.length + (back ? back.base64.length : 0);
     if (total > MAX_REQUEST_B64) {
       throw new GeminiError('fatal', `Dung lượng ảnh quá lớn (${(total / 1048576).toFixed(1)}MB > 18MB) dù đã nén.`);
@@ -555,6 +584,33 @@ ${hasBack
     const r = await geminiGenerate({ parts: buildParts(front, back), schema: SCAN_SCHEMA, onStatus, signal });
     const json = parseJsonLoose(r.text);
     return { json, extracted: toExtracted(json), geminiRaw: r.text, meta: r };
+  }
+
+  // Phân tích 1 tờ: trả { extracted, geminiRaw, meta, front, back, rotated:{front,back} } — front/back là ảnh ĐÃ xoay đúng chiều (dùng để lưu).
+  async function analyzeSheet({ front, back, onStatus, signal }) {
+    const say = onStatus || (() => {});
+    let res = await analyzeOnce(front, back, onStatus, signal);
+    let f = front, b = back, rotated = { front: 0, back: 0 };
+    const dF = normDeg(res.json.huongMat1), dB = back ? normDeg(res.json.huongMat2) : 0;
+    if (dF || dB) {
+      say(`  ↻ Ảnh lệch chiều (mặt 1: ${dF}°, mặt 2: ${dB}°) → tự xoay rồi đọc lại…`, 'warn');
+      try {
+        if (dF) f = await rotatePrepared(front, dF);
+        if (dB) b = await rotatePrepared(back, dB);
+        rotated = { front: dF, back: dB };
+      } catch (e) { say('  Không xoay được ảnh: ' + (e.message || e), 'warn'); f = front; b = back; }
+      if (f !== front || b !== back) {
+        try {
+          res = await analyzeOnce(f, b, onStatus, signal);
+          if (normDeg(res.json.huongMat1) || (b && normDeg(res.json.huongMat2))) say('  ⚠ Sau khi xoay máy vẫn thấy ảnh lệch — hãy kiểm tra lại ảnh.', 'warn');
+        } catch (e) {
+          if (['cancelled', 'quota', 'nokey'].includes(e && e.kind)) throw e;   // lỗi hạ tầng: để hàng đợi tạm dừng như thường
+          say('  Đọc lại sau khi xoay bị lỗi (' + (e.message || e) + ') → dùng kết quả lần 1, bỏ vùng xe.', 'warn');
+          stripRegions(res.json); res.extracted = toExtracted(res.json);   // tọa độ lần 1 thuộc ảnh chưa xoay → không dùng
+        }
+      }
+    }
+    return { ...res, front: f, back: b, rotated };
   }
 
   // Kiểm tra 1 key còn sống không (gọi 1 câu ngắn, không schema)
@@ -808,6 +864,11 @@ ${hasBack
       await dbPut(ST_SCANS, rec);
       const res = await analyzeSheet({ front, back, onStatus: dbgLog, signal: Q.abort.signal });
       const match = matchPlates(res.extracted.bienSo, dsIdx);
+      if (res.rotated && (res.rotated.front || res.rotated.back)) {   // lưu ảnh ĐÃ xoay đúng chiều (hash giữ nguyên của bản gốc để chống quét trùng)
+        rec.frontBlob = res.front.blob; rec.frontMime = res.front.mime;
+        if (res.back) { rec.backBlob = res.back.blob; rec.backMime = res.back.mime; }
+        rec.rotated = res.rotated;
+      }
       Object.assign(rec, {
         status: 'done', geminiRaw: res.geminiRaw, model: res.meta.model, keyLabel: res.meta.keyLabel,
         extracted: res.extracted, backBlank: back ? !res.extracted.backHasContent : false,

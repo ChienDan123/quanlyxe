@@ -1,0 +1,14 @@
+--- /mnt/user-data/uploads/scan-review-ui.css	2026-10-12 13:34:57.330836000 +0000
++++ scan-review-ui.css	2026-10-12 13:37:03.630140933 +0000
+@@ -137,3 +137,11 @@
+ .rv-slot-act { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding-top: 6px; border-top: 1px dashed #d1d5db; }
+ .rv-slot-del { color: #b91c1c; border-color: #fca5a5; }
+ .rv-slot-del:disabled { opacity: .45; cursor: not-allowed; }
++
++/* ---- Trường thông tin mới = 1 dòng đối chiếu trong bảng (phiếu ↔ Sheet) + dòng tóm tắt trong khung «Thêm thông tin mới» ---- */
++.rv-cf-sum { grid-template-columns: 180px minmax(0, 1fr) auto; align-items: center; }
++.rv-cf-sum .rv-cf-val .hint { margin: 0; }
++.rv-cf-del { margin-top: 4px; font-size: 11px; color: #b91c1c; padding: 2px 6px; }
++.rv-row[data-field^="cf_"] .rv-field > b::before { content: "🏷 "; }
++/* Dòng Người mua: viền nhãn tím nhạt cho khỏi lẫn với Chủ xe */
++.rv-row[data-field^="nguoiMua"] .rv-field > b, .rv-row[data-field^="nguoiSuDung"] .rv-field > b { color: #6d28d9; }

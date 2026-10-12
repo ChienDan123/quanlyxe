@@ -1,0 +1,298 @@
+--- /mnt/user-data/uploads/scan-review.js	2026-10-12 13:34:58.289268000 +0000
++++ scan-review.js	2026-10-12 13:36:55.650418679 +0000
+@@ -154,26 +154,47 @@
+   const USER_CMP = { ten: (a, b) => C.cmpName(a, b), diaChi: cmpPlainText, cccd: (a, b) => C.cmpCccd(a, b), sdt: (a, b) => C.cmpPhone(a, b) };
+   const USER_SPECS = PARTY_FIELDS.map(f => ({ key: partyKey('user', f), label: 'Người sử dụng xe - ' + f.label, cmp: USER_CMP[f.k], pf: f, party: true }));
+   const USER_BY_KEY = Object.fromEntries(USER_SPECS.map(sp => [sp.key, sp]));
++  // NGƯỜI MUA cũng có 4 dòng đối chiếu riêng (phiếu ↔ Sheet) như Người sử dụng — trước đây chỉ có khung nhập, không đối chiếu được
++  const BUYER_SPECS = PARTY_FIELDS.map(f => ({ key: partyKey('buyer', f), label: 'Người mua - ' + f.label, cmp: USER_CMP[f.k], pf: f, party: true }));
++  const PARTY_ALL_SPECS = USER_SPECS.concat(BUYER_SPECS);
++  const PARTY_BY_KEY = Object.fromEntries(PARTY_ALL_SPECS.map(sp => [sp.key, sp]));
++  const buyerMode = (it) => !!it && it.partyRole === 'buyer';
++  // TRƯỜNG THÔNG TIN MỚI (it.customFields) cũng thành 1 dòng đối chiếu: giá trị nhập (bên phiếu) ↔ giá trị hiện có trên Sheet
++  const customSpecOf = (cf) => ({ key: cf.key, label: cf.name, cmp: cmpPlainText, custom: true, cfid: cf.id });
++  const customSpecs = (it) => ((it && it.customFields) || []).map(customSpecOf);
++  const customByKey = (it, key) => ((it && it.customFields) || []).find(c => c.key === key) || null;
++  const isCustomKey = (key) => String(key || '').startsWith(CF_PREFIX);
++  // Giá trị 1 ô trên Sheet (trường mới: nếu cột chưa nằm trong FIELD_MAP thì đọc ở _extra theo tên cột)
++  const sheetVal = (row, key, it) => {
++    if (!row) return '';
++    if (row[key]) return row[key];
++    const cf = isCustomKey(key) ? customByKey(it, key) : null;
++    return (cf && row._extra && row._extra[cf.name]) || '';
++  };
+   // Có đưa «Người sử dụng xe» vào bảng đối chiếu không? — chọn tay vai trò «Người sử dụng xe», hoặc (tự động) phiếu có dòng người mua / sử dụng
+   // và người dùng chưa chọn «Không có người sử dụng». Vai trò «Người mua» vẫn dùng khung cũ.
+   const userMode = (it) => !!it && (it.partyRole === 'user' || (!it.partyRole && !it.userSkip && !!String((it.scanData || {}).nguoiDung || '').trim()));
+   // Danh sách trường của 1 xe: 4 trường Người sử dụng chèn ngay sau Chủ xe / CCCD / SĐT cho dễ nhìn
+-  const specsFor = (it) => userMode(it) ? SPECS.slice(0, 3).concat(USER_SPECS, SPECS.slice(3)) : SPECS;
++  const specsFor = (it) => {
++    const party = userMode(it) ? USER_SPECS : (buyerMode(it) ? BUYER_SPECS : []);     // vai trò nào được chọn → có ngay 4 dòng đối chiếu của vai trò đó
++    return SPECS.slice(0, 3).concat(party, SPECS.slice(3), customSpecs(it));         // trường thông tin mới nằm cuối bảng
++  };
+   // Giá trị MẶC ĐỊNH bên phiếu của 1 trường người sử dụng (chưa tính chỗ người dùng sửa ở bảng)
+-  const userDefault = (it, key) => USER_BY_KEY[key] ? (partyDefault(it, USER_BY_KEY[key].pf) || '').toString().trim() : '';
++  const userDefault = (it, key) => PARTY_BY_KEY[key] ? (partyDefault(it, PARTY_BY_KEY[key].pf) || '').toString().trim() : '';
+   // Khớp cột AH–AK theo TIÊU ĐỀ THỰC TẾ trên Sheet (chịu được gạch nối khác / thiếu dấu); gọi từ processRows() của app.js.
+   // Khớp được thì gán khóa + đặt tiêu đề trong FIELD_MAP = tiêu đề thật => ghi ngược luôn trúng đúng cột, không tạo cột trùng.
+   function resolveUserColumns(headers, headerToKey) {
+     const plain = (t) => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
+     const WORD = { ten: /(ho ten|\bten\b)/, diaChi: /dia chi/, cccd: /(cccd|cmnd|\bmst\b|can cuoc)/, sdt: /(dien thoai|\bsdt\b|so dt)/ };
+-    PARTY_FIELDS.forEach(f => {
+-      const key = partyKey('user', f);
++    const ROLE_RE = { user: (t) => /su dung/.test(t) && !/nguoi mua/.test(t), buyer: (t) => /nguoi mua/.test(t) && !/su dung/.test(t) };
++    ['user', 'buyer'].forEach(role => PARTY_FIELDS.forEach(f => {
++      const key = partyKey(role, f);
+       if (headers.some(h => headerToKey[h] === key)) return;                    // đã khớp đúng tên
+-      const h = headers.find(x => !headerToKey[x] && /su dung/.test(plain(x)) && !/nguoi mua/.test(plain(x)) && WORD[f.k].test(plain(x)));
+-      if (!h) { console.warn('[scan-review] Không thấy cột «' + partyHeader('user', f) + '» (dự kiến cột AH–AK) — sẽ tự tạo khi ghi.'); return; }
++      const h = headers.find(x => !headerToKey[x] && ROLE_RE[role](plain(x)) && WORD[f.k].test(plain(x)));
++      if (!h) { console.warn('[scan-review] Không thấy cột «' + partyHeader(role, f) + '»' + (role === 'user' ? ' (dự kiến cột AH–AK)' : '') + ' — sẽ tự tạo khi ghi.'); return; }
+       headerToKey[h] = key;
+       const e = (typeof FIELD_MAP !== 'undefined') && FIELD_MAP.find(x => x.key === key); if (e) e.header = h;
+-    });
++    }));
+   }
+   window.resolveUserColumns = resolveUserColumns;
+   // Giá trị đang định ghi cho 1 ô của người mua / người sử dụng: ưu tiên chỗ người dùng đã sửa, không thì lấy từ phiếu
+@@ -304,7 +325,8 @@
+   const assigneeList = () => { try { return typeof loadAssigneeList === 'function' ? loadAssigneeList() : []; } catch (e) { return []; } };
+   // Nhãn NGẮN dùng trong dấu nguồn "📷Phiếu dd/mm: CCCD, SĐT" (Người thực hiện không lấy từ phiếu nên không có)
+   const TAG_LABEL = { trangThaiXe: 'Trạng thái', chuXe: 'Chủ xe', cccd: 'CCCD', soDienThoai: 'SĐT', ghiChu: 'Ghi chú', tinhTrangCamKet: 'Cam kết',
+-    nguoiSuDungTen: 'Người SD-Tên', nguoiSuDungDiaChi: 'Người SD-Địa chỉ', nguoiSuDungCccd: 'Người SD-CCCD', nguoiSuDungSdt: 'Người SD-SĐT' };
++    nguoiSuDungTen: 'Người SD-Tên', nguoiSuDungDiaChi: 'Người SD-Địa chỉ', nguoiSuDungCccd: 'Người SD-CCCD', nguoiSuDungSdt: 'Người SD-SĐT',
++    nguoiMuaTen: 'Người mua-Tên', nguoiMuaDiaChi: 'Người mua-Địa chỉ', nguoiMuaCccd: 'Người mua-CCCD', nguoiMuaSdt: 'Người mua-SĐT' };
+   const isActionable = (st) => st === 'fill' || st === 'diff' || st === 'sheetedit';
+   const SIGNED = (typeof COMMITMENT_OPTIONS !== 'undefined' && COMMITMENT_OPTIONS[0]) || 'Đã ký cam kết';
+ 
+@@ -359,7 +381,8 @@
+   function scanValue(it, key) {
+     if (it.edits && key in it.edits) return it.edits[key];
+     // 4 trường «Người sử dụng xe» (AH–AK): lấy từ dòng người mua / sử dụng của phiếu (hoặc chỗ người dùng đã nhập ở khung cũ)
+-    if (USER_BY_KEY[key]) return partyValue(it, USER_BY_KEY[key].pf);
++    if (PARTY_BY_KEY[key]) return partyValue(it, PARTY_BY_KEY[key].pf);
++    if (isCustomKey(key)) { const cf = customByKey(it, key); return cf ? cf.value : ''; }   // trường mới: giá trị người dùng đã nhập
+     // Phiếu là của NGƯỜI MUA / NGƯỜI SỬ DỤNG: thông tin chủ hộ trên phiếu không phải của chủ xe đứng tên -> không đem so với Sheet
+     if (ownerMoved(it, key)) return '';   // trường này đã chuyển sang người mua / sử dụng → không so với Chủ xe trên Sheet
+     if (key === 'nguoiThucHien') return prefs.assignee || '';
+@@ -371,8 +394,8 @@
+   // (Ghi chú là ngoại lệ: luôn NỐI THÊM, không ghi đè.)
+   function exactScanValue(key, sv, c) {
+     const s0 = String(sv == null ? '' : sv).trim();
+-    if (key === 'cccd' || key === 'nguoiSuDungCccd') return (c && c.newVal != null) ? c.newVal : s0.replace(/\D/g, '');
+-    if (key === 'soDienThoai' || key === 'nguoiSuDungSdt') return C.normPhone(s0);
++    if (key === 'cccd' || key === 'nguoiSuDungCccd' || key === 'nguoiMuaCccd') return (c && c.newVal != null) ? c.newVal : s0.replace(/\D/g, '');
++    if (key === 'soDienThoai' || key === 'nguoiSuDungSdt' || key === 'nguoiMuaSdt') return C.normPhone(s0);
+     if (key === 'ghiChu') return (c && c.newVal != null) ? c.newVal : s0;
+     return s0;
+   }
+@@ -391,7 +414,7 @@
+     }
+     for (const spec of specsFor(it)) {
+       const key = spec.key;
+-      const sv = scanValue(it, key), dsv = row[key] || '';
++      const sv = scanValue(it, key), dsv = sheetVal(row, key, it);
+       const srcSel = it.source[key] || null;      // nguồn người dùng đã CHỌN RÕ cho trường này: 'scan' | 'sheet'
+       // Chủ xe đã đánh dấu « (Đã chết)» trên Sheet: bỏ hậu tố khi so sánh để không báo khác biệt giả
+       const deadSuffix = key === 'chuXe' && isDead(dsv), dsvCmp = deadSuffix ? stripDead(dsv) : dsv;
+@@ -435,7 +458,7 @@
+   function withSourceTag(note, keys) {
+     const d = new Date(), p2 = (n) => String(n).padStart(2, '0');
+     const date = `${p2(d.getDate())}/${p2(d.getMonth() + 1)}`;
+-    const labels = [...new Set(keys.map(k => TAG_LABEL[k] || k))];
++    const labels = [...new Set(keys.map(k => TAG_LABEL[k] || labelOf(k)))];
+     const base = String(note || '').trim();
+     const re = new RegExp('📷Phiếu ' + date + ': ([^|]*)');
+     const m = base.match(re);
+@@ -466,7 +489,7 @@
+   // Chuỗi mô tả ghi vào cột "Kết quả đối chiếu phiếu" của Sheet
+   function buildResultText(v, plannedKeys) {
+     const it = v.it, parts = [];
+-    const lab = (k) => TAG_LABEL[k] || k;
++    const lab = (k) => TAG_LABEL[k] || labelOf(k);
+     if (it.scanData.tinhTrangCode !== 'khong_ro') parts.push(it.scanData.tinhTrangLabel);
+     if (!v.found) parts.push('Chưa có trong DS');
+     else {
+@@ -673,11 +696,7 @@
+     const v = computeView(it); if (!v.found) return 0;
+     const fillKeys = v.fields.filter(f => !f.spec.meta && f.state === 'fill' && f.decision === 'apply' && f.writeVal != null).map(f => f.spec.key);
+     const r = await applyFoundItem(v, fillKeys);          // luôn ghi kèm Phiếu scan / Kiểm phiếu / Kết quả đối chiếu vào dòng xe có sẵn
+-    if (it.partyRole && PARTY_ROLES[it.partyRole] && !userMode(it)) {      // người mua: cũng chỉ điền cột đang trống (người sử dụng đã nằm trong fillKeys ở trên)
+-      const pw = {};
+-      PARTY_FIELDS.forEach(f => { const k = partyKey(it.partyRole, f), nv = partyValue(it, f); if (nv && !String(v.row[k] || '').trim()) pw[k] = nv; });
+-      if (Object.keys(pw).length) await updateSingleRowFields(v.row, pw);
+-    }
++    // Người mua / Người sử dụng / trường thông tin mới đều là dòng trong bảng đối chiếu → đã nằm trong fillKeys ở trên (chỉ điền ô trống)
+     return r.writes;
+   }
+ 
+@@ -858,7 +877,7 @@
+     const src = it.source[key];
+     const right = orphan ? '<div class="rv-cell right na"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>— Không có trên Google Sheet —</div>'
+       : `<div class="rv-cell right ${f.sheetEdit != null ? 'edited' : ''} ${src === 'sheet' ? 'picked' : ''}"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>${editorHtml(it, f, 'sheet')}${deadHtml(it, f)}${pick.sheet ? `<div class="rv-pick-row">${pick.sheet}</div>` : ''}</div>`;
+-    return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}" data-field="${key}"><div class="rv-field"><b>${escapeHtml(f.spec.label)}</b><div class="hint">cột «${escapeHtml(col)}»</div>${pick.tick}${partyMoveHtml(it, key)}</div>
++    return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}" data-field="${key}"><div class="rv-field"><b>${escapeHtml(f.spec.label)}</b><div class="hint">cột «${escapeHtml(col)}»</div>${pick.tick}${partyMoveHtml(it, key)}${f.spec.custom ? `<button type="button" class="btn btn-ghost btn-sm rv-cf-del" data-act="cf-del" data-id="${id}" data-field="${escapeHtml(f.spec.cfid)}" title="Bỏ trường này khỏi phiếu (không xóa dữ liệu đã ghi trên Sheet)">🗑 Bỏ trường</button>` : ''}</div>
+       <div class="rv-cell left ${leftCls} ${f.edited ? 'edited' : ''} ${src === 'scan' ? 'picked' : ''}"><span class="rv-src-tag scan">📷 PHIẾU SCAN</span>${editorHtml(it, f, 'scan')}${revert}${scanExtra}${pick.scan ? `<div class="rv-pick-row">${pick.scan}</div>` : ''}</div>
+       ${right}
+       <div class="rv-dec-cell"><span class="rv-src-tag dec">⚙ QUYẾT ĐỊNH</span>${dec}</div></div>`;
+@@ -899,8 +918,10 @@
+       .concat(it.scanData.nguoiDung ? [['none', '🚫 Không có người sử dụng']] : []);
+     let body = '';
+     if (inUser) {   // Người sử dụng xe: đã nằm trong BẢNG ĐỐI CHIẾU (4 dòng AH–AK) → không cần khung nhập riêng
+-      body = `<div class="hint">Đã đưa vào bảng đối chiếu bên trên (4 dòng «Người sử dụng xe - …», cột AH–AK của Sheet): so với Sheet, sửa phiếu / sửa Sheet, chọn nguồn và xác nhận như Chủ phương tiện.</div>`;
+-    } else if (role) {   // Người mua: giữ khung nhập riêng như cũ
++      body = `<div class="hint">Đã đưa vào bảng đối chiếu bên dưới (4 dòng «Người sử dụng xe - …», cột AH–AK của Sheet): so với Sheet, sửa phiếu / sửa Sheet, chọn nguồn và xác nhận như Chủ phương tiện.</div>`;
++    } else if (buyerMode(it)) {   // Người mua: cũng có 4 dòng đối chiếu trong bảng (không còn khung nhập riêng không đối chiếu)
++      body = `<div class="hint">Đã đưa vào bảng đối chiếu bên dưới (4 dòng «Người mua - …»): so với Sheet, sửa phiếu / sửa Sheet, chọn nguồn và xác nhận như Chủ phương tiện.</div>`;
++    } else if (false) {   // khung nhập cũ của Người mua — không còn dùng (giữ lại để dễ so sánh bản cũ)
+       const cols = PARTY_FIELDS.map(f => {
+         const curVal = String((v.row && v.row[partyKey(role, f)]) || '').trim(), val = partyValue(it, f);
+         return `<label class="rv-party-f"><span>${f.label}</span>
+@@ -919,7 +940,7 @@
+       it.userSkip = role === 'none';                                  // «Không có người sử dụng» = tắt tự động đưa 4 trường AH–AK vào bảng
+       it.partyRole = PARTY_ROLES[role] ? role : ''; it.partyDoneAt = null; it.partyMoved = null;   // chọn vai trò cho cả xe = chuyển hết (kiểu cũ)
+       // Đổi chế độ => quyết định / nguồn đã chọn cho 4 trường người sử dụng không còn ý nghĩa
+-      if (!userMode(it)) USER_SPECS.forEach(sp => { delete it.decisions[sp.key]; delete it.source[sp.key]; delete it.sheetEdits[sp.key]; delete it.fieldChecked[sp.key]; });
++      cleanPartySpecs(it);
+       await persistEdit(it);
+     });
+     rerenderCard(it);
+@@ -953,7 +974,13 @@
+      Dùng khi máy quét nhầm: người mua / người sử dụng bị nhận thành chủ xe. Người dùng chọn riêng từng trường (Chủ phương tiện, CCCD/MST, SĐT):
+      giá trị trên phiếu được chép sang ô «Người mua / Người sử dụng xe - …» (partyEdits), còn ô chủ xe bên phiếu để trống (không đem so với Sheet).
+      Vai trò là MỘT cho cả xe: chuyển trường thứ hai sang vai trò khác thì các trường đã chuyển trước đó đi theo vai trò mới. */
+-  const cleanUserSpecs = (it) => USER_SPECS.forEach(sp => { delete it.decisions[sp.key]; delete it.source[sp.key]; delete it.sheetEdits[sp.key]; delete it.fieldChecked[sp.key]; });
++  // Bỏ quyết định / nguồn / sửa tay của các dòng Người mua / Người sử dụng KHÔNG còn hiển thị (đổi vai trò hoặc trả về Chủ xe)
++  function cleanPartySpecs(it) {
++    const active = new Set(specsFor(it).map(sp => sp.key));
++    PARTY_ALL_SPECS.filter(sp => !active.has(sp.key)).forEach(sp => {
++      delete it.decisions[sp.key]; delete it.source[sp.key]; delete it.sheetEdits[sp.key]; delete it.fieldChecked[sp.key]; delete it.edits[sp.key];
++    });
++  }
+   function resetOwnerField(it, key) { delete it.decisions[key]; delete it.source[key]; delete it.fieldChecked[key]; it.imgChecked = false; }
+   async function onPartyMove(it, key, role) {
+     const pk = OWNER_TO_PARTY[key], pf = pk && PARTY_FIELDS.find(f => f.k === pk);
+@@ -968,7 +995,7 @@
+         it.partyMoved = moved;
+       }
+       it.partyRole = role; it.userSkip = false; it.partyDoneAt = null;
+-      if (!userMode(it)) cleanUserSpecs(it);                       // đổi sang «Người mua» → bỏ quyết định của 4 dòng Người sử dụng
++      cleanPartySpecs(it);                                         // đổi vai trò → bỏ quyết định của 4 dòng của vai trò cũ
+       await persistEdit(it);
+     });
+     rerenderCard(it);
+@@ -984,7 +1011,7 @@
+       it.partyMoved = moved.length ? moved : null;
+       if (!moved.length) it.partyRole = '';                        // không còn trường nào chuyển → về mặc định
+       it.partyDoneAt = null;
+-      if (!userMode(it)) cleanUserSpecs(it);
++      cleanPartySpecs(it);
+       await persistEdit(it);
+     });
+     rerenderCard(it);
+@@ -1165,19 +1192,15 @@
+   function customHtml(v) {
+     const it = v.it; if (!v.found) return '';
+     const id = escapeHtml(it.id), list = it.customFields || [];
++    // Mỗi trường mới là 1 DÒNG ĐỐI CHIẾU trong bảng bên dưới (phiếu ↔ Sheet, chọn nguồn, xác nhận ảnh, áp dụng) — ở đây chỉ liệt kê tóm tắt
+     const rows = list.map(cf => {
+-      const cur = String((v.row && (v.row[cf.key] || (v.row._extra && v.row._extra[cf.name]))) || '').trim(), cid = escapeHtml(cf.id);
+-      const st = cf.doneAt ? `<span class="rv-checked" title="${escapeHtml(new Date(cf.doneAt).toLocaleString('vi-VN'))}">✔ Đã ghi lên Sheet</span>` : '<span class="rv-unchecked">Chưa ghi lên Sheet</span>';
+-      return `<div class="rv-cf-row">
+-        <div class="rv-cf-name" title="Tiêu đề cột trên Sheet">🏷 ${escapeHtml(cf.name)}</div>
+-        <div class="rv-cf-val"><input type="text" class="rv-edit" data-act="cf-edit" data-id="${id}" data-field="${cid}" value="${escapeHtml(cf.value)}" placeholder="Giá trị" autocomplete="off">
+-          <small class="hint">Sheet: ${cur ? escapeHtml(cur) : '<i>(trống)</i>'}</small></div>
+-        <div class="rv-cf-act">${st}
+-          <button type="button" class="btn btn-primary btn-sm" data-act="cf-apply" data-id="${id}" data-field="${cid}" title="Ghi vào cột «${escapeHtml(cf.name)}» đã có trên Sheet">⬆ Ghi lên Sheet</button>
+-          <button type="button" class="btn btn-ghost btn-sm" data-act="cf-del" data-id="${id}" data-field="${cid}" title="Bỏ trường này khỏi phiếu (không xóa dữ liệu đã ghi trên Sheet)">🗑</button></div>
+-      </div>`;
++      const f = v.fields.find(x => x.spec.key === cf.key), st = f ? f.state : 'same';
++      const stTxt = st === 'diff' ? '⚠ khác Sheet' : (st === 'fill' ? '＋ Sheet trống → điền' : (st === 'sheetedit' ? '✏ đã sửa Sheet' : '✔ khớp Sheet'));
++      return `<div class="rv-cf-row rv-cf-sum"><div class="rv-cf-name" title="Tiêu đề cột trên Sheet">🏷 ${escapeHtml(cf.name)}</div>
++        <div class="rv-cf-val"><span class="hint">Đã tạo dòng đối chiếu trong bảng bên dưới · ${stTxt}</span></div>
++        <div class="rv-cf-act"><button type="button" class="btn btn-ghost btn-sm" data-act="cf-del" data-id="${id}" data-field="${escapeHtml(cf.id)}" title="Bỏ trường này khỏi phiếu (không xóa dữ liệu đã ghi trên Sheet)">🗑</button></div></div>`;
+     }).join('');
+-    const all = list.length > 1 ? `<button type="button" class="btn btn-secondary btn-sm" data-act="cf-apply-all" data-id="${id}">⬆ Ghi tất cả trường mới lên Sheet</button>` : '';
++    const all = '';   // ghi lên Sheet đi theo bảng đối chiếu (✅ Áp dụng xe này / nút từng trường)
+     return `<div class="rv-custom ${list.length ? 'on' : ''}">
+       <div class="rv-custom-head">➕ Thêm thông tin mới <small>— tìm và chọn một cột ĐÃ CÓ trên Google Sheet (không tạo cột mới).</small></div>
+       ${rows}
+@@ -1220,17 +1243,21 @@
+       await persistEdit(it);
+     });
+     rerenderCard(it);
+-    toast(`Đã thêm trường «${def.header}». Bấm «⬆ Ghi lên Sheet» để cập nhật.`);
++    toast(`Đã thêm trường «${def.header}» — xem dòng đối chiếu trong bảng bên dưới, chọn nguồn đúng rồi áp dụng.`);
+   }
+   async function onCfEdit(it, cfid, val) {
+     const cf = (it.customFields || []).find(c => c.id === cfid); if (!cf) return;
+-    await track(it, `Sửa trường «${cf.name}»`, async () => { cf.value = String(val || '').trim(); cf.doneAt = null; await persistEdit(it); });
++    await track(it, `Sửa trường «${cf.name}»`, async () => { cf.value = String(val || '').trim(); cf.doneAt = null; delete it.edits[cf.key]; await persistEdit(it); });
+     scheduleRerender(it);
+   }
+   async function onCfDel(it, cfid) {
+     const cf = (it.customFields || []).find(c => c.id === cfid); if (!cf) return;
+     if (cf.doneAt && !confirm(`Bỏ trường «${cf.name}» khỏi phiếu này?\nGiá trị đã ghi trên Google Sheet sẽ KHÔNG bị xóa.`)) return;
+-    await track(it, `Xóa trường «${cf.name}»`, async () => { it.customFields = it.customFields.filter(c => c.id !== cfid); await persistEdit(it); });
++    await track(it, `Xóa trường «${cf.name}»`, async () => {
++      it.customFields = it.customFields.filter(c => c.id !== cfid);
++      [it.edits, it.decisions, it.source, it.sheetEdits, it.fieldChecked, it.applied, it.sheetOk, it.fixed].forEach(o => { if (o) delete o[cf.key]; });   // dọn dòng đối chiếu của trường này
++      await persistEdit(it);
++    });
+     rerenderCard(it);
+   }
+   async function onCfApply(it, ids) {                                   // ids = mảng id trường; null = tất cả
+@@ -1440,7 +1467,7 @@
+       });
+       if (has) xeApply++;
+       const planned = plannedFromScan(v);
+-      if (prefs.tag && planned.length) lines.push(`<li><b>${P}</b> · cột «Ghi Chú»: thêm dấu nguồn <ins>📷Phiếu dd/mm: ${escapeHtml(planned.map(k => TAG_LABEL[k] || k).join(', '))}</ins></li>`);
++      if (prefs.tag && planned.length) lines.push(`<li><b>${P}</b> · cột «Ghi Chú»: thêm dấu nguồn <ins>📷Phiếu dd/mm: ${escapeHtml(planned.map(k => TAG_LABEL[k] || labelOf(k)).join(', '))}</ins></li>`);
+       lines.push(`<li class="rv-meta-line"><b>${P}</b> · cột «Phiếu scan», «Kiểm phiếu», «Kết quả đối chiếu phiếu» (luôn ghi)</li>`);
+     }
+     $('#rvFooterSummary').innerHTML = `Chờ áp dụng: <b>${todo.length}</b> mục · sẽ cập nhật <b>${fApply}</b> trường từ phiếu${fFix ? ` + <b>${fFix}</b> trường Sheet sửa tay` : ''} (${xeApply} xe) · để kiểm sau <b>${fLater}</b> · giữ Sheet <b>${fSkip}</b>` + (orphanPush ? ` · phiếu lạ ghi tab riêng <b>${orphanPush}</b>` : '');
+@@ -1454,11 +1481,12 @@
+      => quay lại sẽ khôi phục luôn giá trị trên Sheet (qua updateSingleRowFields nên vẫn đồng bộ ngầm). Chỉ giữ trong phiên. */
+   const HIST = { undo: [], redo: [], max: 100 };
+   const clone = (o) => JSON.parse(JSON.stringify(o));
+-  const ROW_KEYS = ['trangThaiXe', 'chuXe', 'cccd', 'soDienThoai', 'ghiChu', 'tinhTrangCamKet', 'nguoiThucHien', 'phieuScan', 'kiemPhieu', 'ketQuaPhieu', ...USER_SPECS.map(sp => sp.key)];   // gồm 4 cột Người sử dụng (AH–AK) để hoàn tác
++  const ROW_KEYS = ['trangThaiXe', 'chuXe', 'cccd', 'soDienThoai', 'ghiChu', 'tinhTrangCamKet', 'nguoiThucHien', 'phieuScan', 'kiemPhieu', 'ketQuaPhieu', ...PARTY_ALL_SPECS.map(sp => sp.key)];   // gồm 4 cột Người sử dụng (AH–AK) + 4 cột Người mua để hoàn tác
+   // extra = các khóa cột phụ (vd. cột Người mua / Người sử dụng) cần chụp thêm để hoàn tác được
+   const rowSnap = (row, extra = []) => row ? Object.fromEntries(ROW_KEYS.concat(extra).map(k => [k, row[k] || ''])) : null;
+   const findRow = (rowId) => state.rawData.find(r => r._rowId === rowId);
+-  const labelOf = (k) => (SPECS.concat(USER_SPECS).find(sp => sp.key === k) || {}).label || k;
++  const labelOf = (k) => (SPECS.concat(PARTY_ALL_SPECS).find(sp => sp.key === k) || {}).label || (isCustomKey(k) ? (cfDefName(k) || k) : k);
++  const cfDefName = (k) => { const d = cfLoadDefs().find(x => x.key === k); return d ? d.header : ''; };
+   function updateHistoryButtons() {
+     const u = $('#rvUndo'), r = $('#rvRedo'); if (!u || !r) return;
+     const lu = HIST.undo[HIST.undo.length - 1], lr = HIST.redo[HIST.redo.length - 1];
+@@ -1506,9 +1534,9 @@
+     const changes = [];
+     try {
+       for (const v of founds) {
+-        const before = (pre && pre[v.it.id]) || clone(v.it), rowBefore = rowSnap(v.row);
++        const before = (pre && pre[v.it.id]) || clone(v.it), rowBefore = rowSnap(v.row, v.fields.map(f => f.spec.key));
+         const r = await applyFoundItem(v, onlyKeys);
+-        changes.push({ id: v.it.id, before, after: clone(v.it), rowId: v.row._rowId, rowBefore, rowAfter: rowSnap(v.row) });
++        changes.push({ id: v.it.id, before, after: clone(v.it), rowId: v.row._rowId, rowBefore, rowAfter: rowSnap(v.row, v.fields.map(f => f.spec.key)) });
+         writes += r.writes; ok++;
+         if (ok % 10 === 0) { $('#rvFooterSummary').textContent = `${label}… ${ok}/${founds.length}`; await S.yieldToUi(); } // chạy ngầm, nhường UI
+       }
+@@ -1567,7 +1595,7 @@
+       if (!val) { scheduleRerender(it, 0); return; }
+     }
+     await track(it, `Sửa «${labelOf(key)}» bên phiếu`, async () => {
+-      const base = key === 'nguoiThucHien' ? (prefs.assignee || '') : (USER_BY_KEY[key] ? userDefault(it, key) : (it.scanData[key] || ''));
++      const base = key === 'nguoiThucHien' ? (prefs.assignee || '') : (PARTY_BY_KEY[key] ? userDefault(it, key) : (isCustomKey(key) ? ((customByKey(it, key) || {}).value || '') : (it.scanData[key] || '')));
+       if (val === base) delete it.edits[key]; else it.edits[key] = val;
+       // Sửa xong: còn khác Sheet -> chọn nguồn = phiếu (người dùng đã chủ động sửa); đã khớp -> bỏ quyết định cũ
+       const f = computeView(it).fields.find(x => x.spec.key === key);
+@@ -1580,7 +1608,7 @@
+   // Sửa giá trị BÊN SHEET ngay tại chỗ (Sheet gõ sai) -> ghi giá trị đã sửa lên Sheet khi áp dụng
+   async function onEditSheet(it, key, raw) {
+     const v = computeView(it); if (!v.row) return;
+-    let val = String(raw || '').trim(); const orig = v.row[key] || '';
++    let val = String(raw || '').trim(); const orig = sheetVal(v.row, key, it);
+     if (val === ADD_STATUS) { val = addStatus(window.prompt('Nhập Trạng thái xe mới:')) || ''; if (!val) { scheduleRerender(it, 0); return; } }
+     await track(it, `Sửa «${labelOf(key)}» bên Sheet`, async () => {
+       if (val === orig) { delete it.sheetEdits[key]; if (it.decisions[key] === 'sheetfix') delete it.decisions[key]; if (it.source[key] === 'sheet') delete it.source[key]; }

@@ -25,7 +25,7 @@
 
 /* ---- Bảng 2 cột: [Trường | PHIẾU | SHEET | Quyết định] ---- */
 .rv-card .rv-split-head, .rv-card .rv-split .rv-row {
-  display: grid; grid-template-columns: 150px minmax(0, 1fr) minmax(0, 1fr) 210px; gap: 0 8px; align-items: stretch;
+  display: grid; grid-template-columns: 170px minmax(0, 1fr) minmax(0, 1fr) 210px; gap: 0 8px; align-items: stretch;
 }
 .rv-card .rv-split-head { position: sticky; top: 0; z-index: 2; font-size: 12px; font-weight: 700; padding: 0 0 4px; }
 .rv-card .rv-split-head > div { padding: 5px 8px; border-radius: 6px 6px 0 0; background: var(--rv-dec-bg); border-bottom: 3px solid var(--rv-dec-line); }
@@ -65,7 +65,7 @@
 .rv-src-tag.scan { color: var(--rv-scan); } .rv-src-tag.sheet { color: var(--rv-sheet); } .rv-src-tag.dec { color: #6b7280; }
 
 /* ---- Khung ảnh đang mở (bảng hẹp): ô «Quyết định» xuống hàng riêng ---- */
-.rv-work.with-pane .rv-card .rv-split-head, .rv-work.with-pane .rv-card .rv-split .rv-row { grid-template-columns: 110px minmax(0, 1fr) minmax(0, 1fr); }
+.rv-work.with-pane .rv-card .rv-split-head, .rv-work.with-pane .rv-card .rv-split .rv-row { grid-template-columns: 130px minmax(0, 1fr) minmax(0, 1fr); }
 .rv-work.with-pane .rv-card .rv-split-head > .dec { display: none; }
 .rv-work.with-pane .rv-card .rv-split .rv-dec-cell { grid-column: 1 / -1; margin-top: 6px; }
 .rv-work.with-pane .rv-card .rv-split .rv-dec-cell .rv-src-tag.dec { display: block; }
@@ -80,7 +80,8 @@
 }
 
 /* ---- Biển số hiện ngay trên thanh sticky (ô đầu tiên của tiêu đề cột) ---- */
-.rv-card .rv-split-head > .rv-head-plate { background: #111827; color: #fff; border-bottom-color: #111827; font-size: 13px; letter-spacing: .03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rv-card .rv-split-head > .rv-head-plate { background: #111827; color: #fff; border-bottom-color: #111827; font-size: 13px; letter-spacing: .03em; line-height: 1.3;
+  white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; word-break: break-word; }   /* hiện ĐỦ biển số: xuống dòng thay vì cắt «...» */
 
 /* ---- Tick «Chủ xe đã chết» trong ô Google Sheet ---- */
 .rv-dead { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 12px; color: #6b7280; cursor: pointer; }
@@ -126,3 +127,21 @@
 /* ---- Chuyển từng trường chủ xe sang người mua / người sử dụng (nằm trong ô tên trường) ---- */
 .rv-pmove-sel { margin-top: 4px; font-size: 11px; max-width: 100%; }
 .rv-pmove { margin-top: 4px; font-size: 11px; color: #6d28d9; background: #faf5ff; border: 1px solid #c4b5fd; border-radius: 6px; padding: 3px 6px; word-break: break-word; }
+
+/* ---- Ô tick «Đã kiểm với ảnh» (bấm được) ---- */
+.rv-tick-img { padding: 2px 8px; border-radius: 99px; background: #f3f4f6; color: #6b7280; border: 1px solid transparent; font-size: 12px; margin-right: 0; user-select: none; }
+.rv-tick-img.on { background: #dcfce7; color: #166534; border-color: #86efac; }
+.rv-tick-img input { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+
+/* ---- Nút thêm phiếu thiếu / xóa phiếu thừa trong khung «Phiếu nhiều xe» ---- */
+.rv-slot-act { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding-top: 6px; border-top: 1px dashed #d1d5db; }
+.rv-slot-del { color: #b91c1c; border-color: #fca5a5; }
+.rv-slot-del:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---- Trường thông tin mới = 1 dòng đối chiếu trong bảng (phiếu ↔ Sheet) + dòng tóm tắt trong khung «Thêm thông tin mới» ---- */
+.rv-cf-sum { grid-template-columns: 180px minmax(0, 1fr) auto; align-items: center; }
+.rv-cf-sum .rv-cf-val .hint { margin: 0; }
+.rv-cf-del { margin-top: 4px; font-size: 11px; color: #b91c1c; padding: 2px 6px; }
+.rv-row[data-field^="cf_"] .rv-field > b::before { content: "🏷 "; }
+/* Dòng Người mua: viền nhãn tím nhạt cho khỏi lẫn với Chủ xe */
+.rv-row[data-field^="nguoiMua"] .rv-field > b, .rv-row[data-field^="nguoiSuDung"] .rv-field > b { color: #6d28d9; }
