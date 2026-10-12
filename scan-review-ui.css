@@ -113,3 +113,16 @@
   .rv-cf-act { justify-content: flex-start; }
   .rv-cf-name { padding-top: 0; }
 }
+
+/* ---- Khung «Phiếu nhiều xe» (X / Y): xanh khi đủ, cam khi thiếu ---- */
+.rv-slot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; border: 1.5px solid #86efac; background: #f0fdf4; border-radius: 10px; padding: 6px 10px; margin: 6px 0; }
+.rv-slot.miss { border-color: #fb923c; background: #fff7ed; }
+.rv-slot-title { font-size: 12px; font-weight: 700; color: #374151; }
+.rv-slot-f { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; }
+.rv-slot-in { width: 56px; text-align: center; }
+.rv-slot-detail { flex-basis: 100%; }
+.rv-slot-miss { color: #c2410c; }
+
+/* ---- Chuyển từng trường chủ xe sang người mua / người sử dụng (nằm trong ô tên trường) ---- */
+.rv-pmove-sel { margin-top: 4px; font-size: 11px; max-width: 100%; }
+.rv-pmove { margin-top: 4px; font-size: 11px; color: #6d28d9; background: #faf5ff; border: 1px solid #c4b5fd; border-radius: 6px; padding: 3px 6px; word-break: break-word; }

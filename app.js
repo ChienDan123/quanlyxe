@@ -960,12 +960,22 @@ function processRows(rows) {
   let familyHeaderKey = sampleHeaders.find(h => stripDiacritics(h).includes('gia dinh'));
   if (!familyHeaderKey && sampleHeaders[FAMILY_COLUMN_INDEX]) familyHeaderKey = sampleHeaders[FAMILY_COLUMN_INDEX];
 
+  // Lưu DANH SÁCH TIÊU ĐỀ CỘT THẬT đang có trên Google Sheet — màn «So sánh phiếu → Thêm thông tin mới» chỉ cho tìm & chọn trong danh sách này
+  // (không cho gõ tên cột mới để tạo cột tùy ý). Nhớ thêm ở localStorage để còn dùng được khi dữ liệu nạp từ bộ nhớ đệm.
+  state.sheetHeaders = sampleHeaders.filter(h => String(h || '').trim());
+  try { if (state.sheetHeaders.length) localStorage.setItem('qlxSheetHeaders', JSON.stringify(state.sheetHeaders)); } catch (e) { /* bỏ qua */ }
+
   state.rawData = rows.map((r, i) => {
     const obj = { _rowId: 'r' + i };
     FIELD_MAP.forEach(f => { obj[f.key] = ''; });
     Object.keys(r).forEach(h => {
       const key = headerToKey[h];
       if (key) obj[key] = (r[h] || '').toString().trim();
+      else {
+        // Cột hệ thống chưa nhận ra: giữ lại giá trị (chỉ khi có dữ liệu) để hiển thị «Sheet đang là …» cho trường được chọn thêm
+        const t = (r[h] == null ? '' : r[h]).toString().trim();
+        if (t) (obj._extra || (obj._extra = {}))[h] = t;
+      }
     });
     obj.giaDinh = familyHeaderKey ? (r[familyHeaderKey] || '').toString().trim() : '';
     return obj;

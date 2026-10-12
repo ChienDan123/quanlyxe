@@ -115,9 +115,9 @@ const ScanReview = (() => {
   }
   ensurePartyFields();
 
-  /* ---- TRƯỜNG THÔNG TIN MỚI (người dùng tự thêm trong So sánh phiếu) ----
-     Người dùng gõ TÊN TRƯỜNG + GIÁ TRỊ (vd. «Người đang sử dụng xe») → lưu trong mục phiếu (it.customFields) → «Ghi lên Sheet»:
-     tên trường = tiêu đề cột; cột chưa có thì Apps Script (updateRow_) tự tạo ở cột trống đầu tiên.
+  /* ---- TRƯỜNG THÔNG TIN MỚI (người dùng chọn thêm trong So sánh phiếu) ----
+     Người dùng TÌM + CHỌN một cột đã có trên Google Sheet, nhập GIÁ TRỊ → lưu trong mục phiếu (it.customFields) → «Ghi lên Sheet»:
+     tên trường = tiêu đề cột có sẵn. KHÔNG cho gõ tên tự do nên không phát sinh cột mới (xem cfSelectable / onCfAdd bên dưới).
      Danh sách tên trường đã từng thêm được nhớ ở localStorage và đăng ký lại vào FIELD_MAP mỗi lần mở trang (để đọc lại đúng cột khi tải Sheet). */
   const CF_DEFS_KEY = 'rvCustomFieldDefs';
   const CF_PREFIX = 'cf_';
@@ -178,6 +178,10 @@ const ScanReview = (() => {
   window.resolveUserColumns = resolveUserColumns;
   // Giá trị đang định ghi cho 1 ô của người mua / người sử dụng: ưu tiên chỗ người dùng đã sửa, không thì lấy từ phiếu
   const partyDefault = (it, f) => !f.from ? '' : (f.from in it.scanData ? (it.scanData[f.from] || '') : (f.legacy ? (it.scanData[f.legacy] || '') : ''));
+  // Khóa «chủ xe» ↔ trường người mua / sử dụng tương ứng
+  const OWNER_TO_PARTY = { chuXe: 'ten', cccd: 'cccd', soDienThoai: 'sdt' };
+  // Trường chủ xe này đã bị chuyển sang người mua / sử dụng chưa? (partyMoved null + có vai trò = mục cũ: chuyển cả 3)
+  const ownerMoved = (it, key) => !!it && !!it.partyRole && PARTY_OWNER_KEYS.includes(key) && (!it.partyMoved || it.partyMoved.includes(key));
   const partyValue = (it, f) => String((it.partyEdits && f.k in it.partyEdits) ? it.partyEdits[f.k] : partyDefault(it, f)).trim();
 
   /* ---- QUY TẮC ĐỌC PHIẾU (chủ phiếu ≠ chủ phương tiện) ----
@@ -235,6 +239,7 @@ const ScanReview = (() => {
         orphan: false, decisions: {}, applied: {}, review: 'chua_kiem', done: false, dirty: false,
         orphanDecision: null, orphanPushed: false, pushError: '', result: '',
         edits: {}, sheetEdits: {}, fixed: {}, imgChecked: false,
+        slotX: i + 1, slotTotal: vehicles.length,   // xe thứ i+1 trên ảnh / tổng số xe máy đọc được (người dùng sửa được nếu phiếu ghi nhiều xe hơn)
         source: {}, fieldChecked: {}, sheetOk: {},   // nguồn đã chọn RIÊNG từng trường ('scan'|'sheet'), tick «đã kiểm ảnh» từng trường, trường «Sheet đúng» đã chốt // chỉnh sửa tay bên phiếu / bên Sheet + tick "Đã kiểm với ảnh"
         createdAt: Date.now(), updatedAt: Date.now(),
       };
@@ -309,8 +314,13 @@ const ScanReview = (() => {
     it.source = it.source || {}; it.fieldChecked = it.fieldChecked || {}; it.sheetOk = it.sheetOk || {};
     it.orphanSheet = !!it.orphanSheet; it.orphanStale = it.orphanStale || null;   // phiếu lạ đã ghi thành hàng mới / hàng thừa chờ xóa
     it.partyRole = it.partyRole || ''; it.partyEdits = it.partyEdits || {}; it.partyDoneAt = it.partyDoneAt || null;   // người mua / người sử dụng
+    // Các trường «chủ xe» (chuXe/cccd/soDienThoai) đã được CHUYỂN sang Người mua / Người sử dụng. null = mục cũ (chọn vai trò cho cả xe → coi như chuyển hết)
+    it.partyMoved = Array.isArray(it.partyMoved) ? it.partyMoved : null;
     it.userSkip = !!it.userSkip;   // true = người dùng chọn «Không có người sử dụng» (tắt tự động đưa vào bảng đối chiếu)
     it.customFields = Array.isArray(it.customFields) ? it.customFields : [];   // trường thông tin mới do người dùng thêm: [{id, key, name, value, doneAt}]
+    // Phiếu nhiều xe: X = thứ tự xe này trên ảnh (Xe 1, Xe 2…), Y = TỔNG số xe ghi trên phiếu. null = chưa có (mục cũ) → tự suy ra, xem slotInfo()
+    it.slotX = (Number.isInteger(it.slotX) && it.slotX > 0) ? it.slotX : null;
+    it.slotTotal = (Number.isInteger(it.slotTotal) && it.slotTotal > 0) ? it.slotTotal : null;
     return it;
   }
 
@@ -350,7 +360,7 @@ const ScanReview = (() => {
     // 4 trường «Người sử dụng xe» (AH–AK): lấy từ dòng người mua / sử dụng của phiếu (hoặc chỗ người dùng đã nhập ở khung cũ)
     if (USER_BY_KEY[key]) return partyValue(it, USER_BY_KEY[key].pf);
     // Phiếu là của NGƯỜI MUA / NGƯỜI SỬ DỤNG: thông tin chủ hộ trên phiếu không phải của chủ xe đứng tên -> không đem so với Sheet
-    if (it.partyRole && PARTY_OWNER_KEYS.includes(key)) return '';
+    if (ownerMoved(it, key)) return '';   // trường này đã chuyển sang người mua / sử dụng → không so với Chủ xe trên Sheet
     if (key === 'nguoiThucHien') return prefs.assignee || '';
     if (key === 'trangThaiXe') return scanStatus(it);
     return it.scanData[key] || '';
@@ -741,6 +751,7 @@ const ScanReview = (() => {
       case 'applied': return it.done && !it.dirty;                        // đã áp dụng xong
       case 'party': return !!it.partyRole;                                // đã đánh dấu Người mua / Người sử dụng
       case 'party_todo': return !!it.partyRole && !it.partyDoneAt;        // đã đánh dấu nhưng chưa cập nhật lên Sheet
+      case 'slot_missing': return !slotInfo(it.scanId).complete;           // phiếu còn thiếu xe (X/Y)
       case 'dead': return !!(v.row && isDead(v.row.chuXe));               // chủ xe đã chết
       case 'review': return (cat !== 'match' && (!it.done || it.dirty || it.review === 'chua_kiem')) || (cat === 'match' && !it.done);
       case 'match': return cat === 'match';
@@ -846,7 +857,7 @@ const ScanReview = (() => {
     const src = it.source[key];
     const right = orphan ? '<div class="rv-cell right na"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>— Không có trên Google Sheet —</div>'
       : `<div class="rv-cell right ${f.sheetEdit != null ? 'edited' : ''} ${src === 'sheet' ? 'picked' : ''}"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>${editorHtml(it, f, 'sheet')}${deadHtml(it, f)}${pick.sheet ? `<div class="rv-pick-row">${pick.sheet}</div>` : ''}</div>`;
-    return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}" data-field="${key}"><div class="rv-field"><b>${escapeHtml(f.spec.label)}</b><div class="hint">cột «${escapeHtml(col)}»</div>${pick.tick}</div>
+    return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}" data-field="${key}"><div class="rv-field"><b>${escapeHtml(f.spec.label)}</b><div class="hint">cột «${escapeHtml(col)}»</div>${pick.tick}${partyMoveHtml(it, key)}</div>
       <div class="rv-cell left ${leftCls} ${f.edited ? 'edited' : ''} ${src === 'scan' ? 'picked' : ''}"><span class="rv-src-tag scan">📷 PHIẾU SCAN</span>${editorHtml(it, f, 'scan')}${revert}${scanExtra}${pick.scan ? `<div class="rv-pick-row">${pick.scan}</div>` : ''}</div>
       ${right}
       <div class="rv-dec-cell"><span class="rv-src-tag dec">⚙ QUYẾT ĐỊNH</span>${dec}</div></div>`;
@@ -897,7 +908,7 @@ const ScanReview = (() => {
   async function onPartyRole(it, role) {
     await track(it, 'Chọn người mua / sử dụng', async () => {
       it.userSkip = role === 'none';                                  // «Không có người sử dụng» = tắt tự động đưa 4 trường AH–AK vào bảng
-      it.partyRole = PARTY_ROLES[role] ? role : ''; it.partyDoneAt = null;
+      it.partyRole = PARTY_ROLES[role] ? role : ''; it.partyDoneAt = null; it.partyMoved = null;   // chọn vai trò cho cả xe = chuyển hết (kiểu cũ)
       // Đổi chế độ => quyết định / nguồn đã chọn cho 4 trường người sử dụng không còn ý nghĩa
       if (!userMode(it)) USER_SPECS.forEach(sp => { delete it.decisions[sp.key]; delete it.source[sp.key]; delete it.sheetEdits[sp.key]; delete it.fieldChecked[sp.key]; });
       await persistEdit(it);
@@ -928,51 +939,206 @@ const ScanReview = (() => {
     toast(`Đã cập nhật ${PARTY_ROLES[role].label} (${v.row.bienSo || it.bienSoRaw}). ` + (isWriteConnected() ? 'Đang đồng bộ ngầm lên Google Sheet…' : 'Mới lưu trên máy.'));
   }
 
-  /* ---- THÊM TRƯỜNG THÔNG TIN MỚI ---- */
+
+  /* ---- CHUYỂN TỪNG TRƯỜNG «CHỦ XE» SANG NGƯỜI MUA / NGƯỜI SỬ DỤNG ----
+     Dùng khi máy quét nhầm: người mua / người sử dụng bị nhận thành chủ xe. Người dùng chọn riêng từng trường (Chủ phương tiện, CCCD/MST, SĐT):
+     giá trị trên phiếu được chép sang ô «Người mua / Người sử dụng xe - …» (partyEdits), còn ô chủ xe bên phiếu để trống (không đem so với Sheet).
+     Vai trò là MỘT cho cả xe: chuyển trường thứ hai sang vai trò khác thì các trường đã chuyển trước đó đi theo vai trò mới. */
+  const cleanUserSpecs = (it) => USER_SPECS.forEach(sp => { delete it.decisions[sp.key]; delete it.source[sp.key]; delete it.sheetEdits[sp.key]; delete it.fieldChecked[sp.key]; });
+  function resetOwnerField(it, key) { delete it.decisions[key]; delete it.source[key]; delete it.fieldChecked[key]; it.imgChecked = false; }
+  async function onPartyMove(it, key, role) {
+    const pk = OWNER_TO_PARTY[key], pf = pk && PARTY_FIELDS.find(f => f.k === pk);
+    if (!pf || !PARTY_ROLES[role]) { rerenderCard(it); return; }
+    await track(it, `Chuyển «${labelOf(key)}» sang ${PARTY_ROLES[role].label}`, async () => {
+      if (!ownerMoved(it, key)) {
+        const raw = String((key in it.edits) ? it.edits[key] : (it.scanData[key] || '')).trim();
+        it.partyEdits[pk] = raw;                                   // chép giá trị phiếu sang ô người mua / sử dụng
+        delete it.edits[key]; resetOwnerField(it, key);            // ô chủ xe bên phiếu để trống
+        const moved = it.partyMoved ? it.partyMoved.slice() : [];
+        if (!moved.includes(key)) moved.push(key);
+        it.partyMoved = moved;
+      }
+      it.partyRole = role; it.userSkip = false; it.partyDoneAt = null;
+      if (!userMode(it)) cleanUserSpecs(it);                       // đổi sang «Người mua» → bỏ quyết định của 4 dòng Người sử dụng
+      await persistEdit(it);
+    });
+    rerenderCard(it);
+    toast(`Đã chuyển «${labelOf(key)}» sang ${PARTY_ROLES[role].label}. Kiểm tra lại với ảnh rồi cập nhật lên Sheet.`);
+  }
+  async function onPartyUnmove(it, key) {
+    const pk = OWNER_TO_PARTY[key]; if (!pk || !ownerMoved(it, key)) return;
+    await track(it, `Trả «${labelOf(key)}» về Chủ xe`, async () => {
+      const cur = String(it.partyEdits[pk] || '').trim(), goc = String(it.scanData[key] || '').trim();
+      if (cur && cur !== goc) it.edits[key] = cur;                 // giữ lại chỗ người dùng đã sửa tay
+      delete it.partyEdits[pk]; resetOwnerField(it, key);
+      const moved = (it.partyMoved || PARTY_OWNER_KEYS.slice()).filter(k => k !== key);   // mục cũ (null) = đã chuyển cả 3
+      it.partyMoved = moved.length ? moved : null;
+      if (!moved.length) it.partyRole = '';                        // không còn trường nào chuyển → về mặc định
+      it.partyDoneAt = null;
+      if (!userMode(it)) cleanUserSpecs(it);
+      await persistEdit(it);
+    });
+    rerenderCard(it);
+  }
+  // Điều khiển nằm ngay trong ô tên trường của dòng Chủ xe / CCCD / SĐT
+  function partyMoveHtml(it, key) {
+    const pk = OWNER_TO_PARTY[key]; if (!pk) return '';
+    const id = escapeHtml(it.id);
+    if (ownerMoved(it, key)) {
+      const pf = PARTY_FIELDS.find(f => f.k === pk);
+      return `<div class="rv-pmove on">👥 Đã chuyển sang <b>${PARTY_ROLES[it.partyRole].label}</b>: ${escapeHtml(partyValue(it, pf) || '(trống)')}
+        <button type="button" class="btn btn-ghost btn-sm" data-act="party-unmove" data-id="${id}" data-field="${key}" title="Trả giá trị về lại dòng chủ xe">↩ Trả về Chủ xe</button></div>`;
+    }
+    const raw = String((it.edits && key in it.edits) ? it.edits[key] : (it.scanData[key] || '')).trim();
+    if (!raw) return '';
+    return `<select class="row-inline-select rv-pmove-sel" data-act="party-move" data-id="${id}" data-field="${key}" title="Nếu máy quét nhầm người mua / người sử dụng thành chủ xe: chuyển giá trị phiếu này sang người đó">
+      <option value="">👥 Quét nhầm? Chuyển sang…</option><option value="buyer">→ Người mua</option><option value="user">→ Người sử dụng xe</option></select>`;
+  }
+
+  /* ---- PHIẾU NHIỀU XE (X / Y) ----
+     X = xe thứ mấy trên ảnh (Xe 1, Xe 2…) · Y = TỔNG số xe ghi trên phiếu. Gom các mục cùng scanId (cùng 1 ảnh/tờ) để biết đã đủ xe chưa:
+     thiếu = các số trong 1…Y chưa có mục nào mang số đó. Y là 1 giá trị chung cho cả tờ (sửa ở xe nào cũng áp cho mọi xe cùng tờ).
+     Mặc định lúc quét: X = thứ tự xe máy đọc được, Y = số xe máy đọc được → nếu phiếu ghi nhiều xe hơn thì người dùng sửa Y để hệ thống báo thiếu. */
+  let _slotIdx = { ref: null, len: -1, map: null };
+  function slotGroups() {                                          // scanId → các mục (dựng 1 lần cho mỗi lần R.items đổi)
+    if (_slotIdx.ref === R.items && _slotIdx.len === R.items.length && _slotIdx.map) return _slotIdx.map;
+    const map = new Map();
+    R.items.forEach(i => { if (!map.has(i.scanId)) map.set(i.scanId, []); map.get(i.scanId).push(i); });
+    _slotIdx = { ref: R.items, len: R.items.length, map };
+    return map;
+  }
+  function slotInfo(scanId) {
+    const items = (slotGroups().get(scanId) || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || (a.id < b.id ? -1 : 1));
+    const xOf = new Map(), by = new Map(), used = new Set();
+    items.forEach(i => { if (i.slotX) used.add(i.slotX); });
+    let n = 1;
+    items.forEach(i => {                                           // mục cũ chưa có X → xếp vào số trống nhỏ nhất
+      let x = i.slotX; if (!x) { while (used.has(n)) n++; x = n; used.add(x); }
+      xOf.set(i.id, x); if (!by.has(x)) by.set(x, []); by.get(x).push(i);
+    });
+    const maxX = Math.max(0, ...xOf.values()), declared = Math.max(0, ...items.map(i => i.slotTotal || 0));
+    const total = Math.max(declared || items.length, maxX);       // X lớn hơn Y → coi Y ít nhất bằng X
+    const missing = [], dups = [];
+    for (let k = 1; k <= total; k++) { if (!by.has(k)) missing.push(k); else if (by.get(k).length > 1) dups.push(k); }
+    return { items, xOf, by, total, missing, dups, complete: !missing.length };
+  }
+  const slotMissingText = (info) => info.missing.map(k => 'Xe ' + k).join(', ');
+  function slotHtml(it) {
+    const info = slotInfo(it.scanId), id = escapeHtml(it.id), x = info.xOf.get(it.id) || '';
+    const status = info.complete
+      ? '<span class="rv-badge applied rv-slot-st">✔ Đã đủ</span>'
+      : `<span class="rv-badge warn rv-slot-st">⚠ Thiếu ${info.missing.length} xe</span>`;
+    const have = [...info.by.keys()].sort((a, b) => a - b).map(k => `Xe ${k}${info.by.get(k).map(i => ' (' + escapeHtml(i.bienSoRaw || '?') + ')').join('')}`).join(' · ');
+    return `<div class="rv-slot ${info.complete ? 'ok' : 'miss'}">
+      <span class="rv-slot-title">🚗 Phiếu nhiều xe</span>
+      <label class="rv-slot-f">Xe thứ <input type="number" min="1" step="1" class="rv-edit rv-slot-in" data-act="slot-x" data-id="${id}" value="${x}" title="X — xe này là xe thứ mấy trên ảnh"></label>
+      <label class="rv-slot-f">/ tổng <input type="number" min="1" step="1" class="rv-edit rv-slot-in" data-act="slot-y" data-id="${id}" value="${info.total}" title="Y — tổng số xe ghi trên phiếu (áp cho mọi xe cùng tờ)"></label>
+      ${status}
+      <div class="rv-slot-detail hint">Đã có: ${have || '—'}${info.missing.length ? `<br><b class="rv-slot-miss">Chưa có dữ liệu: ${slotMissingText(info)}</b> — quét lại hoặc thêm xe còn thiếu` : ''}${info.dups.length ? `<br><b class="rv-slot-miss">Trùng số: ${info.dups.map(k => 'Xe ' + k).join(', ')} — kiểm tra lại X</b>` : ''}</div></div>`;
+  }
+  // Sửa X của 1 xe hoặc Y của cả tờ; ghi nhiều mục nên gom thành 1 bước hoàn tác
+  async function onSlotEdit(it, which, raw) {
+    const num = parseInt(String(raw).trim(), 10);
+    if (!Number.isInteger(num) || num < 1) { toast('X / Y phải là số nguyên từ 1 trở lên.', true); rerenderCard(it); return; }
+    const group = slotGroups().get(it.scanId) || [it], before = group.map(clone), info = slotInfo(it.scanId);
+    group.forEach(i => { if (!i.slotX) i.slotX = info.xOf.get(i.id); });     // cố định số đã suy ra cho mục cũ
+    let total = info.total;
+    if (which === 'x') { it.slotX = num; total = Math.max(total, num); }     // X vượt Y → nâng Y theo
+    else total = num;
+    const maxX = Math.max(...group.map(i => i.slotX || 0));
+    if (total < maxX) { toast(`Y không thể nhỏ hơn số thứ tự xe lớn nhất đang có (Xe ${maxX}). Hãy sửa X của xe đó trước.`, true); group.forEach((i, k) => Object.assign(i, before[k])); rerenderCard(it); return; }
+    group.forEach(i => { i.slotTotal = total; });
+    for (const i of group) await saveItem(i);
+    record(which === 'x' ? 'Sửa X (xe thứ mấy)' : 'Sửa Y (tổng số xe)', group.map((i, k) => ({ id: i.id, before: before[k], after: clone(i) })));
+    group.forEach(rerenderCard);
+    const after = slotInfo(it.scanId);
+    toast(after.complete ? '✔ Phiếu đã đủ xe.' : `⚠ Phiếu còn thiếu ${after.missing.length} xe: ${slotMissingText(after)}.`, !after.complete);
+  }
+
+  /* ---- THÊM TRƯỜNG THÔNG TIN MỚI ----
+     CHỈ cho TÌM KIẾM và CHỌN trong các cột ĐÃ CÓ SẴN trên Google Sheet (state.sheetHeaders do app.js lưu khi tải dữ liệu).
+     Không còn gõ tên tự do → không thể tạo cột mới tùy ý. Cột đã nằm sẵn trong bảng đối chiếu (Chủ xe, CCCD, Người sử dụng…) hoặc do hệ thống
+     quản lý (Phiếu lạ AL–AP, Gia đình…) thì không đưa vào danh sách chọn. */
+  const CF_RESERVED_RE = /phieu la|gia dinh|ngay xuat cam ket/;           // cột do hệ thống tự quản lý → không cho ghi tay ở đây
+  const CF_MAX_RESULTS = 40;                                              // số kết quả gợi ý tối đa hiển thị một lần
+  function cfSheetHeaders() {                                             // tiêu đề cột thật trên Sheet (ưu tiên bản vừa tải, dự phòng bản đã nhớ)
+    if (state.sheetHeaders && state.sheetHeaders.length) return state.sheetHeaders;
+    try { const a = JSON.parse(localStorage.getItem('qlxSheetHeaders') || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  }
+  const cfExists = (name) => { const p = cfPlain(name); return !!p && cfSheetHeaders().some(h => cfPlain(h) === p); };
+  // Các cột được phép chọn cho xe này: có trên Sheet, chưa có trong bảng đối chiếu / chưa thêm cho xe này
+  function cfSelectable(it) {
+    const taken = new Set((it.customFields || []).map(c => cfPlain(c.name)));
+    const builtin = new Set((typeof FIELD_MAP !== 'undefined' ? FIELD_MAP : []).filter(f => !String(f.key).startsWith(CF_PREFIX)).map(f => cfPlain(f.header)));
+    const seen = new Set();
+    return cfSheetHeaders().filter(h => {
+      const p = cfPlain(h);
+      if (!p || seen.has(p) || builtin.has(p) || taken.has(p) || CF_RESERVED_RE.test(p)) return false;
+      seen.add(p); return true;
+    });
+  }
+  // Vẽ danh sách gợi ý theo từ khóa (không phân biệt hoa-thường / dấu)
+  function cfResultsHtml(it, q) {
+    const p = cfPlain(q), all = cfSelectable(it);
+    const hit = p ? all.filter(h => cfPlain(h).includes(p)) : all;
+    if (!all.length) return '<div class="hint rv-cf-empty">Sheet không còn cột nào để thêm (hoặc chưa tải dữ liệu Sheet).</div>';
+    if (!hit.length) return '<div class="hint rv-cf-empty">Không có cột nào khớp «' + escapeHtml(q) + '» trên Sheet.</div>';
+    const id = escapeHtml(it.id);
+    return hit.slice(0, CF_MAX_RESULTS).map(h => `<button type="button" class="rv-cf-opt" data-act="cf-pick" data-id="${id}" data-header="${escapeHtml(h)}">${escapeHtml(h)}</button>`).join('')
+      + (hit.length > CF_MAX_RESULTS ? `<div class="hint rv-cf-empty">… còn ${hit.length - CF_MAX_RESULTS} cột nữa — gõ thêm để lọc.</div>` : '');
+  }
   function customHtml(v) {
     const it = v.it; if (!v.found) return '';
-    const id = escapeHtml(it.id), list = it.customFields || [], dlId = 'cfNames-' + id;
-    const names = cfLoadDefs().map(d => `<option value="${escapeHtml(d.header)}"></option>`).join('');
+    const id = escapeHtml(it.id), list = it.customFields || [];
     const rows = list.map(cf => {
-      const cur = String((v.row && v.row[cf.key]) || '').trim(), cid = escapeHtml(cf.id);
+      const cur = String((v.row && (v.row[cf.key] || (v.row._extra && v.row._extra[cf.name]))) || '').trim(), cid = escapeHtml(cf.id);
       const st = cf.doneAt ? `<span class="rv-checked" title="${escapeHtml(new Date(cf.doneAt).toLocaleString('vi-VN'))}">✔ Đã ghi lên Sheet</span>` : '<span class="rv-unchecked">Chưa ghi lên Sheet</span>';
       return `<div class="rv-cf-row">
         <div class="rv-cf-name" title="Tiêu đề cột trên Sheet">🏷 ${escapeHtml(cf.name)}</div>
         <div class="rv-cf-val"><input type="text" class="rv-edit" data-act="cf-edit" data-id="${id}" data-field="${cid}" value="${escapeHtml(cf.value)}" placeholder="Giá trị" autocomplete="off">
-          <small class="hint">Sheet: ${cur ? escapeHtml(cur) : '<i>(trống / chưa có cột)</i>'}</small></div>
+          <small class="hint">Sheet: ${cur ? escapeHtml(cur) : '<i>(trống)</i>'}</small></div>
         <div class="rv-cf-act">${st}
-          <button type="button" class="btn btn-primary btn-sm" data-act="cf-apply" data-id="${id}" data-field="${cid}" title="Ghi vào cột «${escapeHtml(cf.name)}» (tự tạo cột nếu chưa có)">⬆ Ghi lên Sheet</button>
+          <button type="button" class="btn btn-primary btn-sm" data-act="cf-apply" data-id="${id}" data-field="${cid}" title="Ghi vào cột «${escapeHtml(cf.name)}» đã có trên Sheet">⬆ Ghi lên Sheet</button>
           <button type="button" class="btn btn-ghost btn-sm" data-act="cf-del" data-id="${id}" data-field="${cid}" title="Bỏ trường này khỏi phiếu (không xóa dữ liệu đã ghi trên Sheet)">🗑</button></div>
       </div>`;
     }).join('');
     const all = list.length > 1 ? `<button type="button" class="btn btn-secondary btn-sm" data-act="cf-apply-all" data-id="${id}">⬆ Ghi tất cả trường mới lên Sheet</button>` : '';
     return `<div class="rv-custom ${list.length ? 'on' : ''}">
-      <div class="rv-custom-head">➕ Thêm thông tin mới <small>— trường mà hệ thống chưa nhận ra (vd. người đang sử dụng xe). Ghi lên Sheet sẽ tự tạo cột mới nếu chưa có.</small></div>
+      <div class="rv-custom-head">➕ Thêm thông tin mới <small>— tìm và chọn một cột ĐÃ CÓ trên Google Sheet (không tạo cột mới).</small></div>
       ${rows}
-      <div class="rv-cf-add">
-        <input type="text" class="rv-edit" data-cf="name" list="${dlId}" maxlength="60" placeholder="Tên trường (vd: Người đang sử dụng xe)" autocomplete="off">
+      <div class="rv-cf-add" data-cfroot="${id}">
+        <div class="rv-cf-search">
+          <input type="text" class="rv-edit" data-cf="search" data-id="${id}" placeholder="🔍 Tìm cột trên Sheet (vd: gia đình, ghi chú 2…)" autocomplete="off">
+          <div class="rv-cf-results" data-cf="results" hidden></div>
+        </div>
+        <input type="hidden" data-cf="picked" value="">
+        <span class="rv-cf-picked" data-cf="pickedLabel"><i>Chưa chọn cột</i></span>
         <input type="text" class="rv-edit" data-cf="value" placeholder="Giá trị" autocomplete="off">
         <button type="button" class="btn btn-secondary btn-sm" data-act="cf-add" data-id="${id}">➕ Thêm trường</button>${all}
-        <datalist id="${dlId}">${names}</datalist>
       </div>
     </div>`;
   }
+  // Chọn 1 cột từ danh sách gợi ý: ghi nhớ vào ô ẩn + hiện tên cột đã chọn
+  function onCfPick(root, header) {
+    if (!root) return;
+    root.querySelector('[data-cf="picked"]').value = header;
+    root.querySelector('[data-cf="pickedLabel"]').innerHTML = '🏷 <b>' + escapeHtml(header) + '</b>';
+    const res = root.querySelector('[data-cf="results"]'); res.hidden = true;
+    root.querySelector('[data-cf="search"]').value = '';
+    const val = root.querySelector('[data-cf="value"]'); if (val) val.focus();
+  }
   async function onCfAdd(it, root) {
     if (!root) return;
-    const nameEl = root.querySelector('[data-cf="name"]'), valEl = root.querySelector('[data-cf="value"]');
-    const name = String(nameEl.value || '').replace(/\s+/g, ' ').trim(), value = String(valEl.value || '').trim();
-    if (!name) { toast('Hãy nhập tên trường.', true); nameEl.focus(); return; }
-    if (!cfPlain(name)) { toast('Tên trường phải có ít nhất một chữ hoặc số.', true); nameEl.focus(); return; }
-    if (!value) { toast(`Hãy nhập giá trị cho trường «${name}».`, true); valEl.focus(); return; }
-    const defs = cfLoadDefs(), plain = cfPlain(name);
-    let def = defs.find(d => cfPlain(d.header) === plain);            // đã từng thêm (kể cả ở xe khác) → dùng lại đúng tiêu đề cột
-    if (!def) {
-      const builtin = (typeof FIELD_MAP !== 'undefined' ? FIELD_MAP : []).find(f => !String(f.key).startsWith(CF_PREFIX) && cfPlain(f.header) === plain);
-      if (builtin) { toast(`«${name}» đã là cột có sẵn của hệ thống («${builtin.header}») — hãy sửa ở dòng đối chiếu tương ứng.`, true); return; }
-      def = { key: cfKey(name), header: name };
-    }
+    const pickedEl = root.querySelector('[data-cf="picked"]'), valEl = root.querySelector('[data-cf="value"]'), searchEl = root.querySelector('[data-cf="search"]');
+    const header = String(pickedEl.value || '').trim(), value = String(valEl.value || '').trim();
+    if (!header) { toast('Hãy tìm và CHỌN một cột có sẵn trên Google Sheet (không thể gõ tên cột mới).', true); searchEl.focus(); return; }
+    // Chốt chặn: tên cột phải có thật trên Sheet và còn nằm trong danh sách được phép chọn → không bao giờ tạo cột mới
+    if (!cfExists(header) || !cfSelectable(it).some(h => cfPlain(h) === cfPlain(header))) { toast(`Cột «${header}» không có trong danh sách cột được phép thêm.`, true); return; }
+    if (!value) { toast(`Hãy nhập giá trị cho trường «${header}».`, true); valEl.focus(); return; }
+    const defs = cfLoadDefs(), plain = cfPlain(header);
+    const def = defs.find(d => cfPlain(d.header) === plain) || { key: cfKey(header), header };   // đã dùng ở xe khác → dùng lại đúng khóa
     if ((it.customFields || []).some(c => c.key === def.key)) { toast(`Xe này đã có trường «${def.header}» — hãy sửa giá trị ở dòng đó.`, true); return; }
-    if (!cfRegister(def)) { toast('Chưa đăng ký được trường mới (app.js chưa nạp xong). Tải lại trang rồi thử lại.', true); return; }
+    if (!cfRegister(def)) { toast('Chưa đăng ký được trường (app.js chưa nạp xong). Tải lại trang rồi thử lại.', true); return; }
     if (!defs.some(d => d.key === def.key)) { defs.push(def); cfSaveDefs(defs); }
     await track(it, `Thêm trường «${def.header}»`, async () => {
       it.customFields.push({ id: 'cf' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), key: def.key, name: def.header, value, doneAt: null });
@@ -997,6 +1163,9 @@ const ScanReview = (() => {
     if (!v.row) { toast('Xe này chưa có trong danh sách nên chưa ghi được lên Sheet.', true); return; }
     const cfs = (it.customFields || []).filter(c => (!ids || ids.includes(c.id)) && String(c.value || '').trim());
     if (!cfs.length) { toast('Chưa có giá trị nào để ghi.', true); return; }
+    // Không tạo cột mới: trường nào (kể cả trường thêm từ bản cũ) có tên cột KHÔNG còn trên Sheet thì chặn lại
+    const missing = cfs.filter(c => !cfExists(c.name));
+    if (missing.length) { toast(`Cột ${missing.map(c => '«' + c.name + '»').join(', ')} không có trên Google Sheet nên không ghi (hệ thống không tạo cột mới). Hãy xóa trường này hoặc tải lại dữ liệu Sheet.`, true); return; }
     const toWrite = {};
     cfs.forEach(c => { cfRegister({ key: c.key, header: c.name }); toWrite[c.key] = String(c.value).trim(); });
     const lines = cfs.map(c => { const old = String(v.row[c.key] || '').trim(); return `• ${c.name}: ${toWrite[c.key]}` + (old && old !== toWrite[c.key] ? `   (Sheet đang là: ${old} → sẽ bị thay)` : ''); });
@@ -1103,6 +1272,7 @@ const ScanReview = (() => {
     if (it.imgChecked) badges.push('<span class="rv-badge applied">🖼 Đã kiểm với ảnh</span>');
     if (userMode(it)) badges.push(`<span class="rv-badge warn" title="Dòng «người mua / sử dụng» trên phiếu → đối chiếu với cột AH–AK «Người sử dụng xe - …» ở bảng bên dưới.">👥 Người sử dụng: ${escapeHtml(partyValue(it, PARTY_FIELDS[0]) || '(chưa rõ tên)')}</span>`);
     else if (it.scanData.partyTen && !it.partyRole) badges.push(`<span class="rv-badge warn" title="Theo phiếu: người mua / sử dụng ≠ chủ xe đứng tên ĐKX. Chọn mục «Thông tin trên phiếu là của» để ghi sang cột riêng.">👥 Người mua / sử dụng: ${escapeHtml(it.scanData.partyTen)}</span>`);
+    { const si = slotInfo(it.scanId); if (!si.complete) badges.push(`<span class="rv-badge warn" title="Phiếu kê khai ${si.total} xe nhưng chưa có dữ liệu: ${slotMissingText(si)}">⚠ Thiếu ${slotMissingText(si)}</span>`); }
     if (v.rowCount > 1) badges.push(`<span class="rv-badge warn" title="Có ${v.rowCount} dòng cùng biển trên Sheet; chỉ cập nhật dòng đầu">⚠ ${v.rowCount} dòng trùng biển</span>`);
     if (it.done && !it.dirty) badges.push('<span class="rv-badge applied">Đã áp dụng</span>');
     let body = v.fields.map(f => fieldRowHtml(it, f, v)).join('');
@@ -1130,6 +1300,7 @@ const ScanReview = (() => {
         </span>
       </div>
       <div class="rv-quick">${quickBarHtml(it, v.found)}</div>
+      ${slotHtml(it)}
       ${partyHtml(v)}
       ${customHtml(v)}
       ${plateSuggestHtml(v)}
@@ -1141,9 +1312,10 @@ const ScanReview = (() => {
   function renderStats(views) {
     const cnt = { match: 0, diff: 0, orphan: 0, da: 0, chua: 0, img: 0, later: 0, noChecker: 0 };
     views.forEach(v => { if (hasLater(v)) cnt.later++; if (!checkerOf(v)) cnt.noChecker++; cnt[viewCategory(v)]++; if (v.it.review === 'da_kiem') cnt.da++; else cnt.chua++; if (v.it.imgChecked) cnt.img++; });
+    const slotMissingScans = new Set(views.filter(v => !slotInfo(v.it.scanId).complete).map(v => v.it.scanId)).size;   // số tờ còn thiếu xe
     const withScan = new Set(R.items.filter(i => i.bienSo && dsIndex().has(i.bienSo)).map(i => i.bienSo));
     const dsNoScan = (state.rawData || []).filter(r => !withScan.has(norm(r.bienSo))).length;
-    $('#rvStats').innerHTML = `<b>${views.length}</b> xe trên phiếu · khớp hoàn toàn <b>${cnt.match}</b> · có khác biệt <b>${cnt.diff}</b> · phiếu lạ <b class="${cnt.orphan ? 'scan-warn' : ''}">${cnt.orphan}</b> · đã kiểm <b>${cnt.da}</b> · chưa kiểm <b>${cnt.chua}</b> · 🖼 đã kiểm với ảnh <b>${cnt.img}/${views.length}</b> · 🕓 để kiểm sau <b>${cnt.later}</b> · chưa có người kiểm <b class="${cnt.noChecker ? 'scan-warn' : ''}">${cnt.noChecker}</b> · DS chưa có phiếu <b>${dsNoScan}</b>`;
+    $('#rvStats').innerHTML = `<b>${views.length}</b> xe trên phiếu · khớp hoàn toàn <b>${cnt.match}</b> · có khác biệt <b>${cnt.diff}</b> · phiếu lạ <b class="${cnt.orphan ? 'scan-warn' : ''}">${cnt.orphan}</b> · đã kiểm <b>${cnt.da}</b> · chưa kiểm <b>${cnt.chua}</b> · 🖼 đã kiểm với ảnh <b>${cnt.img}/${views.length}</b> · 🕓 để kiểm sau <b>${cnt.later}</b> · chưa có người kiểm <b class="${cnt.noChecker ? 'scan-warn' : ''}">${cnt.noChecker}</b> · ⚠ phiếu thiếu xe <b class="${slotMissingScans ? 'scan-warn' : ''}">${slotMissingScans}</b> · DS chưa có phiếu <b>${dsNoScan}</b>`;
   }
 
   function renderReview() {
@@ -1531,6 +1703,9 @@ const ScanReview = (() => {
       else if (act === 'edit-sheet') await onEditSheet(it, key, el.value);
       else if (act === 'toggle-dead') await onToggleDead(it, el.checked);
       else if (act === 'party-role') await onPartyRole(it, el.value);
+      else if (act === 'party-move') await onPartyMove(it, key, el.value);
+      else if (act === 'slot-x') await onSlotEdit(it, 'x', el.value);
+      else if (act === 'slot-y') await onSlotEdit(it, 'y', el.value);
       else if (act === 'party-edit') await onPartyEdit(it, key, el.value);
       else if (act === 'cf-edit') await onCfEdit(it, key, el.value);
       // (Đã bỏ 'tick-field' / 'tick-img': «đã kiểm với ảnh» nay tự bật khi người dùng xác nhận chọn nguồn — xem confirmSource)
@@ -1538,7 +1713,21 @@ const ScanReview = (() => {
     // Enter trong ô «Tên trường» / «Giá trị» = bấm «➕ Thêm trường»
     work.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || !e.target.dataset || !e.target.dataset.cf) return;
-      e.preventDefault(); const btn = e.target.closest('.rv-custom'); const add = btn && btn.querySelector('[data-act="cf-add"]'); if (add) add.click();
+      e.preventDefault(); const box = e.target.closest('.rv-custom');
+      // Ô tìm cột: Enter = chọn kết quả đầu tiên; ô giá trị: Enter = thêm trường
+      if (e.target.dataset.cf === 'search') { const first = box && box.querySelector('.rv-cf-opt'); if (first) first.click(); return; }
+      const add = box && box.querySelector('[data-act="cf-add"]'); if (add) add.click();
+    });
+    // Ô «Tìm cột trên Sheet»: gõ đến đâu lọc gợi ý đến đó (focus lần đầu = hiện toàn bộ cột chọn được)
+    const cfShow = (el) => {
+      const it = R.items.find(i => i.id === el.dataset.id), res = el.parentNode.querySelector('[data-cf="results"]'); if (!it || !res) return;
+      res.innerHTML = cfResultsHtml(it, el.value); res.hidden = false;
+    };
+    work.addEventListener('input', (e) => { if (e.target.dataset && e.target.dataset.cf === 'search') cfShow(e.target); });
+    work.addEventListener('focusin', (e) => { if (e.target.dataset && e.target.dataset.cf === 'search') cfShow(e.target); });
+    // Bấm ra ngoài ô tìm kiếm → đóng danh sách gợi ý
+    document.addEventListener('mousedown', (e) => {
+      work.querySelectorAll('[data-cf="results"]:not([hidden])').forEach(r => { if (!r.parentNode.contains(e.target)) r.hidden = true; });
     });
     // nhấp đúp ảnh: phóng to / vừa khung (nhấp đơn dành cho kéo ảnh)
     work.addEventListener('dblclick', (e) => { if (e.target.classList && e.target.classList.contains('rv-pg-img')) { R.pane.zoom = R.pane.zoom > 100 ? 100 : 200; applyPaneView(); } });
@@ -1588,7 +1777,9 @@ const ScanReview = (() => {
       }
       else if (act === 'orphan-cleanup') { await cleanupOrphanRow(it); rerenderCard(it); }
       else if (act === 'party-apply') await onPartyApply(it);
-      else if (act === 'cf-add') await onCfAdd(it, b.closest('.rv-custom'));
+      else if (act === 'party-unmove') await onPartyUnmove(it, b.dataset.field);
+      else if (act === 'cf-pick') onCfPick(b.closest('.rv-cf-add'), b.dataset.header);
+      else if (act === 'cf-add') await onCfAdd(it, b.closest('.rv-cf-add'));
       else if (act === 'cf-apply') await onCfApply(it, [b.dataset.field]);
       else if (act === 'cf-apply-all') await onCfApply(it, null);
       else if (act === 'cf-del') await onCfDel(it, b.dataset.field);
