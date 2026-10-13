@@ -1,0 +1,26 @@
+/* sync-issues.css — bảng chi tiết lỗi đồng bộ lên Google Sheet (sync-issues.js) */
+#syncStatusBadge { cursor: pointer; }                                   /* bấm để xem chi tiết */
+#syncStatusBadge:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+#syncStatusBadge.sync-needs-user { background: #fee2e2; color: #991b1b; font-weight: 700; }   /* lỗi cần người dùng: nổi bật hơn lỗi tự thử lại */
+
+#syncIssuesModal .modal-body { max-height: 70vh; overflow: auto; }
+.si-note { background: #fff7ed; border: 1px solid #fdba74; border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; font-size: 13px; }
+.si-empty { padding: 24px 0; text-align: center; color: #166534; }
+.si-h { font-size: 14px; margin: 14px 0 6px; }
+.si-h-user { color: #991b1b; } .si-h-retry { color: #92400e; }
+
+.si-card { border: 1px solid #d1d5db; border-left: 5px solid #9ca3af; border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; background: #fff; }
+.si-card.si-user { border-left-color: #dc2626; background: #fef2f2; }
+.si-card.si-retry { border-left-color: #f59e0b; background: #fffbeb; }
+.si-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; justify-content: space-between; }
+.si-meta { font-size: 12px; color: #6b7280; }
+.si-sec { font-size: 12px; font-weight: 600; color: #374151; margin-top: 6px; }
+.si-changes { margin: 2px 0 4px; padding-left: 18px; font-size: 13px; }
+.si-val { font-family: ui-monospace, Consolas, monospace; background: #f3f4f6; padding: 0 4px; border-radius: 4px; word-break: break-word; }
+.si-err { margin-top: 4px; font-size: 13px; }
+.si-err b { color: #991b1b; } .si-card.si-retry .si-err b { color: #92400e; }
+.si-steps { margin: 4px 0 4px; padding-left: 20px; font-size: 13px; }
+.si-raw summary { cursor: pointer; font-size: 12px; color: #6b7280; }
+.si-raw pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background: #111827; color: #f9fafb; padding: 6px 8px; border-radius: 6px; margin: 4px 0; max-height: 140px; overflow: auto; }
+.si-actions { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-top: 6px; }
+.si-drop { color: #b91c1c; border-color: #fca5a5; }

@@ -6,6 +6,7 @@
 <title>Quản lý Phương tiện &amp; Bản cam kết</title>
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="scan-review.css">
+<link rel="stylesheet" href="sync-issues.css"><!-- bảng chi tiết lỗi đồng bộ lên Sheet -->
 <link rel="stylesheet" href="scan-store.css">
 <link rel="stylesheet" href="scan-review-ui.css"><!-- bố cục đối chiếu: 2 cột màu theo nguồn + khung «CẢ XE» --><!-- giao diện cài đặt nơi lưu + kho ảnh --><!-- giao diện màn so sánh & xem phiếu scan -->
 </head>
@@ -739,11 +740,28 @@
   </div>
 </div>
 
+<!-- ============ MODAL CHI TIẾT LỖI ĐỒNG BỘ (bấm vào dòng «thay đổi lỗi…» ở đầu trang) — nội dung do sync-issues.js vẽ ============ -->
+<div id="syncIssuesModal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Các thay đổi đang chờ / bị lỗi khi đồng bộ lên Google Sheet</h2>
+      <button class="modal-close" data-close="syncIssuesModal">✕</button>
+    </div>
+    <div class="modal-body" id="syncIssuesBody"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-secondary" data-si="copy">📋 Sao chép chi tiết</button>
+      <button type="button" class="btn btn-primary" data-si="retry-all">🔁 Thử lại tất cả</button>
+      <button type="button" class="btn btn-ghost" data-close="syncIssuesModal">Đóng</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <!-- Thư viện docx (xuất Word) được nạp theo yêu cầu bởi ensureDocxLib() trong app.js: ưu tiên lib/docx.umd.js, dự phòng CDN. -->
 <script src="app.js"></script>
+<script src="sync-issues.js"></script><!-- phân loại lỗi đồng bộ + bảng chi tiết (nạp ngay sau app.js) -->
 <script src="scan.js"></script>
 <script src="scan-compare.js"></script><!-- hàm so sánh thuần (phải nạp trước scan-review.js) -->
 <script src="scan-review.js"></script>

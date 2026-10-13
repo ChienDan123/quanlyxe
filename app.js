@@ -718,6 +718,7 @@ function persistRawDataToCache() {
 let syncQueue = [];
 let syncQueueLoaded = false;
 let syncInFlight = false;
+let syncCurrentJob = null;   // tác vụ ĐANG được gửi (không gộp thêm thay đổi vào nó; không cho bỏ/thử lại giữa chừng)
 let syncRetryTimer = null;
 // Yêu cầu #5 (thử lại khi lỗi/rớt mạng): dùng BACKOFF TĂNG DẦN thay vì cố định
 // 15s — thử lại nhanh (5s) cho các lỗi tạm thời, giãn dần tối đa 2 phút nếu
@@ -731,7 +732,9 @@ async function ensureSyncQueueLoaded() {
   if (syncQueueLoaded) return;
   syncQueueLoaded = true;
   const saved = await idbGet(IDB_KEY_SYNC_QUEUE);
-  syncQueue = Array.isArray(saved) ? saved : [];
+  // Gộp (không ghi đè): tác vụ đã được thêm vào hàng đợi trong lúc đang nạp từ IndexedDB không bị mất
+  const mem = syncQueue, memIds = new Set(mem.map(j => j.id));
+  syncQueue = (Array.isArray(saved) ? saved : []).filter(j => !memIds.has(j.id)).concat(mem);   // cùng id thì bản trong bộ nhớ (mới hơn) thắng
 }
 function persistSyncQueue() {
   return idbSet(IDB_KEY_SYNC_QUEUE, syncQueue).catch(() => {});
@@ -748,12 +751,14 @@ function persistSyncQueue() {
 // ở đầu hàng đợi và ĐANG được gửi đi (syncInFlight) thì KHÔNG gộp vào (để
 // không đổi nội dung 1 request đã bay đi), mà tạo tác vụ mới nối tiếp sau nó.
 function enqueueSync(matchHeader, matchValue, updatesByHeader, rowId) {
-  const startIdx = syncInFlight ? 1 : 0; // bỏ qua job đầu nếu đang gửi dở
-  for (let i = syncQueue.length - 1; i >= startIdx; i--) {
+  for (let i = syncQueue.length - 1; i >= 0; i--) {
     const job = syncQueue[i];
+    if (job === syncCurrentJob) continue; // tác vụ đang gửi dở thì không đổi nội dung
     if (job.matchHeader === matchHeader && job.matchValue === matchValue) {
       Object.assign(job.updates, updatesByHeader);
       job.rowId = rowId;
+      // Người dùng vừa sửa lại chính xe này: có thể đã sửa đúng chỗ gây lỗi -> mở khóa để thử gửi lại ngay
+      if (job.blocked) { job.blocked = false; job.attempts = 0; }
       persistSyncQueue();
       updateSyncStatusBadge();
       processSyncQueue();
@@ -778,36 +783,49 @@ function enqueueSync(matchHeader, matchValue, updatesByHeader, rowId) {
 // người dùng đã nhập dù mất mạng/lỗi bao lâu đi nữa, hễ có mạng lại là tự ghi tiếp.
 async function processSyncQueue() {
   if (syncInFlight) return;
-  await ensureSyncQueueLoaded();
-  if (!syncQueue.length || !isWriteConnected()) { updateSyncStatusBadge(); return; }
+  syncInFlight = true;   // chiếm «khóa» NGAY (đồng bộ): nhiều lần gọi liên tiếp (vd. cập nhật hàng loạt) không còn cùng chạy song song và gửi trùng
+  try { await ensureSyncQueueLoaded(); } catch (e) { /* hàng đợi rỗng, đi tiếp */ }
+  if (!nextRunnableSyncJob() || !isWriteConnected()) { syncInFlight = false; updateSyncStatusBadge(); return; }   // rỗng, hoặc chỉ còn tác vụ đang chờ người dùng xử lý
   // navigator.onLine=false là tín hiệu chắc chắn KHÔNG có mạng -> khỏi thử,
   // để dành cho listener 'online' bên dưới kích hoạt lại ngay khi có mạng.
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    syncInFlight = false;
     scheduleSyncRetry();
     updateSyncStatusBadge();
     return;
   }
-  syncInFlight = true;
   updateSyncStatusBadge();
   const hadQueueBefore = syncQueue.length > 0;
   try {
-    while (syncQueue.length && isWriteConnected()) {
-      const job = syncQueue[0];
+    let job;
+    while (isWriteConnected() && (job = nextRunnableSyncJob())) {
+      syncCurrentJob = job;
+      updateSyncStatusBadge();
       try {
         const res = await gasRequest(state.gasUrl, {
           action: 'updateRow', matchHeader: job.matchHeader, matchValue: job.matchValue, updates: job.updates,
         });
         if (!res || res.ok === false) throw new Error((res && res.error) || 'Phản hồi không hợp lệ từ Apps Script.');
-        syncQueue.shift();
+        const at = syncQueue.indexOf(job); if (at >= 0) syncQueue.splice(at, 1);   // chỉ xoá khi ghi THÀNH CÔNG
         await persistSyncQueue();
         syncRetryAttempt = 0; // thành công -> reset backoff về mức nhanh nhất cho lần lỗi sau (nếu có)
       } catch (err) {
         job.attempts = (job.attempts || 0) + 1;
         job.lastError = String((err && err.message) || err);
+        job.lastErrorAt = Date.now();
+        // PHÂN LOẠI LỖI (sync-issues.js): 'retry' = lỗi tạm -> tự thử lại; 'user' = cần người dùng xử lý (sai quyền, thiếu cột, chưa Deploy…)
+        const cls = classifySyncError(job.lastError, job.attempts);
+        job.errCode = cls.code;
+        if (cls.kind === 'user') {
+          job.blocked = true;              // dừng tự thử lại tác vụ này, chờ người dùng bấm «Thử lại» / «Bỏ» trong bảng chi tiết
+          await persistSyncQueue();
+          continue;                        // KHÔNG chặn các thay đổi khác phía sau (trước đây 1 lỗi vĩnh viễn làm kẹt cả hàng đợi)
+        }
+        job.blocked = false;
         await persistSyncQueue();
         scheduleSyncRetry();
-        break; // dừng vòng lặp, để dành các tác vụ còn lại cho lần thử sau
-      }
+        break; // lỗi tạm (mạng/429/503…): dừng vòng lặp, giữ nguyên thứ tự, thử lại sau theo backoff
+      } finally { syncCurrentJob = null; }
     }
   } finally {
     syncInFlight = false;
@@ -829,24 +847,58 @@ function scheduleSyncRetry() {
 // khi có việc đang chờ/đang chạy, ẩn hẳn khi hàng đợi rỗng để không gây rối mắt.
 function updateSyncStatusBadge() {
   const el = $('#syncStatusBadge');
+  setTimeout(notifySyncIssues, 0);   // bảng chi tiết lỗi (nếu đang mở) vẽ lại cho khớp
   if (!el) return;
   if (!syncQueue.length) { el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
   const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  const blocked = syncQueue.filter(j => j.blocked).length;                       // cần người dùng xử lý
+  const retrying = syncQueue.filter(j => !j.blocked && j.attempts > 0).length;   // lỗi tạm, đang tự thử lại
   if (offline) {
-    el.textContent = `📴 Mất mạng — ${syncQueue.length} thay đổi sẽ tự đồng bộ khi có mạng lại`;
+    el.textContent = `📴 Mất mạng — ${syncQueue.length} thay đổi sẽ tự đồng bộ khi có mạng lại (bấm để xem)`;
     el.className = 'badge badge-mode sync-error';
+  } else if (blocked) {
+    el.textContent = `⚠️ ${blocked} thay đổi cần bạn xử lý` + (retrying ? ` · ⏳ ${retrying} đang tự thử lại` : '') + ' — bấm để xem lỗi & cách khắc phục';
+    el.className = 'badge badge-mode sync-error sync-needs-user';
   } else if (syncInFlight) {
     el.textContent = `🔄 Đang đồng bộ ngầm (${syncQueue.length})...`;
     el.className = 'badge badge-mode mode-gas';
-  } else if (syncQueue.some(j => j.attempts > 0)) {
-    el.textContent = `⏳ ${syncQueue.length} thay đổi lỗi — đang chờ thử lại tự động`;
+  } else if (retrying) {
+    el.textContent = `⏳ ${syncQueue.length} thay đổi lỗi — đang chờ thử lại tự động (bấm để xem chi tiết)`;
     el.className = 'badge badge-mode sync-error';
   } else {
     el.textContent = `⏳ ${syncQueue.length} thay đổi chờ đồng bộ`;
     el.className = 'badge badge-mode mode-csv';
   }
 }
+
+// Tác vụ kế tiếp được phép gửi: bỏ qua các tác vụ đang chờ người dùng xử lý (job.blocked)
+function nextRunnableSyncJob() { return syncQueue.find(j => !j.blocked) || null; }
+// Phân loại lỗi do sync-issues.js đảm nhiệm; thiếu file đó thì coi mọi lỗi là lỗi tạm (hành vi cũ)
+function classifySyncError(msg, attempts) {
+  try { if (window.SyncIssues) return window.SyncIssues.classify(msg, attempts); } catch (e) { /* bỏ qua */ }
+  return { kind: 'retry', code: 'unknown' };
+}
+function notifySyncIssues() { try { if (window.SyncIssues) window.SyncIssues.onQueueChange(); } catch (e) { /* bỏ qua */ } }
+// Cửa vào cho bảng chi tiết lỗi (sync-issues.js): đọc danh sách + thử lại / bỏ từng tác vụ. KHÔNG cho đụng tác vụ đang gửi dở.
+window.SyncQueueAPI = {
+  list: () => syncQueue.map(j => ({ ...j, updates: { ...(j.updates || {}) }, current: j === syncCurrentJob })),
+  retry(id) {
+    const j = syncQueue.find(x => x.id === id); if (!j || j === syncCurrentJob) return false;
+    j.blocked = false; j.attempts = 0; persistSyncQueue();
+    syncRetryAttempt = 0; if (syncRetryTimer) { clearTimeout(syncRetryTimer); syncRetryTimer = null; }
+    updateSyncStatusBadge(); processSyncQueue(); return true;
+  },
+  retryAll() {
+    syncQueue.forEach(j => { if (j !== syncCurrentJob) { j.blocked = false; j.attempts = 0; } });
+    persistSyncQueue(); syncRetryAttempt = 0; if (syncRetryTimer) { clearTimeout(syncRetryTimer); syncRetryTimer = null; }
+    updateSyncStatusBadge(); processSyncQueue();
+  },
+  drop(id) {   // bỏ thay đổi khỏi hàng đợi (giá trị cục bộ giữ nguyên, chỉ không lên Sheet nữa)
+    const j = syncQueue.find(x => x.id === id); if (!j || j === syncCurrentJob) return false;
+    syncQueue.splice(syncQueue.indexOf(j), 1); persistSyncQueue(); updateSyncStatusBadge(); return true;
+  },
+};
 // Nhấp nháy "✅ Đã đồng bộ xong" trong vài giây khi hàng đợi vừa được xử lý
 // hết sạch — cho người dùng biết chắc mọi thứ đã lên Sheet, đúng yêu cầu có
 // trạng thái rõ ràng cho cả 3 pha (đang đồng bộ / đang chờ thử lại / đã xong).
