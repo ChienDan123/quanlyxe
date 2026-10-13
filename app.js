@@ -532,19 +532,62 @@ function connectViaCsv(csvUrl, { silent = false } = {}) {
 }
 
 /* ---- 4c. Chế độ Apps Script (đọc + ghi) ---- */
-// Ghi lên Apps Script có DỰ PHÒNG: nếu URL chính trả «Unknown action» (bản triển khai cũ / máy khác trỏ nhầm bản)
-// thì thử tiếp URL kho lưu phiếu (ScanSync.storeUrl) — thường là bản triển khai mới hơn.
+// Ghi lên Apps Script có 2 TẦNG DỰ PHÒNG (sửa dứt điểm lỗi «Action không hỗ trợ: updateRow»):
+//   Tầng 1 — POST tới URL chính, rồi URL kho lưu phiếu (ScanSync.storeUrl) nếu URL chính báo «action chưa hỗ trợ».
+//   Tầng 2 — nếu CẢ HAI đều báo «action chưa hỗ trợ» (thường do dự án còn nhiều hàm doPost trùng tên nên lệnh bị che mất),
+//            ghi qua GET: ?action=updateRow&data=<JSON>. doGet chỉ có 1 hàm duy nhất ở Code.gs nên không bị che.
+// Nhớ URL nào đã biết là «POST không nhận updateRow» (10 phút) để khỏi tốn 2 request thừa cho từng thay đổi.
+const WRITE_VIA_GET = new Set(['updateRow', 'appendRow', 'saveSettings', 'urPing']);   // các action ghi Sheet được phép đi đường GET
+const GET_URL_MAX = 6000;                  // giới hạn an toàn độ dài URL; vượt thì tách payload theo từng cột
+const POST_BROKEN_MS = 10 * 60 * 1000;
+const _postBrokenAt = new Map();           // url -> thời điểm gần nhất thấy POST báo «action chưa hỗ trợ»
+const isUnsupportedActionMsg = (m) => /unknown (post |get )?action|action không hỗ trợ|không hỗ trợ:/i.test(String(m || ''));
+
+// Gửi 1 payload ghi qua GET. Payload quá dài (updateRow nhiều cột) -> tách thành nhiều request, mỗi request 1 phần các cột
+// (an toàn vì updateRow chỉ ghi đúng các cột được gửi, không xóa cột khác).
+async function gasWriteViaGet(url, payload) {
+  const build = (p) => url + (url.includes('?') ? '&' : '?') + 'action=' + encodeURIComponent(p.action) + '&data=' + encodeURIComponent(JSON.stringify(p));
+  const send = async (p) => (await fetch(build(p), { method: 'GET' })).json();
+  if (build(payload).length <= GET_URL_MAX) return send(payload);
+  if (payload.action !== 'updateRow' || !payload.updates) return { ok: false, error: 'Dữ liệu quá dài để gửi qua đường dự phòng (GET).' };
+  let last = { ok: true };
+  for (const h of Object.keys(payload.updates)) {                       // mỗi cột 1 request
+    const one = Object.assign({}, payload, { updates: { [h]: payload.updates[h] } });
+    if (build(one).length > GET_URL_MAX) return { ok: false, error: `Giá trị cột «${h}» quá dài (đường dự phòng GET) — cần Apps Script nhận POST: làm theo hướng dẫn Deploy.` };
+    last = await send(one);
+    if (!last || last.ok === false) return last;
+  }
+  return last;
+}
+
 async function gasWriteRequest(payload) {
   const urls = [state.gasUrl];
   try { const alt = window.ScanSync && ScanSync.storeUrl && ScanSync.storeUrl(); if (alt && alt !== state.gasUrl) urls.push(alt); } catch (e) { /* bỏ qua */ }
-  let last;
+  let last, allUnsupported = true;
   for (const u of urls) {
+    if (!u) continue;
+    // URL này vừa báo POST không nhận action -> bỏ qua POST, coi như «unsupported» luôn
+    const t0 = _postBrokenAt.get(u);
+    if (t0 && Date.now() - t0 < POST_BROKEN_MS && WRITE_VIA_GET.has(payload && payload.action)) { last = { ok: false, error: 'Unknown POST action: ' + payload.action }; continue; }
     try {
       const r = await gasRequest(u, payload);
-      if (r && r.ok !== false) return r;
+      if (r && r.ok !== false) { _postBrokenAt.delete(u); return r; }
       last = r;
-      if (!/unknown (post )?action|action không hỗ trợ|không hỗ trợ:/i.test(String((r && r.error) || ''))) return r;   // lỗi khác → không đổi URL (lỗi «action chưa hỗ trợ» → thử URL kho lưu phiếu)
-    } catch (e) { last = { ok: false, error: String((e && e.message) || e) }; }
+      if (!isUnsupportedActionMsg(r && r.error)) return r;              // lỗi khác (không phải «action chưa hỗ trợ») -> trả nguyên, KHÔNG đổi URL / đường
+      _postBrokenAt.set(u, Date.now());
+    } catch (e) { last = { ok: false, error: String((e && e.message) || e) }; allUnsupported = false; }
+  }
+  // Tầng 2: GET dự phòng cho các action ghi Sheet
+  if (allUnsupported && payload && WRITE_VIA_GET.has(payload.action)) {
+    for (const u of urls) {
+      if (!u) continue;
+      try {
+        const r = await gasWriteViaGet(u, payload);
+        if (r && r.ok !== false) { console.info('[sync] đã ghi qua đường GET dự phòng (doPost chưa nhận ' + payload.action + ')'); return r; }
+        if (r && !isUnsupportedActionMsg(r.error)) return r;            // GET tới được nhưng lỗi nghiệp vụ (thiếu cột, không thấy dòng…) -> báo đúng lỗi đó
+        last = r;
+      } catch (e) { last = { ok: false, error: String((e && e.message) || e) }; }
+    }
   }
   return last;
 }

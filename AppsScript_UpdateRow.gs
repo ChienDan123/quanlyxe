@@ -1,5 +1,5 @@
 // ============================================================================
-// AppsScript_UpdateRow.gs — "CỬA VÀO" DUY NHẤT cho POST của Web App (bản 9)
+// AppsScript_UpdateRow.gs — "CỬA VÀO" DUY NHẤT cho POST của Web App (bản 10)
 // ----------------------------------------------------------------------------
 // NGUYÊN NHÂN CÁC LỖI CŨ (đã sửa trong bản này):
 //   1) Dự án có NHIỀU hàm doPost (Code.gs, AppsScript_DoPost.gs, file này). Apps Script chỉ chạy MỘT hàm — hàm nạp sau cùng
@@ -11,7 +11,7 @@
 // CÁCH DÙNG: xem phần HƯỚNG DẪN ở cuối file. QUAN TRỌNG: toàn dự án chỉ được có ĐÚNG 1 hàm doPost (hàm ở file này).
 // ============================================================================
 
-const UR_VERSION = 9;
+const UR_VERSION = 10;
 const UR_SETTINGS_SHEET = 'Settings';                                  // trùng SETTINGS_SHEET_NAME của Code.gs
 const UR_SYSTEM_TABS = ['GeminiConfig', 'Settings', 'PhieuLa'];        // tab hệ thống: không bao giờ dò làm tab dữ liệu
 
@@ -136,6 +136,38 @@ function saveSettingsAction_(data) {
 // Tên các hàm doPost cũ (nếu bạn đổi tên thay vì xóa) — chỉ dùng cho action mà file này không biết
 var UR_LEGACY_NAMES = ['doPostOld1_', 'doPostOld2_', 'doPostOld3_', 'doPostLegacy_', 'doPostGoc_', 'doPostCu_'];
 
+/** ĐIỀU PHỐI các action GHI SHEET (updateRow / appendRow / saveSettings / write / urPing).
+ *  Trả object kết quả nếu action thuộc nhóm này, trả null nếu không phải (để nơi gọi thử nhóm khác).
+ *  Dùng chung cho 3 đường vào, nên «updateRow» luôn tới được dù doPost nào đang chạy:
+ *    1) doPost bên dưới (đường chính)   2) doGet trong Code.gs (đường dự phòng, web gọi qua GET)
+ *    3) scanDispatch_ (nếu dán 1 dòng vào đầu hàm đó — xem HƯỚNG DẪN cuối file). */
+function ur_dispatch_(data) {
+  var action = String((data && data.action) || '');
+  switch (action) {
+    case 'updateRow':    return updateRowAction_(data);
+    case 'appendRow':    return appendRowAction_(data);
+    case 'saveSettings': return saveSettingsAction_(data);
+    case 'write': {      // tương thích Code.gs cũ (ghi 1 ô)
+      var sh = SpreadsheetApp.getActive().getSheetByName(data.sheet || 'Sheet1');
+      if (!sh) return { ok: false, error: 'Sheet not found: ' + data.sheet };
+      sh.getRange(data.row, data.col).setValue(data.value);
+      return { ok: true };
+    }
+    case 'urPing':       return { ok: true, urVersion: UR_VERSION, scanDispatch: typeof scanDispatch_ === 'function', actions: ['updateRow', 'appendRow', 'saveSettings', 'write'] };
+  }
+  return null;
+}
+
+/** Đường GET dự phòng: Code.gs → doGet gọi hàm này với e.parameter. Web gửi ?action=updateRow&data=<JSON mã hóa URL>.
+ *  (doGet chỉ có 1 hàm duy nhất ở Code.gs nên đường này không bao giờ bị hàm trùng tên che mất.) */
+function ur_handleGet_(params) {
+  var data;
+  try { data = JSON.parse((params && params.data) || '{}'); }
+  catch (err) { return { ok: false, error: 'Tham số data không phải JSON hợp lệ.' }; }
+  data.action = String((params && params.action) || data.action || '');
+  return ur_dispatch_(data) || { ok: false, error: 'Unknown GET action: ' + data.action };
+}
+
 /** CỬA VÀO DUY NHẤT của POST. Xóa/đổi tên mọi hàm doPost khác trong dự án. */
 function doPost(e) {
   var data;
@@ -143,18 +175,8 @@ function doPost(e) {
   catch (err) { return ur_json_({ ok: false, error: 'Body không phải JSON hợp lệ.' }); }
   var action = String((data && data.action) || '');
   try {
-    switch (action) {
-      case 'updateRow':    return ur_json_(updateRowAction_(data));
-      case 'appendRow':    return ur_json_(appendRowAction_(data));
-      case 'saveSettings': return ur_json_(saveSettingsAction_(data));
-      case 'write': {      // tương thích Code.gs cũ (ghi 1 ô)
-        var sh = SpreadsheetApp.getActive().getSheetByName(data.sheet || 'Sheet1');
-        if (!sh) return ur_json_({ ok: false, error: 'Sheet not found: ' + data.sheet });
-        sh.getRange(data.row, data.col).setValue(data.value);
-        return ur_json_({ ok: true });
-      }
-      case 'urPing':       return ur_json_({ ok: true, urVersion: UR_VERSION, scanDispatch: typeof scanDispatch_ === 'function', actions: ['updateRow', 'appendRow', 'saveSettings', 'write'] });
-    }
+    var mine = ur_dispatch_(data);                       // nhóm ghi Sheet
+    if (mine) return ur_json_(mine);
     // Nhóm scan* (scanPing, scanPut, scanList, scanOrphanUpsert…): scanDispatch_ nhận DỮ LIỆU ĐÃ PARSE (không phải e) và trả object / null
     if (typeof scanDispatch_ === 'function') {
       var out = scanDispatch_(data);
@@ -182,7 +204,18 @@ function urSelfTest() {
   var say = function (ok, m) { out.push((ok ? '✔ ' : '✘ ') + m); };
   // Chẩn đoán doPost TRÙNG TÊN: nếu hàm doPost đang chạy không chứa mã của file này thì file khác đã «thắng» và che mất updateRow
   say(String(doPost).indexOf('UR_VERSION') >= 0, 'doPost đang chạy ' + (String(doPost).indexOf('UR_VERSION') >= 0 ? 'là của file này' : 'KHÔNG phải của file này — còn doPost khác trong dự án (xóa hoặc đổi tên thành doPostOld2_)'));
-  try { if (typeof scanDispatch_ === 'function') say(String(scanDispatch_).indexOf('function doPost') < 0, 'scanDispatch_ có mặt'); } catch (e) { /* bỏ qua */ }
+  try {
+    if (typeof scanDispatch_ === 'function') {
+      var wired = String(scanDispatch_).indexOf('ur_dispatch_') >= 0;
+      say(true, 'scanDispatch_ có mặt' + (wired ? ' và đã nối ur_dispatch_ (updateRow đi được cả đường scanDispatch_)' : ' (chưa nối ur_dispatch_ — không sao, đã có đường GET dự phòng)'));
+    }
+  } catch (e) { /* bỏ qua */ }
+  try {   // đường GET dự phòng: doGet trong Code.gs phải gọi ur_handleGet_
+    var g = ur_handleGet_({ action: 'urPing', data: '{}' });
+    say(g && g.ok && g.urVersion === UR_VERSION, 'Đường GET dự phòng (ur_handleGet_) chạy bản ' + (g && g.urVersion));
+    var gotGet = String(doGet).indexOf('ur_handleGet_') >= 0;
+    say(gotGet, 'doGet trong Code.gs ' + (gotGet ? 'đã nối đường ghi dự phòng' : 'CHƯA nối — dán Code.gs bản mới'));
+  } catch (e) { say(false, 'Đường GET dự phòng lỗi: ' + e.message); }
   try {
     var j = JSON.parse(doPost({ postData: { contents: JSON.stringify({ action: 'urPing' }) } }).getContent());
     say(j.ok && j.urVersion === UR_VERSION, 'doPost chạy bản ' + j.urVersion + (j.scanDispatch ? ' (đã nối scanDispatch_)' : ' — THIẾU scanDispatch_ (dán Ma_lenh_luu_anh.gs)'));
@@ -201,11 +234,13 @@ function urSelfTest() {
   Logger.log(out.join('\n')); return out.join('\n');
 }
 
-/* ============================== HƯỚNG DẪN ==============================
- * 1) Apps Script → thay TOÀN BỘ nội dung file AppsScript_UpdateRow.gs bằng file này.
- * 2) XÓA file AppsScript_DoPost.gs (hàm doPost của nó trùng tên). Trong Code.gs đổi «function doPost(e)» thành «function doPostOld1_(e)»
- *    (file Code.gs đi kèm đã đổi sẵn). Đừng xóa scanDispatch_ và các hàm scan* (file Ma_lenh_luu_anh.gs). Chỉ giữ 1 doGet (ở Code.gs).
- * 3) Lưu → chạy urSelfTest() một lần (cấp quyền nếu được hỏi) → mọi dòng phải có dấu ✔.
- * 4) Triển khai → Quản lý bản triển khai → ✏️ trên bản có ID …R4vCoBPw → Phiên bản: «Phiên bản mới» → Triển khai (GIỮ NGUYÊN URL /exec).
- * 5) Kiểm tra từ trình duyệt máy khác: web tự gọi scanPing / updateRow; hoặc POST {"action":"urPing"} phải ra {"ok":true,"urVersion":9,…}.
- * ======================================================================= */
+/* ============================== HƯỚNG DẪN (bản 10) ==============================
+ * 1) Apps Script → thay TOÀN BỘ nội dung AppsScript_UpdateRow.gs bằng file này, và thay TOÀN BỘ Code.gs bằng Code.gs đi kèm
+ *    (Code.gs mới có doGet nhận ?action=updateRow làm đường dự phòng).
+ * 2) (KHUYẾN NGHỊ) Mở file chứa scanDispatch_ (Ma_lenh_luu_anh.gs / AppsScript_ScanPatch.gs). Ngay DÒNG ĐẦU trong thân hàm scanDispatch_ dán:
+ *        var ur = ur_dispatch_(d); if (ur) return ur;
+ *    (đổi «d» đúng tên tham số của hàm đó, thường là d hoặc data). Nếu file đó có hàm doPost riêng: xóa hoặc đổi tên thành doPostOld2_.
+ * 3) Lưu → chạy urSelfTest() một lần (cấp quyền nếu được hỏi) → các dòng quan trọng phải có ✔.
+ * 4) Triển khai → Quản lý bản triển khai → ✏️ trên bản đang dùng → Phiên bản: «Phiên bản mới» → Triển khai (GIỮ NGUYÊN URL /exec).
+ * 5) Kiểm tra: mở  <URL /exec>?action=urPing  trên trình duyệt phải ra {"ok":true,"urVersion":10,…}.
+ * ================================================================================ */

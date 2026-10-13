@@ -34,6 +34,15 @@ function doGet(e) {
     const action = (e && e.parameter && e.parameter.action) || 'read';
     if (action === 'read') return readData_();
     if (action === 'settings') return readSettings_();
+    // ĐƯỜNG GHI DỰ PHÒNG QUA GET: web gửi ?action=updateRow&data=<JSON>. doGet là hàm DUY NHẤT nên không bị doPost trùng tên che mất.
+    if (action === 'updateRow' || action === 'appendRow' || action === 'saveSettings' || action === 'urPing') {
+      if (typeof ur_handleGet_ === 'function') return jsonResponse_(ur_handleGet_(e.parameter));   // bản mới (AppsScript_UpdateRow.gs bản 10)
+      const body = JSON.parse((e.parameter && e.parameter.data) || '{}');                          // chưa có file mới: dùng hàm cũ ngay trong file này
+      if (action === 'updateRow') return updateRow_(body);
+      if (action === 'appendRow') return appendRow_(body);
+      if (action === 'saveSettings') return saveSettings_(body);
+      return jsonResponse_({ ok: true, urVersion: 0 });
+    }
     return jsonResponse_({ ok: false, error: 'Unknown GET action: ' + action });
   } catch (err) {
     return jsonResponse_({ ok: false, error: String(err) });
