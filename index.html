@@ -229,9 +229,19 @@
       <div class="scan-options">
         <label class="hint-label" for="scanPagesPerSheet" style="margin:0">Mỗi tờ gồm:</label>
         <select id="scanPagesPerSheet" class="tpl-input" style="width:auto">
-          <option value="2">2 trang/ảnh liên tiếp (mặt trước + mặt sau)</option>
-          <option value="1">1 trang/ảnh (mỗi trang là 1 tờ)</option>
+          <option value="2">2 mặt / phiếu (mặc định: mặt trước + mặt sau)</option>
+          <option value="1">1 mặt / phiếu (mỗi trang là 1 tờ)</option>
+          <option value="3">3 mặt / phiếu</option>
+          <option value="4">4 mặt / phiếu</option>
+          <option value="5">5 mặt / phiếu</option>
+          <option value="6">6 mặt / phiếu</option>
+          <option value="7">7 mặt / phiếu</option>
+          <option value="8">8 mặt / phiếu</option>
         </select>
+        <label class="hint-label" for="scanPageFrom" style="margin:0">Quét PDF từ trang:</label>
+        <input id="scanPageFrom" type="number" min="1" step="1" class="tpl-input" style="width:80px" placeholder="đầu">
+        <label class="hint-label" for="scanPageTo" style="margin:0">đến trang:</label>
+        <input id="scanPageTo" type="number" min="1" step="1" class="tpl-input" style="width:80px" placeholder="cuối">
         <label class="chk-inline"><input type="checkbox" id="chkScanSkipDup" checked> Bỏ qua tờ đã quét (trùng ảnh)</label>
       </div>
 
@@ -766,7 +776,7 @@
 <script src="sync-issues.js?v=20261013"></script><!-- phân loại lỗi đồng bộ + bảng chi tiết (nạp ngay sau app.js) -->
 <script src="scan.js?v=20261013"></script>
 <script src="scan-compare.js?v=20261013"></script><!-- hàm so sánh thuần (phải nạp trước scan-review.js) -->
-<script src="scan-review.js?v=20261013"></script>
+<script src="scan-review.js?v=20261014"></script>
 <script src="scan-files.js?v=20261013"></script><!-- đặt tên file theo biển số + PDF đầy đủ 2 mặt -->
 <script src="scan-sync.js?v=20261013"></script><!-- lưu ảnh / trạng thái phiếu online (Drive) -->
 <script src="scan-rotate.js?v=20261013"></script><!-- xoay ảnh phiếu từng mặt + tự nhận hướng + lưu hướng đã chỉnh -->

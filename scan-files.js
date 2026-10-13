@@ -48,7 +48,7 @@ const ScanFiles = (() => {
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
 
-  /* ---- Ghép PDF đầy đủ (mặt 1 + mặt 2) bằng pdf-lib, nạp theo yêu cầu: ưu tiên lib/pdf-lib.min.js, dự phòng CDN ---- */
+  /* ---- Ghép PDF đầy đủ (tất cả các mặt) bằng pdf-lib, nạp theo yêu cầu: ưu tiên lib/pdf-lib.min.js, dự phòng CDN ---- */
   let _pdfLib = null;
   function ensurePdfLib() {
     if (window.PDFLib) return Promise.resolve(window.PDFLib);
@@ -66,8 +66,9 @@ const ScanFiles = (() => {
   }
   async function buildPdf(rec) {
     const lib = await ensurePdfLib(), doc = await lib.PDFDocument.create();
-    for (const side of ['front', 'back']) {
-      const blob = rec[side + 'Blob']; if (!blob) continue;
+    const blobs = [rec.frontBlob, rec.backBlob, ...((rec.extraBlobs || []).map(x => x && x.blob))];   // mặt 1, 2 và các mặt phụ 3..8
+    for (const blob of blobs) {
+      if (!blob) continue;
       const bytes = new Uint8Array(await blob.arrayBuffer());
       const isPdf = bytes[0] === 0x25 && bytes[1] === 0x50;                     // "%P" = PDF gốc
       if (isPdf) { const src = await lib.PDFDocument.load(bytes); (await doc.copyPages(src, src.getPageIndices())).forEach(p => doc.addPage(p)); continue; }

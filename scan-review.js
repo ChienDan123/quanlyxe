@@ -747,7 +747,7 @@ const ScanReview = (() => {
     $('#rvList').innerHTML = '<p class="hint">Đang nạp dữ liệu…</p>';
     $('#rvChkTag').checked = !!prefs.tag; $('#rvChkQuick').checked = !!prefs.quick;
     buildAssigneeSelect();
-    bindOrphanToolbarBtn(); bindAqBtn();
+    bindOrphanToolbarBtn(); bindAqBtn(); bindLiveBtn();
     const warn = $('#rvWarn');
     const msgs = [];
     if (!state.rawData.length) msgs.push('⚠️ <b>Chưa tải danh sách xe</b> từ Google Sheet — chưa so sánh được. Hãy kết nối Sheet rồi mở lại màn này.');
@@ -761,6 +761,49 @@ const ScanReview = (() => {
     R.page = 1;
     renderReview();
     autoResendPending();   // đẩy lại việc làm dở (kể cả từ máy khác) lên Google Sheet
+  }
+
+  /* ---- Từ «Chi tiết chủ phương tiện» chuyển nhanh sang So sánh phiếu của ĐÚNG xe (biển số) đó ----
+     Mở màn So sánh, bỏ các bộ lọc đang bật (hiện cả phiếu đã kiểm), gõ sẵn biển số vào ô tìm để chỉ còn phiếu của xe này,
+     rồi nhảy tới thẻ xe + mở khung ảnh phiếu. Panel chi tiết vẫn mở phía dưới, đóng So sánh là quay lại đúng chỗ cũ. */
+  async function openForPlate(plateRaw) {
+    const plate = norm(plateRaw);
+    if (!plate) { toast('Xe này chưa có biển số.', true); return; }
+    R.filter = 'all'; R.checker = ''; R.search = String(plateRaw || '').trim(); R.page = 1;
+    const f = $('#rvFilter'); if (f) f.value = 'all';
+    const q = $('#rvSearch'); if (q) q.value = R.search;
+    await open();                                           // nạp mục so sánh + vẽ danh sách (đã áp bộ lọc ở trên)
+    const mine = R.items.filter(i => i.bienSo === plate);
+    if (!mine.length) { toast('Xe ' + plateRaw + ' chưa có mục so sánh phiếu scan trên máy này.', true); return; }
+    const target = mine.find(i => !i.done || i.dirty) || mine[0];   // ưu tiên mục còn phải xử lý
+    await goToItem(target.id);
+  }
+  // Nút «🔍 So sánh phiếu» được gắn cạnh mọi nút/icon 📷 «xem phiếu scan» bên trong panel chi tiết (kể cả bảng xe mini)
+  function injectCompareButtons() {
+    const body = document.getElementById('detailBody'); if (!body) return;
+    body.querySelectorAll('[data-role="scan-view"]').forEach(v => {
+      const nx = v.nextElementSibling;
+      if (nx && nx.dataset && nx.dataset.role === 'scan-compare') return;           // đã có
+      const row = state.rawData.find(r => r._rowId === v.dataset.rowid); if (!row) return;
+      const b = document.createElement('button'); b.type = 'button';
+      b.dataset.role = 'scan-compare'; b.dataset.rowid = v.dataset.rowid;
+      if (v.classList.contains('scan-badge-btn')) {                                  // icon nhỏ cạnh biển số trong bảng
+        b.className = 'scan-badge-btn scan-cmp-btn'; b.textContent = '🔍';
+        b.title = 'So sánh phiếu scan ↔ Google Sheet của xe ' + row.bienSo;
+      } else {                                                                       // nút chữ trong thẻ chủ xe
+        b.className = 'btn btn-secondary btn-sm'; b.style.marginLeft = '6px';
+        b.textContent = '🔍 So sánh phiếu (' + row.bienSo + ')';
+        b.title = 'Mở màn So sánh phiếu scan của đúng xe này';
+      }
+      v.insertAdjacentElement('afterend', b);
+    });
+  }
+  function bindDetailCompare() {
+    const body = document.getElementById('detailBody'); if (!body) return;
+    let raf = 0;
+    new MutationObserver(() => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; injectCompareButtons(); }); })
+      .observe(body, { childList: true, subtree: true });                            // app.js vẽ lại panel -> gắn lại nút
+    injectCompareButtons();
   }
 
   /* ---- Nút «ghi phiếu lạ» dính trên thanh công cụ: tác động lên thẻ đang chọn (hoặc phiếu lạ đầu tiên đang hiện) ---- */
@@ -816,6 +859,186 @@ const ScanReview = (() => {
     b.type = 'button'; b.id = 'rvAqBtn'; b.className = 'btn btn-secondary btn-sm';
     b.textContent = '🔁 Đồng bộ AQ'; b.title = 'Ghi lại cột AQ «Người kiểm phiếu» (= Người thực hiện) của mọi xe có phiếu lên Google Sheet';
     b.addEventListener('click', () => { const n = backfillChecker({ force: true }); if (!n) toast('Không có xe nào cần đồng bộ AQ (chưa kết nối 2 chiều, hoặc chưa có Người thực hiện).', true); });
+    anchor.insertAdjacentElement('afterend', b);
+  }
+
+  /* ---- RÀ SOÁT VỚI GOOGLE SHEET THẬT ----
+     Các cột «📋 TRÊN GOOGLE SHEET (sửa được)» là bản LƯU TRÊN MÁY (state.rawData + IndexedDB). Nếu trước đó ghi lên Sheet bị lỗi
+     (vd. «Action không hỗ trợ: updateRow») thì bản máy có thể khác Sheet thật mà không ai biết. Chức năng này:
+       1) tải Sheet THẬT (đọc trực tiếp, KHÔNG nạp đè dữ liệu đang có trên máy);
+       2) so từng ô của các cột trong bảng đối chiếu: «Trên máy» ↔ «Thật trên Sheet»;
+       3) CHỈ liệt kê ô khác nhau; người dùng chọn từng ô: ghi bản máy lên Sheet · lấy bản Sheet thật về máy · bỏ qua (mặc định).
+     Ghi lên Sheet gọi trực tiếp (không qua hàng đợi) và báo thành/bại rõ ràng từng xe. */
+  const lvNorm = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const lvHeaderOf = (it, key) => {
+    const f = (typeof FIELD_MAP !== 'undefined') && FIELD_MAP.find(x => x.key === key);
+    if (f) return f.header;
+    const cf = isCustomKey(key) ? customByKey(it, key) : null;
+    return cf ? cf.name : '';
+  };
+  // Giá trị 1 ô trên dòng Sheet thật (tìm cột theo tiêu đề đã chuẩn hóa như app.js)
+  const lvLiveVal = (live, header) => {
+    const n = normalizeHeader(header);
+    const h = live.headers.find(x => normalizeHeader(x) === n);
+    return h == null ? null : lvNorm(live.row[h]);       // null = Sheet thật CHƯA có cột này
+  };
+  async function lvFetchLive() {
+    if (!state.gasUrl) throw new Error('Chưa kết nối Apps Script (2 chiều) — không đọc được Sheet thật.');
+    let data;
+    try { data = await gasRequest(state.gasUrl, null); } catch (e) { throw new Error('Không đọc được Google Sheet: ' + (e.message || e)); }
+    if (!data || data.ok === false || !Array.isArray(data.headers)) throw new Error((data && data.error) || 'Phản hồi không hợp lệ từ Apps Script.');
+    return { headers: data.headers, rows: rowsFromHeaderArray(data.headers, data.rows) };
+  }
+  function lvFindLiveRow(live, row) {
+    const mk = matchKeyForRow(row); if (!mk) return null;
+    const h = live.headers.find(x => normalizeHeader(x) === normalizeHeader(mk.header)); if (!h) return null;
+    const want = lvNorm(mk.value);
+    return live.rows.find(r => lvNorm(r[h]) === want) || null;
+  }
+  // Danh sách ô khác biệt + thống kê
+  function lvCompute(live) {
+    const diffs = [], seen = new Set(); let checkedRows = 0, noRow = 0, noMatch = 0, noKey = 0;
+    for (const it of R.items) {
+      let rows; try { rows = it.bienSo ? (dsIndex().get(it.bienSo) || []) : []; } catch (e) { rows = []; }
+      const row = rows[0]; if (!row) { noRow++; continue; }
+      const liveRow = lvFindLiveRow(live, row);
+      if (!liveRow) { if (!matchKeyForRow(row)) noKey++; else noMatch++; continue; }
+      for (const spec of specsFor(it)) {
+        const key = spec.key, header = lvHeaderOf(it, key); if (!header) continue;
+        const dupKey = row._rowId + '|' + key; if (seen.has(dupKey)) continue; seen.add(dupKey);
+        const edit = (it.sheetEdits && key in it.sheetEdits) ? it.sheetEdits[key] : undefined;
+        const local = lvNorm(edit !== undefined ? edit : sheetVal(row, key, it));
+        const lv = lvLiveVal({ headers: live.headers, row: liveRow }, header);
+        const real = lv == null ? '' : lv;
+        if (local === real) continue;
+        diffs.push({ id: diffs.length, it, row, key, header, label: spec.label, local, real, missingCol: lv == null, pendingEdit: edit !== undefined, dec: 'skip' });
+      }
+    }
+    const rowsCount = new Set(diffs.map(d => d.row._rowId)).size;
+    return { diffs, rowsCount, noRow, noMatch, noKey };
+  }
+  function lvEnsureModal() {
+    let m = $('#rvLiveModal'); if (m) return m;
+    m = document.createElement('div'); m.id = 'rvLiveModal'; m.className = 'modal-overlay hidden'; m.style.zIndex = 10050;
+    m.innerHTML = `<div class="modal modal-xl"><div class="modal-header"><h2>🔄 Rà soát với Google Sheet thật</h2><button type="button" class="modal-close" id="rvLiveClose">✕</button></div>
+      <div class="modal-body"><div id="rvLiveInfo" class="rv-warn"></div>
+      <div class="rv-toolbar" id="rvLiveBulk" style="margin:8px 0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bulk="write">Chọn tất cả: ghi bản máy lên Sheet</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-bulk="take">Chọn tất cả: lấy bản Sheet về máy</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-bulk="skip">Bỏ chọn tất cả</button>
+      </div>
+      <div id="rvLiveBody" style="overflow:auto;max-height:55vh"></div></div>
+      <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;align-items:center;padding:12px 16px">
+        <span id="rvLiveSummary" class="hint" style="margin-right:auto"></span>
+        <button type="button" class="btn btn-secondary" id="rvLiveCancel">Đóng</button>
+        <button type="button" class="btn btn-primary" id="rvLiveApply">✔ Thực hiện các lựa chọn</button></div></div>`;
+    document.body.appendChild(m);
+    const close = () => m.classList.add('hidden');
+    $('#rvLiveClose').addEventListener('click', close); $('#rvLiveCancel').addEventListener('click', close);
+    return m;
+  }
+  function lvRender(ctx) {
+    const { diffs } = ctx.res, body = $('#rvLiveBody');
+    const q = (typeof syncQueue !== 'undefined' && Array.isArray(syncQueue)) ? syncQueue.length : 0;
+    $('#rvLiveInfo').innerHTML = `Đã so <b>Bản trên máy</b> với <b>Sheet thật</b> (vừa đọc xong). Có <b>${diffs.length}</b> ô khác nhau ở <b>${ctx.res.rowsCount}</b> xe.`
+      + (ctx.res.noRow ? `<br>• ${ctx.res.noRow} mục là phiếu lạ (không có xe trên máy) — không có gì để rà.` : '')
+      + (ctx.res.noMatch ? `<br>• ${ctx.res.noMatch} xe có trên máy nhưng <b>không tìm thấy trên Sheet thật</b> (khóa Mã ID/MOTO_ID/Biển số không khớp) — không so được.` : '')
+      + (ctx.res.noKey ? `<br>• ${ctx.res.noKey} xe thiếu khóa để khớp dòng — không so được.` : '')
+      + (q ? `<br>⚠️ Còn <b>${q}</b> việc đang chờ trong hàng đợi đồng bộ ngầm; việc này có thể ghi lên Sheet sau và ghi đè lựa chọn của bạn.` : '')
+      + `<br><span class="hint">Mặc định mọi ô là «Bỏ qua» — chưa ghi gì cho đến khi bạn chọn và bấm «Thực hiện».</span>`;
+    if (!diffs.length) { body.innerHTML = '<p class="hint" style="padding:16px">✅ Không có khác biệt: các cột «TRÊN GOOGLE SHEET» lưu trên máy đã khớp Sheet thật.</p>'; $('#rvLiveApply').disabled = true; $('#rvLiveBulk').classList.add('hidden'); lvSummary(ctx); return; }
+    $('#rvLiveApply').disabled = false; $('#rvLiveBulk').classList.remove('hidden');
+    const cell = (v, miss) => miss ? '<i class="hint">(Sheet chưa có cột này)</i>' : (v === '' ? '<i class="hint">(trống)</i>' : escapeHtml(v));
+    body.innerHTML = `<table class="data-table" style="width:100%"><thead><tr><th>Xe</th><th>Cột</th><th>💾 Bản trên máy</th><th>☁️ Thật trên Google Sheet</th><th>Quyết định</th></tr></thead><tbody>`
+      + diffs.map(d => `<tr data-d="${d.id}"><td><b>${escapeHtml(d.it.bienSoRaw || d.it.bienSo || '')}</b><div class="hint">${escapeHtml(d.row.chuXe || '')}</div></td>
+        <td>${escapeHtml(d.label)}<div class="hint">${escapeHtml(d.header)}${d.pendingEdit ? ' · đang sửa chưa áp dụng' : ''}</div></td>
+        <td style="background:rgba(255,200,0,.12)">${cell(d.local)}</td><td style="background:rgba(0,150,255,.10)">${cell(d.real, d.missingCol)}</td>
+        <td><select data-sel="${d.id}" class="tpl-input" style="width:auto"><option value="skip">Bỏ qua</option><option value="write">Ghi bản máy lên Sheet</option><option value="take">Lấy bản Sheet về máy</option></select></td></tr>`).join('')
+      + '</tbody></table>';
+    lvSummary(ctx);
+  }
+  function lvSummary(ctx) {
+    const c = { write: 0, take: 0, skip: 0 }; ctx.res.diffs.forEach(d => c[d.dec]++);
+    $('#rvLiveSummary').textContent = `Ghi lên Sheet: ${c.write} · Lấy về máy: ${c.take} · Bỏ qua: ${c.skip}`;
+  }
+  async function lvApply(ctx) {
+    const todo = ctx.res.diffs.filter(d => d.dec !== 'skip');
+    if (!todo.length) { toast('Chưa chọn ô nào để ghi / lấy về.', true); return; }
+    const wr = todo.filter(d => d.dec === 'write'), tk = todo.filter(d => d.dec === 'take');
+    if (wr.length) {
+      if (!isWriteConnected()) { toast('Chưa kết nối Apps Script (2 chiều) nên không ghi lên Sheet được.', true); return; }
+      const clr = wr.filter(d => d.local === '').length;
+      if (!confirm(`GHI THẬT lên Google Sheet ${wr.length} ô (${new Set(wr.map(d => d.row._rowId)).size} xe)` + (clr ? `, trong đó ${clr} ô sẽ bị XÓA TRỐNG` : '') + `.\nLấy bản Sheet về máy: ${tk.length} ô.\n\nTiếp tục?`)) return;
+    }
+    const btn = $('#rvLiveApply'); btn.disabled = true;
+    const touched = new Set(); let okW = 0; const fails = [];
+    // 1) Lấy bản Sheet thật về máy (chỉ đổi dữ liệu trên máy)
+    for (const d of tk) {
+      const f = (typeof FIELD_MAP !== 'undefined') && FIELD_MAP.find(x => x.key === d.key);
+      if (f) d.row[d.key] = d.real;
+      else { d.row._extra = d.row._extra || {}; if (d.real) d.row._extra[d.header] = d.real; else delete d.row._extra[d.header]; }
+      if (d.it.sheetEdits) delete d.it.sheetEdits[d.key];
+      if (d.it.decisions && d.it.decisions[d.key] === 'sheetfix') delete d.it.decisions[d.key];
+      if (d.it.source && d.it.source[d.key] === 'sheet') delete d.it.source[d.key];
+      touched.add(d.it);
+    }
+    // 2) Ghi bản máy lên Sheet, gộp theo xe, báo kết quả từng xe
+    const byRow = new Map();
+    wr.forEach(d => { const k = d.row._rowId; if (!byRow.has(k)) byRow.set(k, { row: d.row, ds: [] }); byRow.get(k).ds.push(d); });
+    let i = 0;
+    for (const { row, ds } of byRow.values()) {
+      btn.textContent = `Đang ghi ${++i}/${byRow.size}…`;
+      const updates = {}; ds.forEach(d => { updates[d.header] = d.local; });
+      const r = await updateRowOnSheet(row, updates);
+      if (r && r.ok !== false) {
+        okW += ds.length;
+        ds.forEach(d => {
+          const f = (typeof FIELD_MAP !== 'undefined') && FIELD_MAP.find(x => x.key === d.key);
+          if (f) row[d.key] = d.local; else { row._extra = row._extra || {}; if (d.local) row._extra[d.header] = d.local; else delete row._extra[d.header]; }
+          if (d.it.sheetEdits) delete d.it.sheetEdits[d.key];
+          touched.add(d.it); d.done = true; d.real = d.local;
+        });
+      } else fails.push(`${row.bienSo || row._rowId}: ${(r && r.error) || 'lỗi không rõ'}`);
+    }
+    for (const it of touched) { try { await saveItem(it); } catch (e) { /* bỏ qua */ } }
+    try { persistRawDataToCache(); } catch (e) { /* bỏ qua */ }
+    btn.textContent = '✔ Thực hiện các lựa chọn'; btn.disabled = false;
+    try { renderReview(); refreshMainTable(); } catch (e) { /* bỏ qua */ }
+    toast(`Đã ghi lên Sheet ${okW}/${wr.length} ô · lấy về máy ${tk.length} ô.` + (fails.length ? ` ${fails.length} xe GHI LỖI.` : ''), !!fails.length);
+    if (fails.length) alert('Các xe ghi lên Sheet bị LỖI (chưa ghi, vẫn còn khác biệt):\n\n' + fails.slice(0, 15).join('\n') + (fails.length > 15 ? `\n… và ${fails.length - 15} xe nữa` : '') + '\n\nNếu lỗi «Action không hỗ trợ: updateRow» → cần Deploy lại Apps Script bản mới.');
+    // Tải lại so sánh để thấy phần còn khác
+    try { await lvOpen(true); } catch (e) { /* bỏ qua */ }
+  }
+  let _lvCtx = null;
+  async function lvOpen(silent) {
+    const b = $('#rvLiveBtn');
+    if (b && !silent) { b.disabled = true; b.textContent = '⏳ Đang đọc Sheet thật…'; }
+    try {
+      const live = await lvFetchLive();
+      const ctx = { live, res: lvCompute(live) }; _lvCtx = ctx;
+      const m = lvEnsureModal();
+      if (!m._bound) {
+        m._bound = true;
+        m.addEventListener('change', (e) => { const s = e.target.closest('select[data-sel]'); if (!s || !_lvCtx) return; const d = _lvCtx.res.diffs[+s.dataset.sel]; if (d) { d.dec = s.value; lvSummary(_lvCtx); } });
+        $('#rvLiveBulk').addEventListener('click', (e) => {
+          const t = e.target.closest('[data-bulk]'); if (!t || !_lvCtx) return;
+          _lvCtx.res.diffs.forEach(d => { d.dec = t.dataset.bulk; });
+          m.querySelectorAll('select[data-sel]').forEach(s => { s.value = t.dataset.bulk; }); lvSummary(_lvCtx);
+        });
+        $('#rvLiveApply').addEventListener('click', () => { if (_lvCtx) lvApply(_lvCtx); });
+      }
+      lvRender(ctx); m.classList.remove('hidden');
+    } catch (e) { toast(e.message || String(e), true); }
+    finally { if (b) { b.disabled = false; b.textContent = '🔄 Rà soát với Google Sheet thật'; } }
+  }
+  function bindLiveBtn() {
+    if ($('#rvLiveBtn')) return;
+    const anchor = $('#rvAqBtn') || $('#rvOrphanBtn'); if (!anchor) return;
+    const b = document.createElement('button');
+    b.type = 'button'; b.id = 'rvLiveBtn'; b.className = 'btn btn-secondary btn-sm';
+    b.textContent = '🔄 Rà soát với Google Sheet thật';
+    b.title = 'So các cột «TRÊN GOOGLE SHEET» đang lưu trên máy với dữ liệu thật trên Google Sheet; chỉ hiện ô khác nhau, bạn quyết định có ghi hay không';
+    b.addEventListener('click', () => lvOpen(false));
     anchor.insertAdjacentElement('afterend', b);
   }
 
@@ -2321,10 +2544,18 @@ const ScanReview = (() => {
     if (row) openViewer({ plate: norm(row.bienSo) });
   }, true);
 
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-role="scan-compare"]');
+    if (!b) return;
+    e.stopPropagation(); e.preventDefault();
+    const row = state.rawData.find(r => r._rowId === b.dataset.rowid);
+    if (row) openForPlate(row.bienSo);
+  }, true);
+
   /* ------------------------------------------------------------------ */
   async function init() {
     await loadLinks();
-    bindReviewUI(); bindViewerUI(); bindFilterUI();
+    bindReviewUI(); bindViewerUI(); bindFilterUI(); bindDetailCompare();
     // Chip "Đang quét…" trên thanh đầu trang: bấm để mở lại cửa sổ Quét phiếu
     const chip = $('#scanBgChip'); if (chip) chip.addEventListener('click', () => openModal('scanModal'));
     if (linkMap.size) refreshMainTable(); // dữ liệu xe có thể đã vẽ trước khi nạp liên kết -> vẽ lại để hiện icon
@@ -2333,6 +2564,6 @@ const ScanReview = (() => {
 
   // Nạp lại tùy chọn từ localStorage (scan-hub.js gọi khi nhận cài đặt mới từ máy khác)
   function reloadPrefs() { try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) { /* bỏ qua */ } }
-  return { backfillChecker, reloadPrefs, open, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
+  return { backfillChecker, reloadPrefs, open, openForPlate, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
 })();
 window.ScanReview = ScanReview;
