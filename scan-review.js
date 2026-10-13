@@ -590,7 +590,7 @@ const ScanReview = (() => {
   }
   const reloadSheetData = () => { try { const b = document.getElementById('btnReload'); if (b) b.click(); } catch (e) { /* bỏ qua */ } };
   const gasErr = (res, def) => (res && res.error) || def;
-  const needPatch = (m) => /Unknown POST action/i.test(m) ? 'doPost của Apps Script chưa nối với scanDispatch_ — dán bản mới AppsScript_UpdateRow.gs (doPost DUY NHẤT), xóa AppsScript_DoPost.gs, đổi tên doPost trong Code.gs thành doPostOld1_, rồi Deploy PHIÊN BẢN MỚI.' : m;
+  const needPatch = (m) => /Unknown POST action|Action không hỗ trợ/i.test(m) ? 'doPost của Apps Script chưa nối với scanDispatch_ — dán bản mới AppsScript_UpdateRow.gs (doPost DUY NHẤT), xóa AppsScript_DoPost.gs, đổi tên doPost trong Code.gs thành doPostOld1_, rồi Deploy PHIÊN BẢN MỚI.' : m;
 
   // Gọi Apps Script (POST text/plain như gasRequest) nhưng NÉM LỖI RÕ RÀNG khi mạng hỏng / trả về trang HTML (chưa cấp quyền, sai URL, lỗi code)
   // Danh sách URL thử lần lượt: URL chính, rồi URL kho lưu phiếu (nếu khác) — để máy trỏ bản triển khai cũ vẫn tự tìm được bản mới
@@ -606,7 +606,7 @@ const ScanReview = (() => {
     for (const u of [...new Set(cands)]) {
       try {
         const r = await gasCallTo(u, payload);
-        if (r && r.ok === false && /Unknown POST action/i.test(String(r.error || ''))) { last = r; continue; }   // bản cũ → thử URL kế
+        if (r && r.ok === false && /Unknown POST action|Action không hỗ trợ/i.test(String(r.error || ''))) { last = r; continue; }   // bản cũ → thử URL kế
         _scanUrl = u; return r;
       } catch (e) { if (u === cands[cands.length - 1]) throw e; last = { ok: false, error: String(e.message || e) }; }
     }
@@ -632,7 +632,7 @@ const ScanReview = (() => {
     try { r = await gasCall({ action: 'scanPing' }); } catch (e) { return String(e.message || e); }
     if (!r || r.ok === false) {
       const m = gasErr(r, '');
-      if (/Unknown POST action/i.test(m)) {
+      if (/Unknown POST action|Action không hỗ trợ/i.test(m)) {
         const id = ((String(state.gasUrl || '').match(/\/s\/([^/]+)\//) || [])[1]) || '';
         const tail = id ? id.slice(0, 6) + '…' + id.slice(-8) : String(state.gasUrl || '(chưa có URL)');
         // Code mới đã chạy đúng trong trình soạn thảo mà web vẫn báo lỗi này ⇒ web đang gọi bản triển khai CŨ / dự án khác
@@ -747,7 +747,7 @@ const ScanReview = (() => {
     $('#rvList').innerHTML = '<p class="hint">Đang nạp dữ liệu…</p>';
     $('#rvChkTag').checked = !!prefs.tag; $('#rvChkQuick').checked = !!prefs.quick;
     buildAssigneeSelect();
-    bindOrphanToolbarBtn();
+    bindOrphanToolbarBtn(); bindAqBtn();
     const warn = $('#rvWarn');
     const msgs = [];
     if (!state.rawData.length) msgs.push('⚠️ <b>Chưa tải danh sách xe</b> từ Google Sheet — chưa so sánh được. Hãy kết nối Sheet rồi mở lại màn này.');
@@ -778,10 +778,52 @@ const ScanReview = (() => {
     b.addEventListener('click', () => { const t = orphanTarget(); if (t) t.click(); else toast('Không có phiếu lạ nào đang hiện trong bộ lọc này.', true); });
   }
 
+
+  /* ---- Đồng bộ BÙ cột AQ «Người kiểm phiếu» ----
+     Lỗi cũ: AQ chỉ được ghi lúc bấm «Áp dụng»; nếu lúc đó Apps Script báo «Action không hỗ trợ: updateRow» thì giá trị chỉ nằm ở máy
+     (row.nguoiKiemPhieu đã gán cục bộ nhưng Sheet vẫn trống) và không bao giờ được gửi lại.
+     Hàm này quét mọi xe có phiếu scan + «Người thực hiện» rồi đẩy AQ lên Sheet qua hàng đợi sẵn có (lưu bền, tự thử lại).
+     Nhớ các xe đã đẩy trong localStorage để lần mở sau không gửi lặp; force=true (nút «Đồng bộ AQ») gửi lại TẤT CẢ.
+     Trả về số xe đã đưa vào hàng đợi. */
+  const AQ_DONE_KEY = 'vehicleAqBackfillV1';
+  function backfillChecker(opts) {
+    const force = !!(opts && opts.force);
+    if (!isWriteConnected() || !state.rawData.length) return 0;
+    let done = {}; try { done = JSON.parse(localStorage.getItem(AQ_DONE_KEY) || '{}') || {}; } catch (e) { done = {}; }
+    const hdr = ((FIELD_MAP.find(f => f.key === 'nguoiKiemPhieu') || {}).header) || 'Người kiểm phiếu';
+    const seen = new Set(); let n = 0;
+    for (const it of R.items) {
+      let v; try { v = computeView(it); } catch (e) { continue; }
+      const row = v && v.row; if (!row || seen.has(row._rowId)) continue;     // mỗi xe chỉ xét 1 lần
+      seen.add(row._rowId);
+      const who = String(row.nguoiThucHien || '').trim(); if (!who) continue;  // chưa chọn Người thực hiện -> không có gì để ghi
+      const mk = matchKeyForRow(row); if (!mk) continue;                       // thiếu Mã ID/MOTO_ID/Biển số -> không khớp được dòng
+      const sig = mk.header + '=' + mk.value;
+      if (!force && done[sig] === who) continue;
+      row.nguoiKiemPhieu = who;
+      enqueueRowSync(row, { [hdr]: who });                                     // gộp vào job cùng xe nếu đang chờ
+      done[sig] = who; n++;
+    }
+    try { localStorage.setItem(AQ_DONE_KEY, JSON.stringify(done)); } catch (e) { /* bỏ qua */ }
+    if (n) { try { persistRawDataToCache(); } catch (e) { /* bỏ qua */ } toast('Đang đồng bộ cột AQ «Người kiểm phiếu» cho ' + n + ' xe lên Google Sheet…'); }
+    return n;
+  }
+  // Nút «🔁 Đồng bộ AQ» cạnh nút phiếu lạ trên thanh công cụ (gửi lại toàn bộ)
+  function bindAqBtn() {
+    if ($('#rvAqBtn')) return;
+    const anchor = $('#rvOrphanBtn'); if (!anchor) return;
+    const b = document.createElement('button');
+    b.type = 'button'; b.id = 'rvAqBtn'; b.className = 'btn btn-secondary btn-sm';
+    b.textContent = '🔁 Đồng bộ AQ'; b.title = 'Ghi lại cột AQ «Người kiểm phiếu» (= Người thực hiện) của mọi xe có phiếu lên Google Sheet';
+    b.addEventListener('click', () => { const n = backfillChecker({ force: true }); if (!n) toast('Không có xe nào cần đồng bộ AQ (chưa kết nối 2 chiều, hoặc chưa có Người thực hiện).', true); });
+    anchor.insertAdjacentElement('afterend', b);
+  }
+
   /* ---- Tự gửi lại việc làm dở: phiếu lạ đã chọn «ghi» nhưng chưa lên Sheet (vd. làm trên máy khác lúc Apps Script lỗi) ---- */
   let _resending = false;
   async function autoResendPending() {
     if (_resending || !isWriteConnected() || !state.rawData.length) return;
+    backfillChecker();   // đồng bộ BÙ cột AQ «Người kiểm phiếu» cho mọi phiếu đã có Người thực hiện từ trước
     const pend = R.items.filter(it => it.orphanDecision === 'apply' && it.bienSo && !it.orphanSheet);
     try { if (typeof processSyncQueue === 'function') processSyncQueue(); } catch (e) { /* bỏ qua */ }   // hàng đợi updateRow còn tồn
     if (!pend.length) return;
@@ -2291,6 +2333,6 @@ const ScanReview = (() => {
 
   // Nạp lại tùy chọn từ localStorage (scan-hub.js gọi khi nhận cài đặt mới từ máy khác)
   function reloadPrefs() { try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) { /* bỏ qua */ } }
-  return { reloadPrefs, open, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
+  return { backfillChecker, reloadPrefs, open, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
 })();
 window.ScanReview = ScanReview;

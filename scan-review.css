@@ -170,11 +170,20 @@ textarea.rv-edit { resize: vertical; }
 .rv-orphan-sticky:disabled { opacity: .5; cursor: not-allowed; }
 /* Thanh «CẢ XE» (có nút ghi phiếu lạ trong thẻ) cũng dính dưới thanh công cụ khi cuộn trong thẻ dài */
 .rv-card .rv-quick { position: sticky; top: var(--rv-sticky, 44px); z-index: 2; }
-/* Bảng so sánh: có thanh trượt NGANG + DỌC hiển thị sẵn, kéo được thay vì chỉ lăn chuột */
-.rv-card .rv-split { overflow: auto; max-height: 70vh; scrollbar-width: auto; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; }
-.rv-card .rv-split-head, .rv-card .rv-split .rv-row { min-width: 760px; }   /* đủ rộng để 2 cột không bị bóp → xuất hiện thanh ngang */
-.rv-card .rv-split .rv-split-head { top: 0; }                               /* tiêu đề dính mép trên của vùng cuộn */
-.rv-card .rv-split::-webkit-scrollbar { width: 14px; height: 14px; }
-.rv-card .rv-split::-webkit-scrollbar-track { background: #e5e7eb; border-radius: 7px; }
-.rv-card .rv-split::-webkit-scrollbar-thumb { background: #6366f1; border-radius: 7px; border: 2px solid #e5e7eb; }
-.rv-card .rv-split::-webkit-scrollbar-thumb:hover { background: #4338ca; }
+/* ===== THANH TRƯỢT DÙNG CHUNG cho TẤT CẢ biển số =====
+   Lỗi cũ: mỗi thẻ (.rv-card .rv-split) tự có overflow:auto nên thanh trượt chỉ kéo được nội dung của đúng 1 xe.
+   Nay: bỏ cuộn riêng từng thẻ; vùng cuộn DUY NHẤT là .modal-body (đã overflow:auto) — mọi thẻ rộng tối thiểu 760px nên
+   modal-body có 1 thanh ngang + 1 thanh dọc chung, kéo là cuộn đồng loạt toàn bộ danh sách so sánh. */
+.rv-card .rv-split { overflow: visible; max-height: none; }
+.rv-card { min-width: 760px; }
+.rv-card .rv-split-head, .rv-card .rv-split .rv-row { min-width: 0; }
+/* Thanh công cụ + khung ảnh luôn dính mép TRÁI khi cuộn ngang (không trôi theo bảng) */
+.rv-toolbar, .rv-imgpane { left: 0; }
+.rv-toolbar { position: sticky; }
+.rv-warn, .rv-stats { position: sticky; left: 0; }
+/* Thanh trượt to, dễ kéo, luôn hiện */
+.rv-modal .modal-body { scrollbar-width: auto; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; }
+.rv-modal .modal-body::-webkit-scrollbar { width: 14px; height: 14px; }
+.rv-modal .modal-body::-webkit-scrollbar-track { background: #e5e7eb; border-radius: 7px; }
+.rv-modal .modal-body::-webkit-scrollbar-thumb { background: #6366f1; border-radius: 7px; border: 2px solid #e5e7eb; }
+.rv-modal .modal-body::-webkit-scrollbar-thumb:hover { background: #4338ca; }

@@ -543,7 +543,7 @@ async function gasWriteRequest(payload) {
       const r = await gasRequest(u, payload);
       if (r && r.ok !== false) return r;
       last = r;
-      if (!/unknown (post )?action/i.test(String((r && r.error) || ''))) return r;   // lỗi khác → không đổi URL
+      if (!/unknown (post )?action|action không hỗ trợ|không hỗ trợ:/i.test(String((r && r.error) || ''))) return r;   // lỗi khác → không đổi URL (lỗi «action chưa hỗ trợ» → thử URL kho lưu phiếu)
     } catch (e) { last = { ok: false, error: String((e && e.message) || e) }; }
   }
   return last;

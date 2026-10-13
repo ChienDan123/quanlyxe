@@ -75,7 +75,7 @@ const ScanSync = (() => {
   const online = () => onlineOf(cfg);
   // Apps Script chưa có nhánh cho action (lỗi «Unknown POST action: x») -> đổi thành hướng dẫn rõ ràng + gắn code 'NOACTION' để nơi gọi tự lùi về cách khác
   function noAction(msg) {
-    const m = /Unknown (?:POST |GET )?action:?\s*(\w+)/i.exec(String(msg || '')); if (!m) return null;
+    const m = /(?:Unknown (?:POST |GET )?action|Action không hỗ trợ):?\s*(\w+)/i.exec(String(msg || '')); if (!m) return null;   // nhận cả «Unknown POST action: x» lẫn «Action không hỗ trợ: x»
     const e = new Error(`Apps Script chưa có action «${m[1]}» (không hỗ trợ). Mở AppsScript_ScanPatch.gs, làm bước «1 dòng» ở đầu file rồi Triển khai → Phiên bản mới.`);
     e.code = 'NOACTION'; return e;
   }

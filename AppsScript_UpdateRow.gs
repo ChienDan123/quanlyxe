@@ -1,5 +1,5 @@
 // ============================================================================
-// AppsScript_UpdateRow.gs — "CỬA VÀO" DUY NHẤT cho POST của Web App (bản 8)
+// AppsScript_UpdateRow.gs — "CỬA VÀO" DUY NHẤT cho POST của Web App (bản 9)
 // ----------------------------------------------------------------------------
 // NGUYÊN NHÂN CÁC LỖI CŨ (đã sửa trong bản này):
 //   1) Dự án có NHIỀU hàm doPost (Code.gs, AppsScript_DoPost.gs, file này). Apps Script chỉ chạy MỘT hàm — hàm nạp sau cùng
@@ -11,7 +11,7 @@
 // CÁCH DÙNG: xem phần HƯỚNG DẪN ở cuối file. QUAN TRỌNG: toàn dự án chỉ được có ĐÚNG 1 hàm doPost (hàm ở file này).
 // ============================================================================
 
-const UR_VERSION = 8;
+const UR_VERSION = 9;
 const UR_SETTINGS_SHEET = 'Settings';                                  // trùng SETTINGS_SHEET_NAME của Code.gs
 const UR_SYSTEM_TABS = ['GeminiConfig', 'Settings', 'PhieuLa'];        // tab hệ thống: không bao giờ dò làm tab dữ liệu
 
@@ -153,7 +153,7 @@ function doPost(e) {
         sh.getRange(data.row, data.col).setValue(data.value);
         return ur_json_({ ok: true });
       }
-      case 'urPing':       return ur_json_({ ok: true, urVersion: UR_VERSION, scanDispatch: typeof scanDispatch_ === 'function' });
+      case 'urPing':       return ur_json_({ ok: true, urVersion: UR_VERSION, scanDispatch: typeof scanDispatch_ === 'function', actions: ['updateRow', 'appendRow', 'saveSettings', 'write'] });
     }
     // Nhóm scan* (scanPing, scanPut, scanList, scanOrphanUpsert…): scanDispatch_ nhận DỮ LIỆU ĐÃ PARSE (không phải e) và trả object / null
     if (typeof scanDispatch_ === 'function') {
@@ -180,6 +180,9 @@ function doPost(e) {
 function urSelfTest() {
   var out = [];
   var say = function (ok, m) { out.push((ok ? '✔ ' : '✘ ') + m); };
+  // Chẩn đoán doPost TRÙNG TÊN: nếu hàm doPost đang chạy không chứa mã của file này thì file khác đã «thắng» và che mất updateRow
+  say(String(doPost).indexOf('UR_VERSION') >= 0, 'doPost đang chạy ' + (String(doPost).indexOf('UR_VERSION') >= 0 ? 'là của file này' : 'KHÔNG phải của file này — còn doPost khác trong dự án (xóa hoặc đổi tên thành doPostOld2_)'));
+  try { if (typeof scanDispatch_ === 'function') say(String(scanDispatch_).indexOf('function doPost') < 0, 'scanDispatch_ có mặt'); } catch (e) { /* bỏ qua */ }
   try {
     var j = JSON.parse(doPost({ postData: { contents: JSON.stringify({ action: 'urPing' }) } }).getContent());
     say(j.ok && j.urVersion === UR_VERSION, 'doPost chạy bản ' + j.urVersion + (j.scanDispatch ? ' (đã nối scanDispatch_)' : ' — THIẾU scanDispatch_ (dán Ma_lenh_luu_anh.gs)'));
@@ -204,5 +207,5 @@ function urSelfTest() {
  *    (file Code.gs đi kèm đã đổi sẵn). Đừng xóa scanDispatch_ và các hàm scan* (file Ma_lenh_luu_anh.gs). Chỉ giữ 1 doGet (ở Code.gs).
  * 3) Lưu → chạy urSelfTest() một lần (cấp quyền nếu được hỏi) → mọi dòng phải có dấu ✔.
  * 4) Triển khai → Quản lý bản triển khai → ✏️ trên bản có ID …R4vCoBPw → Phiên bản: «Phiên bản mới» → Triển khai (GIỮ NGUYÊN URL /exec).
- * 5) Kiểm tra từ trình duyệt máy khác: web tự gọi scanPing / updateRow; hoặc POST {"action":"urPing"} phải ra {"ok":true,"urVersion":8,…}.
+ * 5) Kiểm tra từ trình duyệt máy khác: web tự gọi scanPing / updateRow; hoặc POST {"action":"urPing"} phải ra {"ok":true,"urVersion":9,…}.
  * ======================================================================= */
