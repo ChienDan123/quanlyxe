@@ -590,7 +590,7 @@ const ScanReview = (() => {
   }
   const reloadSheetData = () => { try { const b = document.getElementById('btnReload'); if (b) b.click(); } catch (e) { /* bỏ qua */ } };
   const gasErr = (res, def) => (res && res.error) || def;
-  const needPatch = (m) => /Unknown POST action/i.test(m) ? 'doPost của Apps Script chưa nối với scanDispatch_ — dán AppsScript_DoPost.gs vào dự án (trong dự án chỉ được có 1 hàm doPost), rồi Deploy PHIÊN BẢN MỚI.' : m;
+  const needPatch = (m) => /Unknown POST action/i.test(m) ? 'doPost của Apps Script chưa nối với scanDispatch_ — dán bản mới AppsScript_UpdateRow.gs (doPost DUY NHẤT), xóa AppsScript_DoPost.gs, đổi tên doPost trong Code.gs thành doPostOld1_, rồi Deploy PHIÊN BẢN MỚI.' : m;
 
   // Gọi Apps Script (POST text/plain như gasRequest) nhưng NÉM LỖI RÕ RÀNG khi mạng hỏng / trả về trang HTML (chưa cấp quyền, sai URL, lỗi code)
   // Danh sách URL thử lần lượt: URL chính, rồi URL kho lưu phiếu (nếu khác) — để máy trỏ bản triển khai cũ vẫn tự tìm được bản mới

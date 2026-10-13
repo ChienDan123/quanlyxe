@@ -4004,6 +4004,23 @@ function refreshAll() {
   updateSyncStatusBadge();
 }
 
+// Bản triển khai Apps Script MỚI NHẤT do chủ dự án công bố trong gas-url.json (cùng thư mục với index.html).
+// Máy nào đang giữ URL cũ trong localStorage sẽ tự chuyển sang URL mới khi «rev» trong file lớn hơn «rev» đã áp dụng trên máy đó.
+// Sửa tay URL ở hộp «Kết nối» vẫn được tôn trọng: chỉ khi chủ dự án TĂNG rev mới ghi đè.
+async function applyPublishedGasUrl() {
+  try {
+    const res = await fetch('gas-url.json?_=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) return;
+    const j = await res.json();
+    const url = String((j && j.url) || '').trim(), rev = Number(j && j.rev) || 0;
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(url)) return;
+    if (rev > (Number(localStorage.getItem('vehicleGasUrlRev')) || 0)) {
+      localStorage.setItem(GAS_URL_KEY, url);
+      localStorage.setItem('vehicleGasUrlRev', String(rev));
+    }
+  } catch (e) { /* không có file / mất mạng -> giữ URL hiện tại */ }
+}
+
 (async function init() {
   // Yêu cầu (Lưu thay đổi trước, đồng bộ ngầm sau): nạp hàng đợi đồng bộ ngầm
   // (nếu phiên trước còn dang dở) TRƯỚC KHI xử lý dữ liệu, để mọi lần tải dữ
@@ -4035,6 +4052,7 @@ function refreshAll() {
   const preferGas = (localStorage.getItem(MODE_KEY) || 'gas') === 'gas';
   // Nếu trình duyệt/thiết bị này chưa từng lưu URL riêng, dùng URL mặc định
   // đã hardcode ở trên -> luôn tự kết nối, kể cả tab mới / máy khác / điện thoại.
+  await applyPublishedGasUrl();   // lấy URL bản triển khai mới nhất (nếu chủ dự án đã công bố)
   const gasUrl = localStorage.getItem(GAS_URL_KEY) || DEFAULT_GAS_URL;
   const csvUrl = localStorage.getItem(LAST_URL_KEY);
   if (preferGas && gasUrl) {

@@ -22,13 +22,13 @@ const SyncIssues = (() => {
      Mỗi luật: re = nhận dạng trong nội dung lỗi · kind · code · title · hint (+ steps = các bước làm) · escalateAfter = số lần thử thất bại
      thì nâng lên «cần người dùng» (cho lỗi có thể là tạm thời nhưng nếu lặp mãi thì chắc chắn do cấu hình).
      THỨ TỰ QUAN TRỌNG: luật cụ thể đặt trước luật chung. Nội dung lỗi nguyên văn luôn được hiện kèm, nên luật chưa bắt hết vẫn không mất thông tin. */
-  const REDEPLOY = ['Mở Google Sheet → Tiện ích mở rộng → Apps Script. Dán file AppsScript_UpdateRow.gs (chứa doPost duy nhất) và đổi tên MỌI hàm doPost khác (Code.gs, AppsScript.gs, AppsScript_DoPost.gs…) thành doPostCu_.',
+  const REDEPLOY = ['Mở Google Sheet → Tiện ích mở rộng → Apps Script. Dán bản mới của file AppsScript_UpdateRow.gs (chứa doPost DUY NHẤT), XÓA file AppsScript_DoPost.gs và đổi tên doPost trong Code.gs thành doPostOld1_. Chạy urSelfTest() — mọi dòng phải có ✔.',
     'Bấm Triển khai → Quản lý triển khai → biểu tượng bút chì → Phiên bản: «Phiên bản mới» → Triển khai (giữ nguyên URL /exec).',
     'Quay lại web, bấm «Thử lại».'];
   const RULES = [
-    { re: /unknown action|invalid action|unsupported action|action .{0,40}(không|chưa) (hợp lệ|hỗ trợ|được hỗ trợ|biết)|(không|chưa) (hỗ trợ|biết) action/i,
+    { re: /unknown (post |get )?action|không tìm thấy bộ xử lý POST|invalid action|unsupported action|action .{0,40}(không|chưa) (hợp lệ|hỗ trợ|được hỗ trợ|biết)|(không|chưa) (hỗ trợ|biết) action/i,
       kind: 'user', code: 'action_missing', title: 'Apps Script chưa có chức năng này (chưa Deploy bản mới)',
-      hint: 'Apps Script đang chạy là bản cũ, chưa biết lệnh mà web vừa gửi.', steps: REDEPLOY },
+      hint: 'Apps Script đang chạy là bản cũ (hoặc có nhiều hàm doPost trùng tên nên lệnh bị che mất), chưa biết lệnh mà web vừa gửi. Khi bản mới được triển khai, web sẽ TỰ gửi lại các thay đổi này.', steps: REDEPLOY },
     { re: /permission|authori[sz]ation|unauthori[sz]ed|forbidden|access denied|not have access|requires? (access|authori)|không có quyền|chưa cấp quyền|(http|status|code|lỗi)\s*:?\s*40[13]\b/i,
       kind: 'user', code: 'permission', title: 'Sai quyền truy cập / chưa cấp quyền',
       hint: 'Apps Script không được phép ghi vào Google Sheet này, hoặc Web App chưa mở cho «Bất kỳ ai».',
@@ -184,6 +184,35 @@ const SyncIssues = (() => {
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
-  return { classify, open, render, onQueueChange, diagText };
+
+  /* ---------------- 4) TỰ ĐẨY LẠI KHI APPS SCRIPT ĐÃ ĐƯỢC CẬP NHẬT ----------------
+     Việc làm dở trên máy này (bị khóa vì «Unknown action») được tự mở khóa và gửi lên Google Sheet ngay khi Apps Script trả lời đúng
+     (urPing / scanPing). Không cần bấm «Thử lại»; chạy lúc mở trang, khi có mạng lại, khi quay lại tab và mỗi 2 phút nếu còn tác vụ kẹt. */
+  let healing = false;
+  async function autoHeal() {
+    if (healing || !API() || typeof gasWriteRequest !== 'function') return;
+    if (typeof isWriteConnected === 'function' && !isWriteConnected()) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    const stuck = API().list().filter((j) => j.blocked && !j.current && (classOf(j) || {}).code === 'action_missing');
+    if (!stuck.length) return;
+    healing = true;
+    try {
+      let ok = false;
+      for (const action of ['urPing', 'scanPing']) {            // bản mới trả lời urPing; bản cũ hơn có thể chỉ có scanPing
+        const r = await gasWriteRequest({ action });
+        if (r && r.ok !== false) { ok = true; break; }
+      }
+      if (!ok) return;                                           // Apps Script vẫn chưa cập nhật -> để lần sau
+      stuck.forEach((j) => API().retry(j.id));
+      toast('Apps Script đã sẵn sàng — tự gửi lại ' + stuck.length + ' thay đổi làm dở lên Google Sheet.');
+    } catch (e) { console.warn('[sync-issues] autoHeal', e); }
+    finally { healing = false; }
+  }
+  setTimeout(autoHeal, 5000);
+  setInterval(autoHeal, 120000);
+  window.addEventListener('online', autoHeal);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) autoHeal(); });
+
+  return { classify, open, render, onQueueChange, diagText, autoHeal };
 })();
 window.SyncIssues = SyncIssues;
