@@ -49,6 +49,7 @@ const FIELD_MAP = [
   { key: 'phieuScan',    header: 'Phiếu scan' },
   { key: 'kiemPhieu',    header: 'Kiểm phiếu' },
   { key: 'ketQuaPhieu',  header: 'Kết quả đối chiếu phiếu' },
+  { key: 'nguoiKiemPhieu', header: 'Người kiểm phiếu' },   // cột AQ — đồng bộ với «Người thực hiện» ở màn So sánh phiếu scan
 ];
 // Danh sách lựa chọn cho trường "Tình trạng cam kết" (giữa Ghi chú và Người
 // thực hiện) — dùng chung cho mọi nơi hiển thị/sửa trường này.
@@ -531,6 +532,23 @@ function connectViaCsv(csvUrl, { silent = false } = {}) {
 }
 
 /* ---- 4c. Chế độ Apps Script (đọc + ghi) ---- */
+// Ghi lên Apps Script có DỰ PHÒNG: nếu URL chính trả «Unknown action» (bản triển khai cũ / máy khác trỏ nhầm bản)
+// thì thử tiếp URL kho lưu phiếu (ScanSync.storeUrl) — thường là bản triển khai mới hơn.
+async function gasWriteRequest(payload) {
+  const urls = [state.gasUrl];
+  try { const alt = window.ScanSync && ScanSync.storeUrl && ScanSync.storeUrl(); if (alt && alt !== state.gasUrl) urls.push(alt); } catch (e) { /* bỏ qua */ }
+  let last;
+  for (const u of urls) {
+    try {
+      const r = await gasRequest(u, payload);
+      if (r && r.ok !== false) return r;
+      last = r;
+      if (!/unknown (post )?action/i.test(String((r && r.error) || ''))) return r;   // lỗi khác → không đổi URL
+    } catch (e) { last = { ok: false, error: String((e && e.message) || e) }; }
+  }
+  return last;
+}
+
 async function gasRequest(url, payload) {
   // payload = null  -> GET (đọc dữ liệu)
   // payload = {...} -> POST dạng text/plain để Apps Script không cần xử lý CORS preflight.
@@ -631,7 +649,7 @@ async function updateRowOnSheet(row, updatesByHeader) {
   const mk = matchKeyForRow(row);
   if (!mk) return { ok: false, error: 'Dòng này thiếu Mã ID / MOTO_ID / Biển số để khớp khi ghi.' };
   try {
-    const res = await gasRequest(state.gasUrl, {
+    const res = await gasWriteRequest({
       action: 'updateRow',
       matchHeader: mk.header,
       matchValue: mk.value,
@@ -802,7 +820,7 @@ async function processSyncQueue() {
       syncCurrentJob = job;
       updateSyncStatusBadge();
       try {
-        const res = await gasRequest(state.gasUrl, {
+        const res = await gasWriteRequest({
           action: 'updateRow', matchHeader: job.matchHeader, matchValue: job.matchValue, updates: job.updates,
         });
         if (!res || res.ok === false) throw new Error((res && res.error) || 'Phản hồi không hợp lệ từ Apps Script.');

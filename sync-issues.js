@@ -22,7 +22,7 @@ const SyncIssues = (() => {
      Mỗi luật: re = nhận dạng trong nội dung lỗi · kind · code · title · hint (+ steps = các bước làm) · escalateAfter = số lần thử thất bại
      thì nâng lên «cần người dùng» (cho lỗi có thể là tạm thời nhưng nếu lặp mãi thì chắc chắn do cấu hình).
      THỨ TỰ QUAN TRỌNG: luật cụ thể đặt trước luật chung. Nội dung lỗi nguyên văn luôn được hiện kèm, nên luật chưa bắt hết vẫn không mất thông tin. */
-  const REDEPLOY = ['Mở Google Sheet → Tiện ích mở rộng → Apps Script, dán lại toàn bộ file AppsScript.gs bản mới nhất.',
+  const REDEPLOY = ['Mở Google Sheet → Tiện ích mở rộng → Apps Script. Dán file AppsScript_UpdateRow.gs (chứa doPost duy nhất) và đổi tên MỌI hàm doPost khác (Code.gs, AppsScript.gs, AppsScript_DoPost.gs…) thành doPostCu_.',
     'Bấm Triển khai → Quản lý triển khai → biểu tượng bút chì → Phiên bản: «Phiên bản mới» → Triển khai (giữ nguyên URL /exec).',
     'Quay lại web, bấm «Thử lại».'];
   const RULES = [

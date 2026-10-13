@@ -646,6 +646,8 @@
           <select id="rvAssignee" class="row-inline-select"></select></label>
         <label class="chk-inline" title="Khi lấy dữ liệu từ phiếu, nối dấu «📷Phiếu dd/mm: CCCD, SĐT» vào cột Ghi Chú để sau này biết nguồn"><input type="checkbox" id="rvChkTag" checked> Ghi dấu 📷 nguồn phiếu</label>
         <label class="chk-inline" title="Bấm nút ở khung «CẢ XE» (Cả xe: giữ hết Google Sheet / lấy hết từ phiếu scan) là áp dụng luôn cho xe đó"><input type="checkbox" id="rvChkQuick" checked> Xác nhận nhanh = áp dụng luôn</label>
+        <!-- Nút ghi phiếu lạ: dính trên thanh công cụ (thanh này sticky) -->
+        <button type="button" id="rvOrphanBtn" class="btn btn-primary btn-sm rv-orphan-sticky" disabled title="Ghi dữ liệu phiếu (đã chỉnh sửa) của xe chưa có trong danh sách vào cột «Phiếu lạ» AL–AP — áp dụng cho thẻ đang chọn">📷 Dữ liệu từ phiếu scan đúng → ghi phiếu lạ (AL–AP)</button>
         <span id="rvPager" class="rv-pager"></span>
       </div>
       <!-- Vùng làm việc: [ảnh phiếu] cạnh [bảng so sánh] — ảnh chỉ hiện khi bấm «Xem ảnh phiếu» -->

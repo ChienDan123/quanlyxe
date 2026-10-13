@@ -163,3 +163,18 @@ textarea.rv-edit { resize: vertical; }
 .rv-rot { display: inline-flex; gap: 2px; margin-left: 6px; vertical-align: middle; }
 .rv-rot .btn { padding: 1px 6px; }
 .rv-rot-bar { text-align: left; padding: 0 0 4px; }
+
+/* ===== Cập nhật: nút phiếu lạ dính + thanh trượt cho bảng so sánh 2 cột ===== */
+/* Thanh công cụ đã sticky; nút phiếu lạ nằm trong đó nên luôn thấy khi cuộn */
+.rv-orphan-sticky { white-space: nowrap; }
+.rv-orphan-sticky:disabled { opacity: .5; cursor: not-allowed; }
+/* Thanh «CẢ XE» (có nút ghi phiếu lạ trong thẻ) cũng dính dưới thanh công cụ khi cuộn trong thẻ dài */
+.rv-card .rv-quick { position: sticky; top: var(--rv-sticky, 44px); z-index: 2; }
+/* Bảng so sánh: có thanh trượt NGANG + DỌC hiển thị sẵn, kéo được thay vì chỉ lăn chuột */
+.rv-card .rv-split { overflow: auto; max-height: 70vh; scrollbar-width: auto; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; }
+.rv-card .rv-split-head, .rv-card .rv-split .rv-row { min-width: 760px; }   /* đủ rộng để 2 cột không bị bóp → xuất hiện thanh ngang */
+.rv-card .rv-split .rv-split-head { top: 0; }                               /* tiêu đề dính mép trên của vùng cuộn */
+.rv-card .rv-split::-webkit-scrollbar { width: 14px; height: 14px; }
+.rv-card .rv-split::-webkit-scrollbar-track { background: #e5e7eb; border-radius: 7px; }
+.rv-card .rv-split::-webkit-scrollbar-thumb { background: #6366f1; border-radius: 7px; border: 2px solid #e5e7eb; }
+.rv-card .rv-split::-webkit-scrollbar-thumb:hover { background: #4338ca; }

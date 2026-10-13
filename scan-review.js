@@ -553,6 +553,8 @@ const ScanReview = (() => {
       phieuScan: `Có — ${it.sheetLabel} (mã ${it.scanId.slice(0, 8)})`,
       kiemPhieu: it.review === 'da_kiem' ? 'Đã kiểm' : 'Chưa kiểm',
       ketQuaPhieu: it.result,
+      // Cột AQ «Người kiểm phiếu» luôn khớp «Người thực hiện» (giá trị vừa ghi > đang chọn > đã có trên Sheet)
+      nguoiKiemPhieu: String(toWrite.nguoiThucHien || prefs.assignee || row.nguoiThucHien || row.nguoiKiemPhieu || '').trim(),
     };
     // updateSingleRowFields = local-first + hàng đợi đồng bộ ngầm sẵn có của app
     await updateSingleRowFields(row, { ...toWrite, ...meta });
@@ -591,10 +593,29 @@ const ScanReview = (() => {
   const needPatch = (m) => /Unknown POST action/i.test(m) ? 'doPost của Apps Script chưa nối với scanDispatch_ — dán AppsScript_DoPost.gs vào dự án (trong dự án chỉ được có 1 hàm doPost), rồi Deploy PHIÊN BẢN MỚI.' : m;
 
   // Gọi Apps Script (POST text/plain như gasRequest) nhưng NÉM LỖI RÕ RÀNG khi mạng hỏng / trả về trang HTML (chưa cấp quyền, sai URL, lỗi code)
+  // Danh sách URL thử lần lượt: URL chính, rồi URL kho lưu phiếu (nếu khác) — để máy trỏ bản triển khai cũ vẫn tự tìm được bản mới
+  function scanUrlCandidates() {
+    const urls = [state.gasUrl];
+    try { const alt = window.ScanSync && ScanSync.storeUrl && ScanSync.storeUrl(); if (alt && !urls.includes(alt)) urls.push(alt); } catch (e) { /* bỏ qua */ }
+    return urls.filter(Boolean);
+  }
+  let _scanUrl = '';   // URL đã chạy tốt gần nhất (nhớ lại để khỏi dò lại)
   async function gasCall(payload) {
+    const cands = scanUrlCandidates(); if (_scanUrl && cands.includes(_scanUrl)) cands.unshift(_scanUrl);
+    let last;
+    for (const u of [...new Set(cands)]) {
+      try {
+        const r = await gasCallTo(u, payload);
+        if (r && r.ok === false && /Unknown POST action/i.test(String(r.error || ''))) { last = r; continue; }   // bản cũ → thử URL kế
+        _scanUrl = u; return r;
+      } catch (e) { if (u === cands[cands.length - 1]) throw e; last = { ok: false, error: String(e.message || e) }; }
+    }
+    return last;
+  }
+  async function gasCallTo(url, payload) {
     let text;
     try {
-      const res = await fetch(state.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
       text = await res.text();
     } catch (e) { throw new Error('Không gọi được Apps Script (mất mạng, URL sai, hoặc bản triển khai chưa đặt «Ai cũng truy cập được»): ' + (e.message || e)); }
     try { return JSON.parse(text); }
@@ -726,6 +747,7 @@ const ScanReview = (() => {
     $('#rvList').innerHTML = '<p class="hint">Đang nạp dữ liệu…</p>';
     $('#rvChkTag').checked = !!prefs.tag; $('#rvChkQuick').checked = !!prefs.quick;
     buildAssigneeSelect();
+    bindOrphanToolbarBtn();
     const warn = $('#rvWarn');
     const msgs = [];
     if (!state.rawData.length) msgs.push('⚠️ <b>Chưa tải danh sách xe</b> từ Google Sheet — chưa so sánh được. Hãy kết nối Sheet rồi mở lại màn này.');
@@ -738,6 +760,39 @@ const ScanReview = (() => {
     } catch (e) { $('#rvList').innerHTML = '<p class="error-text">Lỗi đọc dữ liệu: ' + escapeHtml(e.message) + '</p>'; return; }
     R.page = 1;
     renderReview();
+    autoResendPending();   // đẩy lại việc làm dở (kể cả từ máy khác) lên Google Sheet
+  }
+
+  /* ---- Nút «ghi phiếu lạ» dính trên thanh công cụ: tác động lên thẻ đang chọn (hoặc phiếu lạ đầu tiên đang hiện) ---- */
+  function orphanTarget() {
+    const foc = document.querySelector('.rv-card.rv-focus [data-act="orphan-apply"]');
+    return foc || document.querySelector('#rvList [data-act="orphan-apply"]');
+  }
+  function updateOrphanToolbarBtn() {
+    const b = $('#rvOrphanBtn'); if (!b) return;
+    const n = document.querySelectorAll('#rvList [data-act="orphan-apply"]').length;
+    b.disabled = !n; b.textContent = '📷 Dữ liệu từ phiếu scan đúng → ghi phiếu lạ (AL–AP)' + (n ? ' · ' + n : '');
+  }
+  function bindOrphanToolbarBtn() {
+    const b = $('#rvOrphanBtn'); if (!b || b._bound) return; b._bound = true;
+    b.addEventListener('click', () => { const t = orphanTarget(); if (t) t.click(); else toast('Không có phiếu lạ nào đang hiện trong bộ lọc này.', true); });
+  }
+
+  /* ---- Tự gửi lại việc làm dở: phiếu lạ đã chọn «ghi» nhưng chưa lên Sheet (vd. làm trên máy khác lúc Apps Script lỗi) ---- */
+  let _resending = false;
+  async function autoResendPending() {
+    if (_resending || !isWriteConnected() || !state.rawData.length) return;
+    const pend = R.items.filter(it => it.orphanDecision === 'apply' && it.bienSo && !it.orphanSheet);
+    try { if (typeof processSyncQueue === 'function') processSyncQueue(); } catch (e) { /* bỏ qua */ }   // hàng đợi updateRow còn tồn
+    if (!pend.length) return;
+    _resending = true;
+    try {
+      const bad = await checkOrphanBackend(); if (bad) return;   // chưa sẵn sàng → để người dùng xử lý theo hướng dẫn
+      const r = await pushOrphans(pend);
+      pend.forEach(it => { if (r.ok) { it.orphanPushed = true; it.review = 'da_kiem'; it.done = true; it.dirty = false; it.pushError = ''; } else it.pushError = r.error; });
+      for (const it of pend) await saveItem(it);
+      if (r.ok) { toast('Đã tự gửi lại ' + pend.length + ' phiếu lạ làm dở lên Google Sheet.'); renderReview(); }
+    } finally { _resending = false; }
   }
 
   const matchesSearch = (v) => {
@@ -748,7 +803,7 @@ const ScanReview = (() => {
   /* ---- Bộ lọc theo quy trình kiểm ---- */
   const NO_CHECKER = '__none__';
   // «Tên người kiểm» = Người thực hiện: ưu tiên giá trị đã có trên Sheet, chưa có thì lấy giá trị đang chọn bên phiếu
-  const checkerOf = (v) => String((v.row && v.row.nguoiThucHien) || scanValue(v.it, 'nguoiThucHien') || '').trim();
+  const checkerOf = (v) => String((v.row && (v.row.nguoiKiemPhieu || v.row.nguoiThucHien)) || scanValue(v.it, 'nguoiThucHien') || '').trim();
   // Có trường nào (hoặc phiếu lạ) đang để «Để kiểm sau»
   // (chỉ tính lựa chọn «Để kiểm sau» do người dùng chủ động chọn — mặc định chưa chọn cũng hiển thị «Để kiểm sau» nên không dùng f.decision)
   const hasLater = (v) => v.fields.some(f => !f.spec.meta && isActionable(f.state) && v.it.decisions[f.spec.key] === 'later') || (!v.found && v.it.orphanDecision === 'later');
@@ -1441,6 +1496,7 @@ const ScanReview = (() => {
       ? `<button type="button" class="btn btn-ghost btn-sm" data-act="page" data-p="${R.page - 1}" ${R.page <= 1 ? 'disabled' : ''}>‹ Trước</button> Trang ${R.page}/${pages} (${list.length} mục) <button type="button" class="btn btn-ghost btn-sm" data-act="page" data-p="${R.page + 1}" ${R.page >= pages ? 'disabled' : ''}>Sau ›</button>`
       : `${list.length} mục`;
     renderFooter(views);
+    updateOrphanToolbarBtn();
     renderPane(false);
     if (scroller) scroller.scrollTop = keepTop;   // vẽ lại xong vẫn giữ vị trí đang làm việc
     updateHistoryButtons();
@@ -1481,7 +1537,7 @@ const ScanReview = (() => {
      => quay lại sẽ khôi phục luôn giá trị trên Sheet (qua updateSingleRowFields nên vẫn đồng bộ ngầm). Chỉ giữ trong phiên. */
   const HIST = { undo: [], redo: [], max: 100 };
   const clone = (o) => JSON.parse(JSON.stringify(o));
-  const ROW_KEYS = ['trangThaiXe', 'chuXe', 'cccd', 'soDienThoai', 'ghiChu', 'tinhTrangCamKet', 'nguoiThucHien', 'phieuScan', 'kiemPhieu', 'ketQuaPhieu', ...PARTY_ALL_SPECS.map(sp => sp.key)];   // gồm 4 cột Người sử dụng (AH–AK) + 4 cột Người mua để hoàn tác
+  const ROW_KEYS = ['trangThaiXe', 'chuXe', 'cccd', 'soDienThoai', 'ghiChu', 'tinhTrangCamKet', 'nguoiThucHien', 'nguoiKiemPhieu', 'phieuScan', 'kiemPhieu', 'ketQuaPhieu', ...PARTY_ALL_SPECS.map(sp => sp.key)];   // gồm 4 cột Người sử dụng (AH–AK) + 4 cột Người mua để hoàn tác
   // extra = các khóa cột phụ (vd. cột Người mua / Người sử dụng) cần chụp thêm để hoàn tác được
   const rowSnap = (row, extra = []) => row ? Object.fromEntries(ROW_KEYS.concat(extra).map(k => [k, row[k] || ''])) : null;
   const findRow = (rowId) => state.rawData.find(r => r._rowId === rowId);
