@@ -128,6 +128,7 @@ const ScanSync = (() => {
       frontMime: rec.frontMime, backMime: rec.backMime, frontHash: rec.frontHash, backBlank: !!rec.backBlank,
       hasFront: !!(rec.cloud && rec.cloud.frontId), hasBack: !!(rec.cloud && rec.cloud.backId),
       matchedBienSo: rec.matchedBienSo || [], extracted: rec.extracted, items,
+      imgRev: rec.imgRev || {}, rotChecked: !!rec.rotChecked,   // xoay ảnh (scan-rotate.js): mốc từng mặt + đã kiểm tra hướng
     };
   }
   // GỘP TRƯỚC KHI GHI ĐÈ (last-write-wins theo từng mục): nếu meta online MỚI hơn bản ta đã biết (máy/tab khác vừa sửa)
@@ -156,11 +157,13 @@ const ScanSync = (() => {
     rec.cloud = rec.cloud || {};
     for (const side of ['front', 'back']) {
       const blob = rec[side + 'Blob'];
-      if (!blob || rec.cloud[side + 'Id']) continue;
+      const dirty = !!(rec.imgDirty && rec.imgDirty[side]);   // ảnh vừa được xoay -> ghi đè bản cũ trên Drive
+      if (!blob || (rec.cloud[side + 'Id'] && !dirty)) continue;
       const b64 = await blobToB64(blob);
       if (b64.length > MAX_B64) throw new Error('Ảnh quá lớn để lưu online (' + Math.round(b64.length / 1e6) + 'MB).');
       const r = await call({ action: 'scanPut', scanId, kind: side, mime: rec[side + 'Mime'] || blob.type, b64, plates });
       rec.cloud[side + 'Id'] = r.fileId;
+      if (dirty) delete rec.imgDirty[side];
       await DB.dbPut(ST_SCANS, rec);          // lưu ngay từng bước: đứt mạng giữa chừng lần sau chỉ làm tiếp phần còn thiếu
     }
     const r = await call({ action: 'scanPut', scanId, kind: 'meta', mime: 'application/json', text: JSON.stringify(metaOf(rec, items)), plates });
@@ -180,7 +183,7 @@ const ScanSync = (() => {
     let cur = '';
     try {
       if (!Y.pulled || Date.now() - Y.pullAt > PULL_EVERY) { await pull(); Y.pulled = true; Y.pullAt = Date.now(); }
-      (await forEachScan(r => (hasBlobs(r) && !blobsUp(r)) ? r.id : null)).forEach(id => Y.touched.add(id));
+      (await forEachScan(r => (hasBlobs(r) && (!blobsUp(r) || (r.imgDirty && (r.imgDirty.front || r.imgDirty.back)))) ? r.id : null)).forEach(id => Y.touched.add(id));
       while (Y.touched.size) {
         cur = Y.touched.values().next().value; Y.cur = String(cur).slice(0, 8); Y.phase = '';
         await pushScan(cur); Y.touched.delete(cur); refreshStatus();
@@ -210,6 +213,17 @@ const ScanSync = (() => {
     if (m.hasFront && !rec.cloud.frontId) rec.cloud.frontId = 'remote';
     if (m.hasBack && !rec.cloud.backId) rec.cloud.backId = 'remote';
     if (!m.hasBack && rec.cloud.backId === 'remote') delete rec.cloud.backId;     // mặt 2 đã xóa ở máy khác (ô giữ chỗ chưa tải)
+    // Ảnh đã được XOAY ở máy khác (imgRev mới hơn): bỏ ảnh cũ trên máy này để lần xem sau tải lại bản đã xoay + nhận vùng xe đã quy đổi
+    const mr = m.imgRev || {}, lr = rec.imgRev = rec.imgRev || {};
+    let rotatedRemote = false;
+    for (const sd of ['front', 'back']) {
+      if ((mr[sd] || 0) <= (lr[sd] || 0)) continue;
+      lr[sd] = mr[sd]; rotatedRemote = true;
+      if (rec.imgDirty) delete rec.imgDirty[sd];
+      if (rec[sd + 'Blob'] && rec.cloud[sd + 'Id']) rec[sd + 'Blob'] = null;   // chỉ bỏ khi còn bản online để tải lại
+    }
+    if (rotatedRemote && m.extracted) rec.extracted = m.extracted;
+    if (m.rotChecked) rec.rotChecked = true;
     rec.cloud.metaAt = updated;
     await DB.dbPut(ST_SCANS, rec);
     // Gộp từng mục: bản nào updatedAt mới hơn thì thắng

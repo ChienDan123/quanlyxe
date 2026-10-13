@@ -1682,7 +1682,25 @@ const ScanReview = (() => {
     const url = URL.createObjectURL(blob); urls.push(url);
     const media = mime === 'application/pdf' ? `<iframe class="rv-pg-pdf" src="${url}" title="${escapeHtml(label)}"></iframe>`
       : `<img class="rv-pg-img" src="${url}" alt="${escapeHtml(label)}" title="Bấm vào ảnh để chuyển tới xe · kéo để dời ảnh · nhấp đúp để phóng to / thu nhỏ"><div class="rv-boxes" aria-hidden="true"></div>`;
-    return `<div class="rv-pg" data-page="${page}"><div class="rv-pg-label">${label} <a class="btn btn-ghost btn-sm" href="${url}" target="_blank" rel="noopener">↗ Mở tab mới</a></div>${media}</div>`;
+    const rot = (window.ScanRotate && mime !== 'application/pdf') ? ScanRotate.buttonsHtml(page) : '';   // nút xoay RIÊNG từng mặt (scan-rotate.js)
+    return `<div class="rv-pg" data-page="${page}"><div class="rv-pg-label">${label} <a class="btn btn-ghost btn-sm" href="${url}" target="_blank" rel="noopener">↗ Mở tab mới</a>${rot}</div>${media}</div>`;
+  }
+
+  /* ---- XOAY ẢNH (scan-rotate.js): bấm nút xoay từng mặt + tự nhận hướng phiếu cũ ---- */
+  async function onRotateClick(e) {
+    const b = e.target.closest('[data-rot]'); if (!b || !window.ScanRotate) return;
+    const [page, deg] = b.dataset.rot.split(':').map(Number), it = R.items.find(i => i.id === R.pane.id); if (!it) return;
+    const btns = document.querySelectorAll('#rvImgBody [data-rot]'); btns.forEach(x => { x.disabled = true; });
+    try { await ScanRotate.rotate(it.scanId, page, deg); await renderPane(true); }   // nạp lại ảnh + khung xe (vùng đã quy đổi theo góc xoay)
+    catch (err) { btns.forEach(x => { x.disabled = false; }); toast('Không xoay được ảnh: ' + (err.message || err), true); }
+  }
+  // Phiếu cũ chưa kiểm hướng: nhờ Gemini nhận hướng (nền, 1 lần / phiếu) rồi nạp lại ảnh nếu có xoay
+  async function maybeAutoOrient(rec) {
+    if (!window.ScanRotate || !ScanRotate.needsAuto(rec)) return;
+    const info = $('#rvImgInfo'); if (info) info.insertAdjacentHTML('beforeend', ' <span id="rvRotNote" class="hint">⏳ Đang nhận hướng ảnh…</span>');
+    const r = await ScanRotate.autoOrient(rec.id);
+    const note = $('#rvRotNote'); if (note) note.remove();
+    if (r && r.changed && R.pane.open && R.pane.loadedScan === rec.id) { await renderPane(true); toast('Đã tự xoay ảnh phiếu cho đúng chiều (có thể chỉnh lại bằng nút xoay).'); }
   }
 
   /* ---- BẤM ẢNH ↔ XE ----
@@ -1850,6 +1868,7 @@ const ScanReview = (() => {
     drawBoxes();
     if (window.ResizeObserver) { p.ro = new ResizeObserver(layoutBoxes); document.querySelectorAll('#rvImgBody .rv-pg-img').forEach(i => p.ro.observe(i)); }
     scrollImageToItem(it.id);                           // mở ảnh là tới ngay chỗ xe đang xem
+    maybeAutoOrient(rec);                               // phiếu cũ chưa kiểm hướng -> tự nhận hướng (nền)
   }
   // scroll: true = cuộn thẻ vào vùng nhìn · 'center' = đưa thẻ ra giữa · imgScroll: cuộn khung ảnh tới đúng chỗ xe này
   async function setFocus(id, scroll, imgScroll = true) {
@@ -1898,6 +1917,7 @@ const ScanReview = (() => {
 
   function bindReviewUI() {
     enablePan($('#rvImgBody')); window.addEventListener('resize', syncStickyOffset);
+    $('#rvImgBody').addEventListener('click', onRotateClick);   // nút xoay (nút không kích hoạt «bấm ảnh → xe» vì onImageClick bỏ qua button)
     $('#rvImgBody').addEventListener('click', onImageClick);   // bấm ảnh → tới xe (sau enablePan: kéo ảnh xong không bị tính là click)
     $('#btnScanOpenReview').addEventListener('click', open);
     $('#rvUndo').addEventListener('click', () => stepHistory(-1));
@@ -2048,13 +2068,14 @@ const ScanReview = (() => {
   /* ------------------------------------------------------------------ */
   const V = { ids: [], idx: 0, plate: '', urls: [] };
   const revokeUrls = () => { V.urls.forEach(u => URL.revokeObjectURL(u)); V.urls = []; };
-  function pageHtml(blob, mime, title) {
+  function pageHtml(blob, mime, title, page) {
     if (!blob) return '<div class="sv-empty">Không có mặt này.</div>';
     const url = URL.createObjectURL(blob); V.urls.push(url);
     // Nút tải nằm ở thanh #svActions (tên file ghi rõ biển số — ScanFiles), không còn link tải riêng từng mặt
-    return mime === 'application/pdf'
+    const rot = (page && window.ScanRotate && mime !== 'application/pdf') ? `<div class="rv-rot-bar">${ScanRotate.buttonsHtml(page)}</div>` : '';   // xoay từng mặt
+    return rot + (mime === 'application/pdf'
       ? `<iframe class="sv-frame" src="${url}" title="${escapeHtml(title)}"></iframe>`
-      : `<img class="sv-img" src="${url}" alt="${escapeHtml(title)}" title="Bấm để phóng to / thu nhỏ">`;
+      : `<img class="sv-img" src="${url}" alt="${escapeHtml(title)}" title="Bấm để phóng to / thu nhỏ">`);
   }
   async function showViewerIdx(i) {
     revokeUrls(); V.idx = i;
@@ -2081,9 +2102,9 @@ const ScanReview = (() => {
         + `<button type="button" class="btn btn-ghost btn-sm" data-dl="front">⬇ Ảnh mặt 1</button> `
         + `<button type="button" class="btn btn-ghost btn-sm" data-dl="back" ${rec.backBlob || (rec.cloud && rec.cloud.backId) ? '' : 'disabled'}>⬇ Ảnh mặt 2</button>`
         + (rec._cloudMsg ? ` <span class="error-text">${escapeHtml(rec._cloudMsg)}</span>` : '') : '';
-    $('#svFront').innerHTML = rec.frontBlob ? pageHtml(rec.frontBlob, rec.frontMime, 'phieu-mat1-' + rec.id.slice(0, 8)) : `<div class="sv-empty">${escapeHtml(rec._cloudMsg || 'Không có ảnh mặt 1.')}</div>`;
+    $('#svFront').innerHTML = rec.frontBlob ? pageHtml(rec.frontBlob, rec.frontMime, 'phieu-mat1-' + rec.id.slice(0, 8), 1) : `<div class="sv-empty">${escapeHtml(rec._cloudMsg || 'Không có ảnh mặt 1.')}</div>`;
     $('#svBack').innerHTML = rec.backBlob
-      ? pageHtml(rec.backBlob, rec.backMime, 'phieu-mat2-' + rec.id.slice(0, 8)) + (rec.backBlank ? '<div class="hint">Mặt 2 gần như trống.</div>' : '')
+      ? pageHtml(rec.backBlob, rec.backMime, 'phieu-mat2-' + rec.id.slice(0, 8), 2) + (rec.backBlank ? '<div class="hint">Mặt 2 gần như trống.</div>' : '')
       : '<div class="sv-empty">Phiếu không có mặt 2.</div>';
   }
   async function openViewer({ plate, scanId }) {
@@ -2102,6 +2123,14 @@ const ScanReview = (() => {
     $('#svActions').addEventListener('click', (e) => { const b = e.target.closest('[data-dl]'); if (b && window.ScanFiles) ScanFiles.download(V.ids[V.idx], b.dataset.dl); });
     $('#svTabs').addEventListener('click', (e) => { const b = e.target.closest('[data-sv]'); if (b) showViewerIdx(parseInt(b.dataset.sv, 10)); });
     $('#scanViewerModal').addEventListener('click', (e) => { if (e.target.classList.contains('sv-img')) e.target.classList.toggle('zoom'); });
+    // Nút xoay từng mặt trong viewer: xoay + lưu, rồi vẽ lại; nếu khung ảnh so sánh đang mở đúng phiếu này thì nạp lại luôn
+    $('#scanViewerModal').addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-rot]'); if (!b || !window.ScanRotate) return;
+      const [page, deg] = b.dataset.rot.split(':').map(Number), id = V.ids[V.idx], i = V.idx;
+      document.querySelectorAll('#scanViewerModal [data-rot]').forEach(x => { x.disabled = true; });
+      try { await ScanRotate.rotate(id, page, deg); if (V.idx === i) await showViewerIdx(i); if (R.pane.open && R.pane.loadedScan === id) renderPane(true); }
+      catch (err) { document.querySelectorAll('#scanViewerModal [data-rot]').forEach(x => { x.disabled = false; }); toast('Không xoay được ảnh: ' + (err.message || err), true); }
+    });
     // Dọn URL ảnh khi đóng (nút ✕ hoặc click nền — app.js đã xử lý đóng, ta chỉ thu dọn)
     $('#scanViewerModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]') || e.target.id === 'scanViewerModal') setTimeout(revokeUrls, 300); });
   }

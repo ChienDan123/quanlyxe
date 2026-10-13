@@ -1053,7 +1053,8 @@ ${hasBack
         rec.rotated = res.rotated;
       }
       Object.assign(rec, {
-        status: 'done', geminiRaw: res.geminiRaw, model: res.meta.model, keyLabel: res.meta.keyLabel,
+        status: 'done', rotChecked: true,   // Gemini đã báo hướng ảnh lúc quét (scan-rotate.js không cần tự nhận hướng lại)
+        geminiRaw: res.geminiRaw, model: res.meta.model, keyLabel: res.meta.keyLabel,
         extracted: res.extracted, backBlank: back ? !res.extracted.backHasContent : false,
         matchedBienSo: match ? match.filter(m => m.found).map(m => m.bienSo) : [], match,
       });

@@ -158,3 +158,8 @@ textarea.rv-edit { resize: vertical; }
 .rv-imgpane-body.panning, .sv-pane.panning { cursor: grabbing; user-select: none; }
 .rv-pg-img, .sv-img { cursor: grab; user-select: none; -webkit-user-drag: none; }
 .panning .rv-pg-img, .panning .sv-img { cursor: grabbing; }
+
+/* ===== Nút xoay ảnh từng mặt (scan-rotate.js) ===== */
+.rv-rot { display: inline-flex; gap: 2px; margin-left: 6px; vertical-align: middle; }
+.rv-rot .btn { padding: 1px 6px; }
+.rv-rot-bar { text-align: left; padding: 0 0 4px; }
