@@ -1778,47 +1778,131 @@ if (sortBarEl) {
    file mẫu "mẫu báo cáo C08.xlsx" (tiêu đề nền xanh đậm 1F497D, chữ trắng đậm,
    Times New Roman 10, có viền). Luồng: nút "Xuất báo cáo C08" -> hộp thoại chọn
    PHẠM VI (đang lọc / đã tích chọn / toàn bộ) + ĐƠN VỊ RÀ SOÁT mặc định -> tải file.
+
+   NGUỒN DỮ LIỆU = 2 SHEET:
+     1) "Tong hop"    : sheet chính đang làm việc (state.rawData) — quyết định DANH SÁCH xe
+                        xuất ra và là nguồn ƯU TIÊN cho các cột trùng nhau.
+     2) "DL PC08 do"  : sheet bổ sung (đọc qua Apps Script: action=readSheet, xem
+                        AppsScript_C08Patch.gs). Ghép với "Tong hop" theo Mã ID -> OTO_ID
+                        -> biển số -> số khung; dùng để ĐIỀN CÁC CỘT Tong hop còn trống
+                        và các cột chỉ có bên PC08 (thường trú, nơi ở, tạm trú, chuyên đề...).
+                        Cột "Kết quả rà soát" của sheet này SAI nên TUYỆT ĐỐI KHÔNG dùng.
    - Không đụng tới nút "Xuất Excel" cũ (EXPORT_COLUMNS / loadXlsxLib ở trên).
    - Cần thư viện có hỗ trợ style ô: dùng "xlsx-js-style" (bản fork tương thích
      API SheetJS). Nếu không tải được thì vẫn xuất được, chỉ mất định dạng màu.  */
 const C08_UNIT_KEY = 'c08DefaultUnitV1';   // localStorage: đơn vị rà soát mặc định
 const C08_SCOPE_KEY = 'c08ScopeV1';        // localStorage: phạm vi lần trước
+const C08_NOTE_REDUNDANT_MAX = 30;        // ghi chú ≤ ngần này ký tự và đã quy ra cụm chuẩn -> coi là lặp, không chép lại
 const C08_RESULT_NOTE_MAX = 160;           // số ký tự tối đa lấy từ Ghi chú vào "Kết quả rà soát"
+const C08_PC08_SHEET = 'DL PC08 do';       // tên sheet bổ sung trên Google Sheet
 
-// 22 cột theo đúng thứ tự + tiêu đề của file mẫu C08.
-//  - get(row, ctx): lấy giá trị của 1 ô (ctx = { stt, defaultUnit, forceUnit }).
-//  - Cột chưa có trong dữ liệu -> get trả '' (để trống).
-const C08_COLUMNS = [
-  { header: 'STT',                get: (r, c) => c.stt, width: 6, center: true },
-  { header: 'Mã ID',              get: r => r.maId, width: 14 },
-  { header: 'OTO_ID',             get: r => r.motoId, width: 14 },   // Sheet đặt tên cột là MOTO_ID
-  { header: 'Số khung',           get: r => r.soKhung, width: 22 },
-  { header: 'Số máy',             get: r => r.soMay, width: 18 },
-  { header: 'Biển số',            get: r => r.bienSo, width: 12 },
-  { header: 'Màu biển',           get: r => r.mauBien, width: 9 },
-  { header: 'Nhãn hiệu',          get: r => r.nhanHieu, width: 14 },
-  { header: 'Loại xe',            get: r => r.loaiXe, width: 14 },
-  { header: 'Chủ phương tiện',    get: r => r.chuXe, width: 24 },
-  { header: 'Số CCCD/MST',        get: r => r.cccd, width: 15 },
-  { header: 'Địa chỉ đăng ký',    get: r => r.diaChi, width: 34 },
-  // 3 cột địa chỉ dưới đây + "Chuyên đề" không nằm trong FIELD_MAP: nếu Sheet có
-  // cột trùng tên thì lấy (qua row._extra), không thì để trống.
-  { header: 'Địa chỉ thường trú', get: r => c08ExtraValue(r, ['thuong tru']), width: 30 },
-  { header: 'Nơi ở hiện tại',     get: r => c08ExtraValue(r, ['noi o hien tai', 'noi o hien nay']), width: 30 },
-  { header: 'Địa chỉ tạm trú',    get: r => c08ExtraValue(r, ['tam tru']), width: 30 },
-  { header: 'Ngày đăng ký',       get: r => r.ngayDangKy, width: 12, center: true },
-  { header: 'Trạng thái ĐK',      get: r => r.trangThaiDK, width: 14 },
-  { header: 'Chuyên đề (Mã định danh/ xe hết niên hạn/ xe 2 chu kỳ chưa kiểm định/ ô tô nhãn hiệu lạ 20 năm/ mô tô nhãn hiện lạ 20 năm)',
-    get: r => c08ExtraValue(r, ['chuyen de']), width: 28 },
-  { header: 'Ngày ĐK đầu',        get: r => r.ngayDkDau, width: 12, center: true },
-  { header: 'Số điện thoại',      get: r => r.soDienThoai, width: 14 },
-  { header: 'Kết quả rà soát (đã cập nhật mã định danh/đã thu hồi trên hệ thống/ đã cập nhật trạng thái xe/ đã hướng dẫn công dân/ công dân đã thực hiện thủ tục sang tên,…)',
-    get: r => c08BuildResult(r), width: 50 },
-  { header: 'Đơn vị rà soát',     get: (r, c) => c08BuildUnit(r, c), width: 18 },
-];
+/* ---- Đọc sheet "DL PC08 do" ---- */
+// Tên tiêu đề cột của sheet PC08 (đã bỏ dấu, chỉ giữ chữ + số) -> khoá nội bộ.
+// KHÔNG có "Kết quả rà soát" ở đây (cố ý, dữ liệu đó không đúng).
+const C08_PC_HEADER_ALIASES = {
+  // Sheet thật dùng tiêu đề «MÃ XE (*)» (VD CT_MOTO_20N_423146) -> khoá 'maxe' cũng là Mã ID.
+  maId: ['maid', 'maxe'], otoId: ['otoid', 'motoid'], soKhung: ['sokhung'], soMay: ['somay'],
+  bienSo: ['bienso'], mauBien: ['maubien'], nhanHieu: ['nhanhieu'], loaiXe: ['loaixe'],
+  chuXe: ['chuphuongtien', 'chuxe'], cccd: ['socccdmst', 'socccd', 'cccd', 'somst'],
+  diaChi: ['diachidangky'], thuongTru: ['diachithuongtru', 'thuongtru'],
+  noiO: ['noiohientai', 'noiohiennay'], tamTru: ['diachitamtru', 'tamtru'],
+  ngayDangKy: ['ngaydangky'], trangThaiDK: ['trangthaidk', 'trangthaidangky'],
+  chuyenDe: ['chuyende'],            // tiêu đề dài -> khớp theo "bắt đầu bằng" (xem c08PcKeyOfHeader)
+  ngayDkDau: ['ngaydkdau'], soDienThoai: ['sodienthoai', 'sdt'], donVi: ['donvirasoat'],
+};
+// Chuẩn hoá tiêu đề: bỏ dấu, bỏ ký tự không phải chữ/số ("Số CCCD/MST" -> "socccdmst").
+function c08HeaderKey(h) { return stripDiacritics(h).replace(/[^a-z0-9]/g, ''); }
+function c08PcKeyOfHeader(h) {
+  const k = c08HeaderKey(h);
+  if (!k) return null;
+  for (const key of Object.keys(C08_PC_HEADER_ALIASES)) {
+    if (C08_PC_HEADER_ALIASES[key].some(a => k === a || (key === 'chuyenDe' && k.startsWith(a)))) return key;
+  }
+  return null;
+}
+// Khoá so khớp định danh: chỉ giữ chữ + số, viết hoa ("92B1-123.45" == "92b1 12345").
+function c08IdKey(v) { return (v == null ? '' : String(v)).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 
-// Tìm giá trị trong các cột "lạ" (row._extra) của Sheet theo từ khoá trong tiêu đề
-// (so khớp không dấu, không phân biệt hoa thường). Không thấy -> ''.
+// Dựng chỉ mục tra cứu từ dữ liệu thô của sheet PC08 (mảng các dòng, dòng tiêu đề
+// có thể không nằm ở dòng 1 nên tự dò trong 15 dòng đầu: dòng nhận ra ≥ 3 cột).
+// Trả về { count, byMaId, byOtoId, byBienSo, bySoKhung } (đều là Map).
+function c08BuildPcIndex(values) {
+  const idx = { count: 0, byMaId: new Map(), byOtoId: new Map(), byBienSo: new Map(), bySoKhung: new Map() };
+  if (!Array.isArray(values) || !values.length) return idx;
+  let headerRow = -1, colKeys = [];
+  for (let i = 0; i < Math.min(values.length, 15); i++) {
+    const keys = (values[i] || []).map(c08PcKeyOfHeader);
+    if (keys.filter(Boolean).length >= 3) { headerRow = i; colKeys = keys; break; }
+  }
+  if (headerRow < 0) return idx;
+  for (let i = headerRow + 1; i < values.length; i++) {
+    const rec = {};
+    (values[i] || []).forEach((cell, j) => {
+      const key = colKeys[j];
+      if (key && rec[key] == null) rec[key] = cell == null ? '' : String(cell).trim();
+    });
+    if (!Object.values(rec).some(v => v)) continue;
+    idx.count++;
+    const put = (map, k) => { if (k && !map.has(k)) map.set(k, rec); };   // trùng khoá -> giữ dòng đầu
+    put(idx.byMaId, c08IdKey(rec.maId));
+    put(idx.byOtoId, c08IdKey(rec.otoId));
+    put(idx.byBienSo, c08IdKey(rec.bienSo));
+    put(idx.bySoKhung, c08IdKey(rec.soKhung));
+  }
+  return idx;
+}
+
+// Tìm dòng PC08 tương ứng với 1 dòng Tong hop. Thứ tự: mã (Mã ID / MOTO_ID đối chiếu với cả
+// cột «Mã xe» lẫn OTO_ID của PC08) -> biển số -> số khung.
+function c08FindPc(row, pcIndex) {
+  if (!pcIndex || !pcIndex.count) return null;
+  const ids = [c08IdKey(row.maId), c08IdKey(row.motoId)].filter(Boolean);
+  for (const k of ids) {
+    const hit = pcIndex.byMaId.get(k) || pcIndex.byOtoId.get(k);
+    if (hit) return hit;
+  }
+  return pcIndex.byBienSo.get(c08IdKey(row.bienSo))
+    || pcIndex.bySoKhung.get(c08IdKey(row.soKhung))
+    || null;
+}
+
+// Đọc sheet PC08 qua Apps Script. Trả về { index, warning }: không đọc được thì
+// index = null và warning là thông báo cho người dùng (vẫn xuất được, chỉ thiếu cột bổ sung).
+async function c08FetchPcIndex() {
+  if (!isWriteConnected()) {
+    return { index: null, warning: 'Đang ở chế độ CSV, không đọc được sheet «' + C08_PC08_SHEET + '» (cần kết nối Apps Script).' };
+  }
+  try {
+    const url = state.gasUrl + (state.gasUrl.includes('?') ? '&' : '?') + 'action=readSheet&sheet=' + encodeURIComponent(C08_PC08_SHEET);
+    const data = await (await fetch(url, { method: 'GET' })).json();
+    if (!data || data.ok === false) {
+      const msg = (data && data.error) || '';
+      return { index: null, warning: isUnsupportedActionMsg(msg) || /unknown|không hỗ trợ/i.test(msg)
+        ? 'Apps Script chưa có action readSheet — dán thêm AppsScript_C08Patch.gs rồi Deploy lại. Báo cáo chỉ dùng sheet Tong hop.'
+        : 'Không đọc được sheet «' + C08_PC08_SHEET + '»: ' + msg };
+    }
+    const index = c08BuildPcIndex(data.values);
+    if (!index.count) return { index: null, warning: 'Sheet «' + C08_PC08_SHEET + '» trống hoặc không nhận ra dòng tiêu đề. Báo cáo chỉ dùng sheet Tong hop.' };
+    return { index, warning: '' };
+  } catch (e) {
+    return { index: null, warning: 'Không đọc được sheet «' + C08_PC08_SHEET + '»: ' + ((e && e.message) || e) };
+  }
+}
+
+/* ---- Định dạng giá trị từng cột ---- */
+// Lấy giá trị Tong hop; nếu trống thì lấy từ PC08.
+function c08Pick(tongHop, pc) { return (tongHop || '').toString().trim() ? tongHop : (pc || ''); }
+
+// Loại xe: "MAJESTY-Hai bánh từ 50-175cm3" -> "Hai bánh từ 50-175cm3".
+// Bỏ mọi thứ đứng trước dấu '-' ĐẦU TIÊN mà sau nó là CHỮ (nhãn hiệu/tên xe).
+// Dấu '-' đứng trước SỐ là của khoảng dung tích ("50-175cm3") nên không bị cắt;
+// nhờ vậy "AB-125-Hai bánh từ 50-175cm3" vẫn ra đúng "Hai bánh từ 50-175cm3".
+function c08CleanLoaiXe(v) {
+  const s = (v || '').toString().trim();
+  return s.replace(/^.*?-\s*(?=\p{L})/u, '').trim() || s;
+}
+
+// Lấy giá trị từ cột "lạ" của Tong hop (row._extra) theo từ khoá tiêu đề (không dấu).
 function c08ExtraValue(row, keywords) {
   const extra = row && row._extra;
   if (!extra) return '';
@@ -1829,41 +1913,111 @@ function c08ExtraValue(row, keywords) {
   return '';
 }
 
+/* ---- Cột "Kết quả rà soát" ----
+   Căn cứ DUY NHẤT: Trạng thái xe + Ghi chú + Kết quả đối chiếu phiếu của sheet Tong hop
+   (không dùng cột Kết quả rà soát của PC08). Suy ra các cụm chuẩn theo hướng dẫn của mẫu;
+   chưa xác định được thì để trống. Bảng quy tắc dưới đây dễ chỉnh khi nghiệp vụ đổi.
+   (re chạy trên chuỗi đã bỏ dấu + viết thường.)                                          */
+// 1) Theo Trạng thái xe.
+const C08_STATUS_RULES = [
+  { re: /da thuc hien thu hoi/,        text: () => 'Đã thu hồi trên hệ thống' },
+  { re: /da hoan thanh sang ten/,      text: () => 'Công dân đã thực hiện thủ tục sang tên' },
+  { re: /da ban phe lieu|hong, dang quan ly|ban khong ro nguoi su dung/,
+    text: (st) => `Đã cập nhật trạng thái xe (${st})` },
+];
+// 2) Theo từ khoá trong Ghi chú / Kết quả đối chiếu phiếu (bỏ qua nếu có từ phủ định ngay phía trước).
+const C08_KEYWORD_RULES = [
+  { re: /cap nhat[^;.]{0,25}ma dinh danh|ma dinh danh[^;.]{0,25}cap nhat/, text: 'Đã cập nhật mã định danh' },
+  { re: /thu hoi/,                                                  text: 'Đã thu hồi trên hệ thống' },
+  { re: /huong dan/,                                                text: 'Đã hướng dẫn công dân' },
+  { re: /da (hoan thanh|thuc hien|lam)[^;.]{0,25}sang ten/,         text: 'Công dân đã thực hiện thủ tục sang tên' },
+];
+// "chưa / không / cần / sẽ / đề nghị / yêu cầu" ngay trước cụm khớp -> chưa làm, không tính.
+function c08IsNegated(norm, index) {
+  return /\b(chua|khong|can|se|de nghi|yeu cau)\b/.test(norm.slice(Math.max(0, index - 15), index));
+}
+// Ghi chú sạch: bỏ dấu vết tự sinh «📷Phiếu dd/mm: CCCD, SĐT...» (chỉ là nguồn dữ liệu, có thông tin cá nhân).
+function c08CleanNote(text) {
+  return c08Shorten((text || '').toString().replace(/📷[^;\n|]*/g, ' '), C08_RESULT_NOTE_MAX);
+}
 // Gọn chuỗi: gộp xuống dòng/khoảng trắng thừa, cắt bớt nếu quá dài.
 function c08Shorten(text, max) {
   const s = (text || '').toString().replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
 }
+// Kết quả đối chiếu phiếu chỉ mang tính nhãn chung -> không đưa vào "Ghi chú:".
+const C08_TRIVIAL_PHIEU = /^(khop|chua kiem|can kiem|da kiem)\b/;
 
-// "Kết quả rà soát": tổng hợp ngắn gọn từ Trạng thái xe, Tình trạng cam kết,
-// Kết quả đối chiếu phiếu, Kiểm phiếu / Người kiểm phiếu và Ghi chú.
-// VD: "Trạng thái xe: Đã hoàn thành sang tên; Cam kết: Đã ký cam kết; Đối chiếu phiếu: khớp; Đã kiểm phiếu (Nhơn); Ghi chú: ..."
 function c08BuildResult(row) {
-  const parts = [];
-  const add = (label, val) => {
-    const v = c08Shorten(val, C08_RESULT_NOTE_MAX);
-    if (v) parts.push(label ? `${label}: ${v}` : v);
-  };
-  add('Trạng thái xe', row.trangThaiXe);
-  add('Cam kết', row.tinhTrangCamKet);
-  add('Đối chiếu phiếu', row.ketQuaPhieu);
-  // Chỉ nhắc "đã kiểm phiếu" khi thật sự đã kiểm (tránh ghi "Chưa kiểm" cho mọi dòng).
-  if (normalizeName(row.kiemPhieu) === normalizeName('Đã kiểm')) {
-    const who = (row.nguoiKiemPhieu || '').trim();
-    parts.push('Đã kiểm phiếu' + (who ? ` (${who})` : ''));
-  }
-  // Ghi chú: bỏ nếu đã trùng nội dung với phần phía trước.
-  const note = c08Shorten(row.ghiChu, C08_RESULT_NOTE_MAX);
-  if (note && !parts.join(' ').includes(note)) parts.push('Ghi chú: ' + note);
-  return parts.join('; ');
+  const labels = [];
+  const addLabel = (t) => { if (t && !labels.includes(t)) labels.push(t); };
+
+  // 1) Trạng thái xe
+  const status = (row.trangThaiXe || '').trim();
+  const nStatus = stripDiacritics(status);
+  C08_STATUS_RULES.forEach(r => { if (r.re.test(nStatus)) addLabel(r.text(status)); });
+
+  // 2) Ghi chú + Kết quả đối chiếu phiếu -> từ khoá
+  const note = c08CleanNote(row.ghiChu);
+  const phieu = c08Shorten(row.ketQuaPhieu, C08_RESULT_NOTE_MAX);
+  const norm = stripDiacritics(note + ' ; ' + phieu);
+  let keywordHit = false;
+  C08_KEYWORD_RULES.forEach(r => {
+    const m = r.re.exec(norm);
+    if (m && !c08IsNegated(norm, m.index)) { addLabel(r.text); keywordHit = true; }
+  });
+
+  // 3) Nội dung cần ghi chú ngoài phần trạng thái -> "Ghi chú: ..."
+  //    Nếu Ghi chú đã được quy ra cụm chuẩn ở bước 2 thì không chép lại nguyên văn (tránh lặp).
+  //    Chỉ bỏ ghi chú khi nó NGẮN và đã được quy ra cụm chuẩn (chỉ là lặp lại); ghi chú dài
+  //    vẫn được giữ để không mất thông tin ngoài phần trạng thái.
+  const extra = [];
+  const noteShort = stripDiacritics(note).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().length <= C08_NOTE_REDUNDANT_MAX;
+  if (note && !(keywordHit && noteShort)) extra.push(note);
+  if (phieu && !C08_TRIVIAL_PHIEU.test(stripDiacritics(phieu))) extra.push('Đối chiếu phiếu: ' + phieu);
+  if (extra.length) labels.push('Ghi chú: ' + extra.join(' | '));
+
+  return labels.join('; ');   // chưa xác định được -> chuỗi rỗng (để trống)
 }
 
-// "Đơn vị rà soát": ưu tiên Người thực hiện -> Người kiểm phiếu -> giá trị mặc
-// định người dùng nhập. Nếu bật "ghi đè" thì mọi dòng dùng giá trị mặc định.
+// "Đơn vị rà soát": Người thực hiện -> Người kiểm phiếu -> cột «Đơn vị rà soát» của PC08
+// -> giá trị mặc định. Bật "ghi đè" thì mọi dòng dùng giá trị mặc định.
 function c08BuildUnit(row, ctx) {
   if (ctx.forceUnit && ctx.defaultUnit) return ctx.defaultUnit;
-  return (row.nguoiThucHien || '').trim() || (row.nguoiKiemPhieu || '').trim() || ctx.defaultUnit || '';
+  return (row.nguoiThucHien || '').trim() || (row.nguoiKiemPhieu || '').trim()
+    || (ctx.pc && ctx.pc.donVi) || ctx.defaultUnit || '';
 }
+
+// 22 cột theo đúng thứ tự + tiêu đề của file mẫu C08.
+//  - get(row, ctx): ctx = { stt, pc (dòng PC08 khớp hoặc null), defaultUnit, forceUnit }.
+//  - Cột trùng giữa 2 sheet: Tong hop trước, trống thì lấy PC08 (c08Pick).
+//  - Cột chỉ PC08 có: PC08 trước, rồi cột lạ của Tong hop. Không có -> '' (để trống).
+const C08_COLUMNS = [
+  { header: 'STT',                get: (r, c) => c.stt, width: 6, center: true },
+  { header: 'Mã ID',              get: (r, c) => c08Pick(r.maId, c.pc && c.pc.maId), width: 14 },
+  { header: 'OTO_ID',             get: (r, c) => c08Pick(r.motoId, c.pc && c.pc.otoId), width: 14 },   // Tong hop đặt tên cột là MOTO_ID
+  { header: 'Số khung',           get: (r, c) => c08Pick(r.soKhung, c.pc && c.pc.soKhung), width: 22 },
+  { header: 'Số máy',             get: (r, c) => c08Pick(r.soMay, c.pc && c.pc.soMay), width: 18 },
+  { header: 'Biển số',            get: (r, c) => c08Pick(r.bienSo, c.pc && c.pc.bienSo), width: 12 },
+  { header: 'Màu biển',           get: (r, c) => c08Pick(r.mauBien, c.pc && c.pc.mauBien), width: 9 },
+  { header: 'Nhãn hiệu',          get: (r, c) => c08Pick(r.nhanHieu, c.pc && c.pc.nhanHieu), width: 14 },
+  { header: 'Loại xe',            get: (r, c) => c08CleanLoaiXe(c08Pick(r.loaiXe, c.pc && c.pc.loaiXe)), width: 20 },
+  { header: 'Chủ phương tiện',    get: (r, c) => c08Pick(r.chuXe, c.pc && c.pc.chuXe), width: 24 },
+  { header: 'Số CCCD/MST',        get: (r, c) => c08Pick(r.cccd, c.pc && c.pc.cccd), width: 15 },
+  { header: 'Địa chỉ đăng ký',    get: (r, c) => c08Pick(r.diaChi, c.pc && c.pc.diaChi), width: 34 },
+  { header: 'Địa chỉ thường trú', get: (r, c) => (c.pc && c.pc.thuongTru) || c08ExtraValue(r, ['thuong tru']), width: 30 },
+  { header: 'Nơi ở hiện tại',     get: (r, c) => (c.pc && c.pc.noiO) || c08ExtraValue(r, ['noi o hien tai', 'noi o hien nay']), width: 30 },
+  { header: 'Địa chỉ tạm trú',    get: (r, c) => (c.pc && c.pc.tamTru) || c08ExtraValue(r, ['tam tru']), width: 30 },
+  { header: 'Ngày đăng ký',       get: (r, c) => c08Pick(r.ngayDangKy, c.pc && c.pc.ngayDangKy), width: 12, center: true },
+  { header: 'Trạng thái ĐK',      get: (r, c) => c08Pick(r.trangThaiDK, c.pc && c.pc.trangThaiDK), width: 14 },
+  { header: 'Chuyên đề (Mã định danh/ xe hết niên hạn/ xe 2 chu kỳ chưa kiểm định/ ô tô nhãn hiệu lạ 20 năm/ mô tô nhãn hiện lạ 20 năm)',
+    get: (r, c) => (c.pc && c.pc.chuyenDe) || c08ExtraValue(r, ['chuyen de']), width: 28 },
+  { header: 'Ngày ĐK đầu',        get: (r, c) => c08Pick(r.ngayDkDau, c.pc && c.pc.ngayDkDau), width: 12, center: true },
+  { header: 'Số điện thoại',      get: (r, c) => c08Pick(r.soDienThoai, c.pc && c.pc.soDienThoai), width: 14 },
+  { header: 'Kết quả rà soát (đã cập nhật mã định danh/đã thu hồi trên hệ thống/ đã cập nhật trạng thái xe/ đã hướng dẫn công dân/ công dân đã thực hiện thủ tục sang tên,…)',
+    get: (r) => c08BuildResult(r), width: 50 },
+  { header: 'Đơn vị rà soát',     get: (r, c) => c08BuildUnit(r, c), width: 18 },
+];
 
 // Lấy danh sách xe theo phạm vi: 'filtered' | 'selected' | 'all'.
 //  - filtered: đúng như bảng chính (đã lọc + loại trừ + sắp xếp), không sửa row.stt.
@@ -1875,11 +2029,11 @@ function c08GetRows(scope) {
   return getFiltered(null).slice().sort(compareBySortCriteria);
 }
 
-// Dựng mảng-của-mảng (header + dữ liệu); STT tự đánh từ 1.
+// Dựng mảng-của-mảng (header + dữ liệu); STT tự đánh từ 1. opts.pcIndex = chỉ mục sheet PC08 (hoặc null).
 function c08BuildAoa(rows, opts) {
   const aoa = [C08_COLUMNS.map(c => c.header)];
   rows.forEach((row, i) => {
-    const ctx = { stt: i + 1, defaultUnit: opts.defaultUnit, forceUnit: opts.forceUnit };
+    const ctx = { stt: i + 1, pc: c08FindPc(row, opts.pcIndex), defaultUnit: opts.defaultUnit, forceUnit: opts.forceUnit };
     aoa.push(C08_COLUMNS.map(c => {
       const v = c.get(row, ctx);
       return v == null ? '' : v;   // giữ nguyên số (STT) / chuỗi (CCCD, số khung...) để không mất số 0 đầu
@@ -1958,13 +2112,18 @@ function c08BuildWorkbook(XLSX, aoa, styled) {
 async function exportC08(scope, opts) {
   const rows = c08GetRows(scope);
   if (!rows.length) { toast('Không có dòng nào để xuất báo cáo C08 theo phạm vi đã chọn.', true); return false; }
+  // Đọc thêm sheet "DL PC08 do"; lỗi thì vẫn xuất (chỉ Tong hop) và báo rõ lý do.
+  const pc = await c08FetchPcIndex();
+  opts = Object.assign({}, opts, { pcIndex: pc.index });
   const lib = await c08LoadLib();
   if (!lib) { toast('Không tải được thư viện xuất Excel (kiểm tra kết nối mạng).', true); return false; }
   const { XLSX, styled } = lib;
   const wb = c08BuildWorkbook(XLSX, c08BuildAoa(rows, opts), styled);
   const stamp = new Date().toISOString().slice(0, 10);
   XLSX.writeFile(wb, `BaoCao_C08_HauKiemXe100Ngay_Dot1_${stamp}.xlsx`);
-  toast(`Đã xuất báo cáo C08: ${rows.length} dòng` + (styled ? '.' : ' (không có định dạng màu do không tải được thư viện style).'));
+  toast(`Đã xuất báo cáo C08: ${rows.length} dòng` + (pc.index ? ` (ghép sheet «${C08_PC08_SHEET}»).` : '.')
+    + (styled ? '' : ' Không có định dạng màu do không tải được thư viện style.')
+    + (pc.warning ? ' ⚠ ' + pc.warning : ''), !!pc.warning);
   return true;
 }
 

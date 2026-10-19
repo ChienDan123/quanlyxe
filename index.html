@@ -551,7 +551,7 @@
       <button class="modal-close" data-close="c08Modal">✕</button>
     </div>
     <div class="modal-body">
-      <p class="hint">Hậu kiểm xe 100 ngày (đợt 1) — xuất file .xlsx đúng 22 cột theo mẫu C08, STT tự đánh từ 1. Cột chưa có dữ liệu để trống.</p>
+      <p class="hint">Hậu kiểm xe 100 ngày (đợt 1) — xuất file .xlsx đúng 22 cột theo mẫu C08, STT tự đánh từ 1. Dữ liệu lấy từ 2 sheet: <b>Tong hop</b> (danh sách + kết quả rà soát) và <b>DL PC08 do</b> (bổ sung các cột còn trống). Cột chưa có dữ liệu để trống.</p>
       <label class="hint-label">Phạm vi dữ liệu</label>
       <label class="chk-inline" style="display:flex;margin-bottom:6px;"><input type="radio" name="c08Scope" value="filtered" checked> Danh sách đang lọc + sắp xếp (<b id="c08CntFiltered">0</b> xe)</label>
       <label class="chk-inline" style="display:flex;margin-bottom:6px;"><input type="radio" name="c08Scope" value="selected"> Chỉ các xe đã tích chọn (<b id="c08CntSelected">0</b> xe)</label>
@@ -562,7 +562,7 @@
       <label class="chk-inline" style="display:flex;"><input type="checkbox" id="c08ForceUnit"> Dùng giá trị mặc định cho TẤT CẢ các dòng (bỏ qua Người thực hiện)</label>
     </div>
     <div class="modal-footer">
-      <span class="hint">Cột «Kết quả rà soát» tự tổng hợp từ Trạng thái xe, Cam kết, Đối chiếu phiếu, Ghi chú.</span>
+      <span class="hint">«Kết quả rà soát» suy ra từ Trạng thái xe, Ghi chú, Kết quả đối chiếu phiếu của Tong hop (không lấy từ DL PC08 do).</span>
       <div class="footer-btns">
         <button id="btnDoExportC08" class="btn btn-primary">⬇️ Tải file C08</button>
       </div>
@@ -802,7 +802,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <!-- Thư viện docx (xuất Word) được nạp theo yêu cầu bởi ensureDocxLib() trong app.js: ưu tiên lib/docx.umd.js, dự phòng CDN. -->
-<script src="app.js?v=20261019"></script>
+<script src="app.js?v=20261020"></script>
 <script src="sync-issues.js?v=20261013"></script><!-- phân loại lỗi đồng bộ + bảng chi tiết (nạp ngay sau app.js) -->
 <script src="scan.js?v=20261013"></script>
 <script src="scan-compare.js?v=20261013"></script><!-- hàm so sánh thuần (phải nạp trước scan-review.js) -->
