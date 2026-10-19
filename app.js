@@ -1792,7 +1792,8 @@ if (sortBarEl) {
      API SheetJS). Nếu không tải được thì vẫn xuất được, chỉ mất định dạng màu.  */
 const C08_UNIT_KEY = 'c08DefaultUnitV1';   // localStorage: đơn vị rà soát mặc định
 const C08_SCOPE_KEY = 'c08ScopeV1';        // localStorage: phạm vi lần trước
-const C08_NOTE_REDUNDANT_MAX = 30;        // ghi chú ≤ ngần này ký tự và đã quy ra cụm chuẩn -> coi là lặp, không chép lại
+// Từ đệm (đã bỏ dấu) được bỏ qua khi xét ghi chú có "chỉ lặp lại nhãn chuẩn" hay không.
+const C08_FILLER_WORDS = /\b(da|xe|cong dan|chu|roi|va|la|co|duoc)\b/g;
 const C08_RESULT_NOTE_MAX = 160;           // số ký tự tối đa lấy từ Ghi chú vào "Kết quả rà soát"
 const C08_PC08_SHEET = 'DL PC08 do';       // tên sheet bổ sung trên Google Sheet
 
@@ -1922,12 +1923,16 @@ function c08ExtraValue(row, keywords) {
 const C08_STATUS_RULES = [
   { re: /da thuc hien thu hoi/,        text: () => 'Đã thu hồi trên hệ thống' },
   { re: /da hoan thanh sang ten/,      text: () => 'Công dân đã thực hiện thủ tục sang tên' },
+  // Quy tắc 2: "còn sử dụng" (trừ "không còn sử dụng") -> "Còn hoạt động".
+  { re: /(?<!khong )con su dung/,        text: () => 'Còn hoạt động' },
   { re: /da ban phe lieu|hong, dang quan ly|ban khong ro nguoi su dung/,
     text: (st) => `Đã cập nhật trạng thái xe (${st})` },
 ];
 // 2) Theo từ khoá trong Ghi chú / Kết quả đối chiếu phiếu (bỏ qua nếu có từ phủ định ngay phía trước).
 const C08_KEYWORD_RULES = [
-  { re: /cap nhat[^;.]{0,25}ma dinh danh|ma dinh danh[^;.]{0,25}cap nhat/, text: 'Đã cập nhật mã định danh' },
+  { re: /cap nhat[^;.]{0,25}ma dinh danh|ma dinh danh[^;.]{0,25}cap nhat/, text: 'Cập nhật mã định danh' },
+  // Quy tắc 2: ghi chú / phiếu nhắc "còn sử dụng" (bị phủ định như "không còn sử dụng" thì c08IsNegated loại).
+  { re: /con su dung/,                                              text: 'Còn hoạt động' },
   { re: /thu hoi/,                                                  text: 'Đã thu hồi trên hệ thống' },
   { re: /huong dan/,                                                text: 'Đã hướng dẫn công dân' },
   { re: /da (hoan thanh|thuc hien|lam)[^;.]{0,25}sang ten/,         text: 'Công dân đã thực hiện thủ tục sang tên' },
@@ -1936,9 +1941,52 @@ const C08_KEYWORD_RULES = [
 function c08IsNegated(norm, index) {
   return /\b(chua|khong|can|se|de nghi|yeu cau)\b/.test(norm.slice(Math.max(0, index - 15), index));
 }
+// Dấu vết tự sinh khi quét phiếu: «Trước cập nhật từ phiếu dd/mm: CCCD=xxxx» (chứa số CCCD cũ).
+// Dùng để nhận biết công dân đã được cập nhật mã định danh; KHÔNG chép nguyên văn ra báo cáo.
+const C08_TRACE_RE = /Trước cập nhật[^;\n|]*/gi;
+const C08_TRACE_DETECT = /truoc cap nhat[^;|]*cccd\s*[=:]/;
+function c08StripTrace(text) { return (text || '').toString().normalize('NFC').replace(C08_TRACE_RE, ' '); }
+
+// Số CCCD 12 số. Excel hay cắt mất số 0 đầu nên 11 số toàn chữ số cũng được coi là CCCD (thiếu 1 số 0).
+// MST (10/13 số) hoặc có chữ -> không phải.
+function c08IsCccd12(v) {
+  const d = (v || '').toString().replace(/[\s.'`]/g, '');
+  return /^\d{12}$/.test(d) || /^\d{11}$/.test(d);
+}
+
+// Quy tắc 1: có «Trước cập nhật từ phiếu …: CCCD=…» trong Trạng thái xe / Ghi chú / Kết quả đối chiếu phiếu
+// VÀ cột Số CCCD/MST là căn cước 12 số (hoặc 11 số do mất số 0 đầu) -> "Cập nhật mã định danh".
+// Kiểm tra trên văn bản GỐC (chưa lọc), vì dấu vết có thể nằm trong đoạn 📷 sẽ bị lọc khỏi Ghi chú.
+function c08IsIdentityUpdated(row) {
+  const raw = [row.trangThaiXe, row.ghiChu, row.ketQuaPhieu].join(' ; ').normalize('NFC');
+  return C08_TRACE_DETECT.test(stripDiacritics(raw)) && c08IsCccd12(row.cccd);
+}
+
+// Tên người sử dụng / người mua của xe (4 cột «Người sử dụng xe - …» ở Tong hop). Tên khoá nội bộ do
+// scan-review.js đặt nên dò linh hoạt: thuộc tính của row HOẶC cột lạ (_extra) có tên chứa
+// «người sử dụng»/«người mua» + «tên»/«họ tên» (loại trừ cột địa chỉ, CCCD, SĐT). Giá trị giữ chỗ coi như trống.
+const C08_NO_NAME = /^(khong ro|chua (co|ro|biet)|k\.?r|n\/a|-+)$/;
+function c08UserName(row) {
+  const sources = Object.keys(row).filter(k => k !== '_extra' && k !== '_rowId').map(k => [k, row[k]]);
+  Object.keys(row._extra || {}).forEach(h => sources.push([h, row._extra[h]]));
+  for (const [k, v] of sources) {
+    const nk = stripDiacritics(k).replace(/[^a-z0-9]/g, '');
+    if (!/(nguoisudung|nguoimua|nsd)/.test(nk) || !/(ten|name)/.test(nk)) continue;
+    if (/(diachi|cccd|dienthoai|sdt|address|phone)/.test(nk)) continue;
+    const val = (v == null ? '' : String(v)).trim();
+    if (val && !C08_NO_NAME.test(stripDiacritics(val))) return val;
+  }
+  return '';
+}
+
+// Quy tắc 3: phiếu/ghi chú cho biết «bán chưa sang tên».
+const C08_SOLD_UNTRANSFERRED = /ban[^;.|]{0,15}chua[^;.|]{0,15}sang ten/;
+
 // Ghi chú sạch: bỏ dấu vết tự sinh «📷Phiếu dd/mm: CCCD, SĐT...» (chỉ là nguồn dữ liệu, có thông tin cá nhân).
 function c08CleanNote(text) {
-  return c08Shorten((text || '').toString().replace(/📷[^;\n|]*/g, ' '), C08_RESULT_NOTE_MAX);
+  const cleaned = c08StripTrace(text).replace(/📷[^;\n|]*/g, ' ')
+    .split(/[;|]/).map(x => x.trim()).filter(Boolean).join('; ');   // bỏ dấu ';' '|' thừa còn sót sau khi lọc
+  return c08Shorten(cleaned, C08_RESULT_NOTE_MAX);
 }
 // Gọn chuỗi: gộp xuống dòng/khoảng trắng thừa, cắt bớt nếu quá dài.
 function c08Shorten(text, max) {
@@ -1959,22 +2007,37 @@ function c08BuildResult(row) {
 
   // 2) Ghi chú + Kết quả đối chiếu phiếu -> từ khoá
   const note = c08CleanNote(row.ghiChu);
-  const phieu = c08Shorten(row.ketQuaPhieu, C08_RESULT_NOTE_MAX);
+  const phieu = c08Shorten(c08StripTrace(row.ketQuaPhieu), C08_RESULT_NOTE_MAX);
   const norm = stripDiacritics(note + ' ; ' + phieu);
-  let keywordHit = false;
+  const hits = [];   // các cụm đã được quy ra nhãn chuẩn (để biết ghi chú còn nội dung nào khác không)
   C08_KEYWORD_RULES.forEach(r => {
     const m = r.re.exec(norm);
-    if (m && !c08IsNegated(norm, m.index)) { addLabel(r.text); keywordHit = true; }
+    if (m && !c08IsNegated(norm, m.index)) { addLabel(r.text); hits.push(m[0]); }
   });
 
-  // 3) Nội dung cần ghi chú ngoài phần trạng thái -> "Ghi chú: ..."
+  // Quy tắc 1: đã cập nhật mã định danh (dấu vết «Trước cập nhật từ phiếu…: CCCD=…» + CCCD 12 số).
+  if (c08IsIdentityUpdated(row)) addLabel('Cập nhật mã định danh');
+
+  // Quy tắc 3: «bán chưa sang tên» mà CHƯA có tên người sử dụng/người mua -> "Bán không rõ người sử dụng".
+  //   (Nếu Trạng thái xe đã là «Bán không rõ người sử dụng» thì quy tắc theo trạng thái ở trên đã xử lý.)
+  let soldUnknown = false;
+  if (C08_SOLD_UNTRANSFERRED.test(norm) && !/ban khong ro/.test(nStatus) && !c08UserName(row)) {
+    addLabel('Bán không rõ người sử dụng');
+    soldUnknown = true;
+  }
+
+  // 4) Nội dung cần ghi chú ngoài phần trạng thái -> "Ghi chú: ..."
   //    Nếu Ghi chú đã được quy ra cụm chuẩn ở bước 2 thì không chép lại nguyên văn (tránh lặp).
-  //    Chỉ bỏ ghi chú khi nó NGẮN và đã được quy ra cụm chuẩn (chỉ là lặp lại); ghi chú dài
-  //    vẫn được giữ để không mất thông tin ngoài phần trạng thái.
+  //    Chỉ bỏ ghi chú khi sau khi trừ các cụm đã quy nhãn không còn nội dung nào khác;
+  //    còn ý khác (vd «còn sử dụng, chủ đi làm xa») thì giữ nguyên để không mất thông tin.
   const extra = [];
-  const noteShort = stripDiacritics(note).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().length <= C08_NOTE_REDUNDANT_MAX;
-  if (note && !(keywordHit && noteShort)) extra.push(note);
-  if (phieu && !C08_TRIVIAL_PHIEU.test(stripDiacritics(phieu))) extra.push('Đối chiếu phiếu: ' + phieu);
+  let rest = stripDiacritics(note);                                  // phần ghi chú còn lại sau khi bỏ các cụm đã quy nhãn
+  hits.forEach(h => { rest = rest.split(h).join(' '); });
+  rest = rest.replace(/[^a-z0-9 ]/g, ' ').replace(C08_FILLER_WORDS, ' ').replace(/\s+/g, ' ').trim();
+  const noteRedundant = hits.length > 0 && !rest;                    // chỉ lặp lại nhãn -> không chép lại
+  if (note && !noteRedundant) extra.push(note);
+  //    Phiếu đã được quy ra nhãn «Bán không rõ người sử dụng» thì không chép lại.
+  if (phieu && !soldUnknown && !C08_TRIVIAL_PHIEU.test(stripDiacritics(phieu))) extra.push('Đối chiếu phiếu: ' + phieu);
   if (extra.length) labels.push('Ghi chú: ' + extra.join(' | '));
 
   return labels.join('; ');   // chưa xác định được -> chuỗi rỗng (để trống)
