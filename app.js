@@ -1773,6 +1773,245 @@ if (sortBarEl) {
   });
 }
 
+/* ---------------------------- 7b. XUẤT BÁO CÁO C08 ---------------------------
+   Báo cáo C08 — hậu kiểm xe 100 ngày (đợt 1). Xuất file .xlsx đúng 22 cột theo
+   file mẫu "mẫu báo cáo C08.xlsx" (tiêu đề nền xanh đậm 1F497D, chữ trắng đậm,
+   Times New Roman 10, có viền). Luồng: nút "Xuất báo cáo C08" -> hộp thoại chọn
+   PHẠM VI (đang lọc / đã tích chọn / toàn bộ) + ĐƠN VỊ RÀ SOÁT mặc định -> tải file.
+   - Không đụng tới nút "Xuất Excel" cũ (EXPORT_COLUMNS / loadXlsxLib ở trên).
+   - Cần thư viện có hỗ trợ style ô: dùng "xlsx-js-style" (bản fork tương thích
+     API SheetJS). Nếu không tải được thì vẫn xuất được, chỉ mất định dạng màu.  */
+const C08_UNIT_KEY = 'c08DefaultUnitV1';   // localStorage: đơn vị rà soát mặc định
+const C08_SCOPE_KEY = 'c08ScopeV1';        // localStorage: phạm vi lần trước
+const C08_RESULT_NOTE_MAX = 160;           // số ký tự tối đa lấy từ Ghi chú vào "Kết quả rà soát"
+
+// 22 cột theo đúng thứ tự + tiêu đề của file mẫu C08.
+//  - get(row, ctx): lấy giá trị của 1 ô (ctx = { stt, defaultUnit, forceUnit }).
+//  - Cột chưa có trong dữ liệu -> get trả '' (để trống).
+const C08_COLUMNS = [
+  { header: 'STT',                get: (r, c) => c.stt, width: 6, center: true },
+  { header: 'Mã ID',              get: r => r.maId, width: 14 },
+  { header: 'OTO_ID',             get: r => r.motoId, width: 14 },   // Sheet đặt tên cột là MOTO_ID
+  { header: 'Số khung',           get: r => r.soKhung, width: 22 },
+  { header: 'Số máy',             get: r => r.soMay, width: 18 },
+  { header: 'Biển số',            get: r => r.bienSo, width: 12 },
+  { header: 'Màu biển',           get: r => r.mauBien, width: 9 },
+  { header: 'Nhãn hiệu',          get: r => r.nhanHieu, width: 14 },
+  { header: 'Loại xe',            get: r => r.loaiXe, width: 14 },
+  { header: 'Chủ phương tiện',    get: r => r.chuXe, width: 24 },
+  { header: 'Số CCCD/MST',        get: r => r.cccd, width: 15 },
+  { header: 'Địa chỉ đăng ký',    get: r => r.diaChi, width: 34 },
+  // 3 cột địa chỉ dưới đây + "Chuyên đề" không nằm trong FIELD_MAP: nếu Sheet có
+  // cột trùng tên thì lấy (qua row._extra), không thì để trống.
+  { header: 'Địa chỉ thường trú', get: r => c08ExtraValue(r, ['thuong tru']), width: 30 },
+  { header: 'Nơi ở hiện tại',     get: r => c08ExtraValue(r, ['noi o hien tai', 'noi o hien nay']), width: 30 },
+  { header: 'Địa chỉ tạm trú',    get: r => c08ExtraValue(r, ['tam tru']), width: 30 },
+  { header: 'Ngày đăng ký',       get: r => r.ngayDangKy, width: 12, center: true },
+  { header: 'Trạng thái ĐK',      get: r => r.trangThaiDK, width: 14 },
+  { header: 'Chuyên đề (Mã định danh/ xe hết niên hạn/ xe 2 chu kỳ chưa kiểm định/ ô tô nhãn hiệu lạ 20 năm/ mô tô nhãn hiện lạ 20 năm)',
+    get: r => c08ExtraValue(r, ['chuyen de']), width: 28 },
+  { header: 'Ngày ĐK đầu',        get: r => r.ngayDkDau, width: 12, center: true },
+  { header: 'Số điện thoại',      get: r => r.soDienThoai, width: 14 },
+  { header: 'Kết quả rà soát (đã cập nhật mã định danh/đã thu hồi trên hệ thống/ đã cập nhật trạng thái xe/ đã hướng dẫn công dân/ công dân đã thực hiện thủ tục sang tên,…)',
+    get: r => c08BuildResult(r), width: 50 },
+  { header: 'Đơn vị rà soát',     get: (r, c) => c08BuildUnit(r, c), width: 18 },
+];
+
+// Tìm giá trị trong các cột "lạ" (row._extra) của Sheet theo từ khoá trong tiêu đề
+// (so khớp không dấu, không phân biệt hoa thường). Không thấy -> ''.
+function c08ExtraValue(row, keywords) {
+  const extra = row && row._extra;
+  if (!extra) return '';
+  for (const h of Object.keys(extra)) {
+    const nh = stripDiacritics(h);
+    if (keywords.some(k => nh.includes(k))) return extra[h] || '';
+  }
+  return '';
+}
+
+// Gọn chuỗi: gộp xuống dòng/khoảng trắng thừa, cắt bớt nếu quá dài.
+function c08Shorten(text, max) {
+  const s = (text || '').toString().replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
+}
+
+// "Kết quả rà soát": tổng hợp ngắn gọn từ Trạng thái xe, Tình trạng cam kết,
+// Kết quả đối chiếu phiếu, Kiểm phiếu / Người kiểm phiếu và Ghi chú.
+// VD: "Trạng thái xe: Đã hoàn thành sang tên; Cam kết: Đã ký cam kết; Đối chiếu phiếu: khớp; Đã kiểm phiếu (Nhơn); Ghi chú: ..."
+function c08BuildResult(row) {
+  const parts = [];
+  const add = (label, val) => {
+    const v = c08Shorten(val, C08_RESULT_NOTE_MAX);
+    if (v) parts.push(label ? `${label}: ${v}` : v);
+  };
+  add('Trạng thái xe', row.trangThaiXe);
+  add('Cam kết', row.tinhTrangCamKet);
+  add('Đối chiếu phiếu', row.ketQuaPhieu);
+  // Chỉ nhắc "đã kiểm phiếu" khi thật sự đã kiểm (tránh ghi "Chưa kiểm" cho mọi dòng).
+  if (normalizeName(row.kiemPhieu) === normalizeName('Đã kiểm')) {
+    const who = (row.nguoiKiemPhieu || '').trim();
+    parts.push('Đã kiểm phiếu' + (who ? ` (${who})` : ''));
+  }
+  // Ghi chú: bỏ nếu đã trùng nội dung với phần phía trước.
+  const note = c08Shorten(row.ghiChu, C08_RESULT_NOTE_MAX);
+  if (note && !parts.join(' ').includes(note)) parts.push('Ghi chú: ' + note);
+  return parts.join('; ');
+}
+
+// "Đơn vị rà soát": ưu tiên Người thực hiện -> Người kiểm phiếu -> giá trị mặc
+// định người dùng nhập. Nếu bật "ghi đè" thì mọi dòng dùng giá trị mặc định.
+function c08BuildUnit(row, ctx) {
+  if (ctx.forceUnit && ctx.defaultUnit) return ctx.defaultUnit;
+  return (row.nguoiThucHien || '').trim() || (row.nguoiKiemPhieu || '').trim() || ctx.defaultUnit || '';
+}
+
+// Lấy danh sách xe theo phạm vi: 'filtered' | 'selected' | 'all'.
+//  - filtered: đúng như bảng chính (đã lọc + loại trừ + sắp xếp), không sửa row.stt.
+function c08GetRows(scope) {
+  if (scope === 'all') return state.rawData.slice();
+  if (scope === 'selected') {
+    return state.rawData.filter(r => state.exportSelected.has(r._rowId)).sort(compareBySortCriteria);
+  }
+  return getFiltered(null).slice().sort(compareBySortCriteria);
+}
+
+// Dựng mảng-của-mảng (header + dữ liệu); STT tự đánh từ 1.
+function c08BuildAoa(rows, opts) {
+  const aoa = [C08_COLUMNS.map(c => c.header)];
+  rows.forEach((row, i) => {
+    const ctx = { stt: i + 1, defaultUnit: opts.defaultUnit, forceUnit: opts.forceUnit };
+    aoa.push(C08_COLUMNS.map(c => {
+      const v = c.get(row, ctx);
+      return v == null ? '' : v;   // giữ nguyên số (STT) / chuỗi (CCCD, số khung...) để không mất số 0 đầu
+    }));
+  });
+  return aoa;
+}
+
+// Tải thư viện xlsx (lười, chỉ khi bấm xuất). Ưu tiên bản có hỗ trợ style ô
+// (xlsx-js-style, tương thích API SheetJS); thất bại -> dùng SheetJS thường
+// (không có màu) thay vì báo lỗi, để vẫn xuất được file.
+// (loadXlsxLib của nút "Xuất Excel" nằm trong hàm cục bộ nên không gọi lại được.)
+const C08_LIB_STYLE_URL = 'https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js';
+const C08_LIB_PLAIN_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+function c08LoadScript(url) {
+  return new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = () => resolve(true);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+let c08LibPromise = null;
+// Trả về { XLSX, styled } hoặc null nếu không tải được thư viện nào.
+function c08LoadLib() {
+  if (c08LibPromise) return c08LibPromise;
+  c08LibPromise = (async () => {
+    if (window.__xlsxStyleReady) return { XLSX: window.XLSX, styled: true };
+    if (await c08LoadScript(C08_LIB_STYLE_URL) && window.XLSX) {
+      window.__xlsxStyleReady = true;   // bản fork ghi đè window.XLSX nhưng vẫn tương thích nút "Xuất Excel" cũ
+      return { XLSX: window.XLSX, styled: true };
+    }
+    if (window.XLSX || (await c08LoadScript(C08_LIB_PLAIN_URL) && window.XLSX)) return { XLSX: window.XLSX, styled: false };
+    return null;
+  })();
+  // Lỗi mạng -> cho phép thử lại ở lần bấm sau.
+  c08LibPromise.then(r => { if (!r) c08LibPromise = null; });
+  return c08LibPromise;
+}
+
+// Tạo workbook C08 có định dạng như mẫu. `styled` = false nếu chỉ có SheetJS thường.
+function c08BuildWorkbook(XLSX, aoa, styled) {
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = C08_COLUMNS.map(c => ({ wch: c.width }));
+  ws['!rows'] = [{ hpt: 110 }];                       // dòng tiêu đề cao để chứa 2 tiêu đề dài
+  const lastRow = aoa.length - 1;
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: lastRow, c: C08_COLUMNS.length - 1 } }) };
+  if (styled) {
+    const thin = { style: 'thin', color: { rgb: '000000' } };
+    const border = { top: thin, bottom: thin, left: thin, right: thin };
+    const headStyle = {
+      font: { name: 'Times New Roman', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
+      fill: { patternType: 'solid', fgColor: { rgb: '1F497D' } },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+      border,
+    };
+    for (let r = 0; r <= lastRow; r++) {
+      for (let c = 0; c < C08_COLUMNS.length; c++) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        if (!ws[addr]) ws[addr] = { t: 's', v: '' };   // ô trống vẫn có viền
+        ws[addr].s = r === 0 ? headStyle : {
+          font: { name: 'Times New Roman', sz: 10 },
+          alignment: { horizontal: C08_COLUMNS[c].center ? 'center' : 'left', vertical: 'top', wrapText: true },
+          border,
+        };
+      }
+    }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');   // đúng tên sheet của file mẫu
+  return wb;
+}
+
+// Thực hiện xuất: lấy dòng theo phạm vi -> dựng workbook -> tải về.
+async function exportC08(scope, opts) {
+  const rows = c08GetRows(scope);
+  if (!rows.length) { toast('Không có dòng nào để xuất báo cáo C08 theo phạm vi đã chọn.', true); return false; }
+  const lib = await c08LoadLib();
+  if (!lib) { toast('Không tải được thư viện xuất Excel (kiểm tra kết nối mạng).', true); return false; }
+  const { XLSX, styled } = lib;
+  const wb = c08BuildWorkbook(XLSX, c08BuildAoa(rows, opts), styled);
+  const stamp = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `BaoCao_C08_HauKiemXe100Ngay_Dot1_${stamp}.xlsx`);
+  toast(`Đã xuất báo cáo C08: ${rows.length} dòng` + (styled ? '.' : ' (không có định dạng màu do không tải được thư viện style).'));
+  return true;
+}
+
+/* ---- Giao diện: nút + hộp thoại chọn phạm vi / đơn vị rà soát ---- */
+function c08ReadScope() {
+  const el = document.querySelector('input[name="c08Scope"]:checked');
+  return el ? el.value : 'filtered';
+}
+function openC08Modal() {
+  // Cập nhật số lượng từng phạm vi mỗi lần mở (bộ lọc / lựa chọn có thể đã đổi).
+  const nFiltered = getFiltered(null).length;
+  const nSelected = state.rawData.filter(r => state.exportSelected.has(r._rowId)).length;
+  $('#c08CntFiltered').textContent = nFiltered;
+  $('#c08CntSelected').textContent = nSelected;
+  $('#c08CntAll').textContent = state.rawData.length;
+  $('input[name="c08Scope"][value="selected"]').disabled = nSelected === 0;
+  let scope = 'filtered';
+  try { scope = localStorage.getItem(C08_SCOPE_KEY) || 'filtered'; } catch (e) { /* bỏ qua */ }
+  if (scope === 'selected' && nSelected === 0) scope = 'filtered';
+  const radio = $(`input[name="c08Scope"][value="${scope}"]`) || $('input[name="c08Scope"][value="filtered"]');
+  radio.checked = true;
+  try { $('#c08Unit').value = localStorage.getItem(C08_UNIT_KEY) || ''; } catch (e) { /* bỏ qua */ }
+  openModal('c08Modal');
+}
+const btnExportC08 = $('#btnExportC08');
+if (btnExportC08) btnExportC08.addEventListener('click', () => {
+  if (!state.rawData.length) { toast('Chưa có dữ liệu để xuất báo cáo C08.', true); return; }
+  openC08Modal();
+});
+const btnDoExportC08 = $('#btnDoExportC08');
+if (btnDoExportC08) btnDoExportC08.addEventListener('click', async () => {
+  const scope = c08ReadScope();
+  const defaultUnit = ($('#c08Unit').value || '').trim();
+  const forceUnit = $('#c08ForceUnit').checked;
+  try { localStorage.setItem(C08_SCOPE_KEY, scope); localStorage.setItem(C08_UNIT_KEY, defaultUnit); } catch (e) { /* bỏ qua */ }
+  const oldText = btnDoExportC08.textContent;
+  btnDoExportC08.disabled = true; btnDoExportC08.textContent = 'Đang xuất...';
+  try {
+    if (await exportC08(scope, { defaultUnit, forceUnit })) closeModal('c08Modal');
+  } catch (err) {
+    toast('Lỗi khi xuất báo cáo C08: ' + (err && err.message ? err.message : String(err)), true);
+  } finally {
+    btnDoExportC08.disabled = false; btnDoExportC08.textContent = oldText;
+  }
+});
+
+
 /* ---------------------------- 7c. XUẤT TRANG IN ----------------------------
    Nút "Xuất trang in" -> hộp thoại chọn cột + khổ giấy -> dựng 1 trang in riêng
    trong iframe ẩn rồi gọi hộp thoại in của trình duyệt (in giấy hoặc Lưu PDF).

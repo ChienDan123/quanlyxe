@@ -379,6 +379,8 @@
     <div class="filter-actions">
       <button id="btnClearSort" class="btn btn-ghost">Xóa sắp xếp</button>
       <button id="btnExportXlsx" class="btn btn-secondary">📊 Xuất Excel (.xlsx)</button>
+      <!-- Xuất báo cáo C08 (hậu kiểm xe 100 ngày đợt 1): chọn phạm vi + đơn vị rà soát trong hộp thoại c08Modal bên dưới. Xem mục 7b trong app.js. -->
+      <button id="btnExportC08" class="btn btn-secondary" title="Xuất báo cáo C08 (hậu kiểm xe 100 ngày đợt 1) theo đúng file mẫu">📑 Xuất báo cáo C08</button>
       <button id="btnPrintList" class="btn btn-secondary" title="In danh sách đang lọc + sắp xếp (chọn cột, A4 ngang/dọc)">🖨️ Xuất trang in</button>
     </div>
   </section>
@@ -535,6 +537,34 @@
       <span class="hint">Chữ tự thu nhỏ cho vừa khổ giấy (không nhỏ hơn 7,5pt). Nên tắt "Headers and footers" trong hộp thoại in để tiết kiệm chỗ.</span>
       <div class="footer-btns">
         <button id="btnDoPrintList" class="btn btn-primary">🖨️ In / Xuất PDF</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL XUẤT BÁO CÁO C08 ============
+     Chọn phạm vi dữ liệu + đơn vị rà soát mặc định. Logic ở mục 7b trong app.js (exportC08). -->
+<div id="c08Modal" class="modal-overlay hidden">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2>📑 Xuất báo cáo C08</h2>
+      <button class="modal-close" data-close="c08Modal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Hậu kiểm xe 100 ngày (đợt 1) — xuất file .xlsx đúng 22 cột theo mẫu C08, STT tự đánh từ 1. Cột chưa có dữ liệu để trống.</p>
+      <label class="hint-label">Phạm vi dữ liệu</label>
+      <label class="chk-inline" style="display:flex;margin-bottom:6px;"><input type="radio" name="c08Scope" value="filtered" checked> Danh sách đang lọc + sắp xếp (<b id="c08CntFiltered">0</b> xe)</label>
+      <label class="chk-inline" style="display:flex;margin-bottom:6px;"><input type="radio" name="c08Scope" value="selected"> Chỉ các xe đã tích chọn (<b id="c08CntSelected">0</b> xe)</label>
+      <label class="chk-inline" style="display:flex;margin-bottom:10px;"><input type="radio" name="c08Scope" value="all"> Toàn bộ dữ liệu, bỏ qua bộ lọc (<b id="c08CntAll">0</b> xe)</label>
+      <label class="hint-label" for="c08Unit">Đơn vị rà soát mặc định</label>
+      <input id="c08Unit" type="text" class="tpl-input" placeholder="VD: Công an xã Tam Đàn" autocomplete="off">
+      <p class="hint">Mỗi xe ưu tiên lấy <b>Người thực hiện</b>, rồi <b>Người kiểm phiếu</b>; xe nào chưa có thì dùng giá trị mặc định này.</p>
+      <label class="chk-inline" style="display:flex;"><input type="checkbox" id="c08ForceUnit"> Dùng giá trị mặc định cho TẤT CẢ các dòng (bỏ qua Người thực hiện)</label>
+    </div>
+    <div class="modal-footer">
+      <span class="hint">Cột «Kết quả rà soát» tự tổng hợp từ Trạng thái xe, Cam kết, Đối chiếu phiếu, Ghi chú.</span>
+      <div class="footer-btns">
+        <button id="btnDoExportC08" class="btn btn-primary">⬇️ Tải file C08</button>
       </div>
     </div>
   </div>
@@ -772,7 +802,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <!-- Thư viện docx (xuất Word) được nạp theo yêu cầu bởi ensureDocxLib() trong app.js: ưu tiên lib/docx.umd.js, dự phòng CDN. -->
-<script src="app.js?v=20261013"></script>
+<script src="app.js?v=20261019"></script>
 <script src="sync-issues.js?v=20261013"></script><!-- phân loại lỗi đồng bộ + bảng chi tiết (nạp ngay sau app.js) -->
 <script src="scan.js?v=20261013"></script>
 <script src="scan-compare.js?v=20261013"></script><!-- hàm so sánh thuần (phải nạp trước scan-review.js) -->
