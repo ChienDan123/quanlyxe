@@ -181,7 +181,7 @@ function scanTextGet_(p) {
 function scanDispatch_(d) {
   if (!d || !d.action) return null;
   switch (d.action) {
-    case 'scanPing':          return { ok: true, version: 7, actions: ['scanPut', 'scanGet', 'scanList', 'scanGetBatch', 'scanMetaBatch', 'scanInventory', 'scanDelete', 'scanTextGet', 'scanOrphanUpsert', 'scanOrphanDelete'] };   // giữ nguyên danh sách actions
+    case 'scanPing':          return { ok: true, version: 7, actions: ['scanPut', 'scanGet', 'scanList', 'scanGetBatch', 'scanMetaBatch', 'scanInventory', 'scanDelete', 'scanTextGet', 'scanOrphanUpsert', 'scanOrphanDelete', 'scanSheetUpsert', 'scanSheetDelete', 'scanSheetPing'] };   // giữ nguyên danh sách actions
     case 'appendScanOrphans': return appendScanOrphans_(d.rows);
     case 'scanPut':           return scanPut_(d);
     case 'scanGet':           return scanGet_(d);
@@ -193,6 +193,9 @@ function scanDispatch_(d) {
     case 'scanTextGet':       return scanTextGet_(d);
     case 'scanOrphanUpsert':  return scanOrphanUpsert_(d);   // PHẦN 5: ghi phiếu lạ vào hàng trống mới của sheet đang làm việc
     case 'scanOrphanDelete':  return scanOrphanDelete_(d);   // PHẦN 5: xóa hàng phiếu lạ khi hóa ra trùng xe đã có
+    case 'scanSheetUpsert':   return dls_upsert_(d);          // PHẦN 6: ghi dữ liệu «TỪ PHIẾU SCAN» vào sheet Dulieuscan (AppsScript_Dulieuscan.gs)
+    case 'scanSheetDelete':   return dls_delete_(d);          // PHẦN 6: đánh dấu phiếu đã xóa trên web (không xóa dòng)
+    case 'scanSheetPing':     return dls_ping_();
     default:                  return null;
   }
 }
