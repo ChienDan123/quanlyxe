@@ -25,10 +25,25 @@ const ScanSync = (() => {
   const RETRY_MS = 60000;               // gặp lỗi: nghỉ 1 phút rồi thử lại
   const PULL_EVERY = 120000;            // kéo thay đổi từ Drive mỗi 2 phút (tăng dần nên rất nhẹ) — để tab/máy khác thấy nhau
   const PASS_KEY = 'vehicleScanVaultPassV1';   // mật khẩu kho khóa (trùng với scan-store.js) — link thiết lập có thể kèm
-  const Y = { busy: false, pulled: false, pullAt: 0, since: 0, fullAt: 0, batchOk: true, errUntil: 0, lastError: '', touched: new Set(), timer: null, cur: '', phase: '', gone: new Set() };
+  const Y = { rev: new Map(), fail: new Map(), errCount: 0, reconciled: false, busy: false, pulled: false, pullAt: 0, since: 0, fullAt: 0, batchOk: true, errUntil: 0, lastError: '', touched: new Set(), timer: null, cur: '', phase: '', gone: new Set() };
   // Trạng thái tải ẢNH NỀN (prefetch): dirty = có phiếu mới cần xem lại; checkedAt/errUntil để không quét liên tục
   const P = { busy: false, stop: false, done: 0, total: 0, bytes: 0, note: '', error: '', dirty: true, checkedAt: 0, errUntil: 0 };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  // DANH SÁCH PHIẾU «CÓ THAY ĐỔI CHƯA ĐẨY» được nhớ bền trong localStorage: trước đây Y.touched chỉ nằm trong RAM nên sửa xong đóng tab
+  // trước khi kịp đẩy (4 giây gộp / đang tải ảnh / mất mạng) thì thay đổi không bao giờ lên máy khác. Nay mở lại trang là tự đẩy tiếp.
+  const DIRTY_KEY = 'vehicleScanDirtyV1';
+  const loadDirty = () => { try { const a = JSON.parse(localStorage.getItem(DIRTY_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
+  const saveDirty = (set) => { try { localStorage.setItem(DIRTY_KEY, JSON.stringify([...set])); } catch (e) { /* bỏ qua */ } };
+  function markTouched(id) {
+    if (!id) return;
+    Y.touched.add(id); Y.rev.set(id, (Y.rev.get(id) || 0) + 1);      // rev tăng mỗi lần đổi: đang đẩy dở mà có thay đổi mới thì KHÔNG được coi là đã xong
+    const d = new Set(loadDirty()); if (!d.has(id)) { d.add(id); saveDirty(d); }
+  }
+  function dropDirty(id) { const d = new Set(loadDirty()); if (d.delete(id)) saveDirty(d); }
+  // Mất mạng / quota / máy chủ bận: nghỉ tăng dần 1′ → 2′ → 4′ … tối đa 10′ (trước đây cố định 60 giây)
+  const backoffMs = (n) => Math.min(600000, RETRY_MS * Math.pow(2, Math.max(0, n - 1)));
+  // Lỗi do RIÊNG phiếu đó (không phải do mạng) -> bỏ qua phiếu này, các phiếu khác vẫn đẩy bình thường
+  const isPerScanError = (e) => /Ảnh quá lớn|Thiếu scanId/i.test(String((e && e.message) || e));
   // MỐC «since» được NHỚ TRÊN MÁY: mở lại trang chỉ hỏi Drive các phiếu đổi sau mốc (rất nhanh) thay vì liệt kê lại cả kho.
   // Cứ 24 giờ (hoặc khi đổi nơi lưu / bấm «Đồng bộ ngay») lại liệt kê ĐỦ 1 lần để bắt phiếu sót.
   const SINCE_KEY = 'vehicleScanSinceV1', FULL_LIST_EVERY = 24 * 3600e3;
@@ -128,7 +143,7 @@ const ScanSync = (() => {
       frontMime: rec.frontMime, backMime: rec.backMime, frontHash: rec.frontHash, backBlank: !!rec.backBlank,
       hasFront: !!(rec.cloud && rec.cloud.frontId), hasBack: !!(rec.cloud && rec.cloud.backId),
       matchedBienSo: rec.matchedBienSo || [], extracted: rec.extracted, items,
-      imgRev: rec.imgRev || {}, rotChecked: !!rec.rotChecked,   // xoay ảnh (scan-rotate.js): mốc từng mặt + đã kiểm tra hướng
+      imgRev: rec.imgRev || {}, rotChecked: !!rec.rotChecked, delItems: rec.delItems || {},   // xoay ảnh (scan-rotate.js): mốc từng mặt + đã kiểm tra hướng
     };
   }
   // GỘP TRƯỚC KHI GHI ĐÈ (last-write-wins theo từng mục): nếu meta online MỚI hơn bản ta đã biết (máy/tab khác vừa sửa)
@@ -140,7 +155,7 @@ const ScanSync = (() => {
       const up = r.updated && r.updated[scanId], txt = r.metas && r.metas[scanId];
       if (txt && up && up > (rec.cloud.metaAt || 0)) {
         const plates = await mergeMeta(JSON.parse(txt), up);
-        if (window.ScanReview && ScanReview.afterRemoteMerge) await ScanReview.afterRemoteMerge(plates);
+        if (window.ScanReview && ScanReview.afterRemoteMerge) await ScanReview.afterRemoteMerge(plates, deletedBuf.splice(0));
         return true;
       }
     } catch (e) { console.warn('[scan-sync] gộp trước khi ghi lỗi (bỏ qua)', scanId, e); }
@@ -183,25 +198,71 @@ const ScanSync = (() => {
     let cur = '';
     try {
       if (!Y.pulled || Date.now() - Y.pullAt > PULL_EVERY) { await pull(); Y.pulled = true; Y.pullAt = Date.now(); }
-      (await forEachScan(r => (hasBlobs(r) && (!blobsUp(r) || (r.imgDirty && (r.imgDirty.front || r.imgDirty.back)))) ? r.id : null)).forEach(id => Y.touched.add(id));
-      while (Y.touched.size) {
-        cur = Y.touched.values().next().value; Y.cur = String(cur).slice(0, 8); Y.phase = '';
-        await pushScan(cur); Y.touched.delete(cur); refreshStatus();
+      // Việc còn dang dở: (1) phiếu ảnh chưa lên / ảnh vừa xoay, (2) phiếu đã «xong» mà CHƯA có meta online (đẩy ảnh xong nhưng đứt trước khi ghi meta),
+      // (3) danh sách thay đổi chưa đẩy đã nhớ bền từ phiên trước
+      (await forEachScan(r => ((hasBlobs(r) && (!blobsUp(r) || (r.imgDirty && (r.imgDirty.front || r.imgDirty.back))))
+        || (r.status === 'done' && !r.isTest && !(r.cloud && r.cloud.metaAt) && (r.frontBlob || r.cloud))) ? r.id : null)).forEach(id => Y.touched.add(id));
+      loadDirty().forEach(id => Y.touched.add(id));
+      if (!Y.reconciled) {            // 1 lần mỗi lần mở trang: tìm mục sửa SAU lần đẩy cuối (thay đổi cũ chưa từng được ghi nhận là «cần đẩy»)
+        Y.reconciled = true;
+        try { (await reconcileDirty()).forEach(markTouched); } catch (e) { console.warn('[scan-sync] rà thay đổi chưa đẩy lỗi', e); }
       }
-      Y.lastError = ''; Y.errUntil = 0;
+      const pickNext = () => { for (const id of Y.touched) { const f = Y.fail.get(id); if (!f || Date.now() >= f.until) return id; } return null; };
+      let scanErr = '';
+      while ((cur = pickNext()) != null) {
+        Y.cur = String(cur).slice(0, 8); Y.phase = '';
+        const rv = Y.rev.get(cur) || 0;
+        try {
+          await pushScan(cur);
+          Y.fail.delete(cur);
+          if ((Y.rev.get(cur) || 0) === rv) { Y.touched.delete(cur); dropDirty(cur); }   // có thay đổi mới trong lúc đẩy -> giữ lại, vòng sau đẩy tiếp
+        } catch (e) {
+          if (!isPerScanError(e)) throw e;                                              // lỗi mạng/quota/máy chủ: dừng cả lượt, nghỉ tăng dần
+          const f = Y.fail.get(cur) || { n: 0 }; f.n++; f.until = Date.now() + backoffMs(f.n); Y.fail.set(cur, f);
+          scanErr = String((e && e.message) || e).slice(0, 120);                          // KHÔNG xóa khỏi hàng chờ, KHÔNG chặn phiếu khác
+        }
+        refreshStatus();
+      }
+      Y.errCount = 0;
+      Y.lastError = scanErr ? scanErr + ' (các phiếu khác vẫn đồng bộ bình thường)' : ''; Y.errUntil = 0;
       // Tự xóa ảnh trên máy (nếu bật): chỉ phiếu đã lên Drive + kiểm tra khớp dung lượng, và giữ lại phiếu mới quét trong 1 giờ
       if (cfg.autoFree) { try { await freeLocal({ keepRecentMs: 3600e3 }); } catch (e) { console.warn('[scan-sync] tự giải phóng lỗi', e); } }
     } catch (e) {
-      Y.lastError = String((e && e.message) || e).slice(0, 160); Y.errUntil = Date.now() + RETRY_MS;
+      Y.lastError = String((e && e.message) || e).slice(0, 160); Y.errCount++; Y.errUntil = Date.now() + backoffMs(Y.errCount);
       console.warn('[scan-sync]', e);
     } finally { Y.busy = false; Y.cur = ''; Y.phase = ''; refreshStatus(); }
     // ẢNH NẶNG tải SAU CÙNG và chạy nền (không giữ khóa Y.busy -> không chặn việc kéo/đẩy dữ liệu nhẹ). Chỉ chạy khi người dùng đã bật.
     if (!Y.lastError) prefetchImages().catch(e => console.warn('[scan-sync] tải ảnh nền lỗi', e));
   }
   // Mục của phiếu vừa đổi -> gộp thay đổi rồi đẩy meta sau 4 giây
-  function touch(scanId) { if (!scanId) return; Y.touched.add(scanId); clearTimeout(Y.timer); Y.timer = setTimeout(run, 4000); }
+  function touch(scanId) { if (!scanId) return; markTouched(scanId); clearTimeout(Y.timer); Y.timer = setTimeout(run, 4000); }
+  // Mục có updatedAt MỚI hơn mốc meta online lần cuối (sai số 1 giây) => máy này có sửa đổi chưa lên Drive
+  async function reconcileDirty() {
+    const metaAt = new Map();
+    await forEachScan(r => { if (r.status === 'done' && !r.isTest && r.cloud && r.cloud.metaAt) metaAt.set(r.id, r.cloud.metaAt); return null; });
+    if (!metaAt.size) return [];
+    const db = await DB.openDb(), maxAt = new Map();
+    await new Promise((res, rej) => {
+      const rq = db.transaction(ST_ITEMS, 'readonly').objectStore(ST_ITEMS).openCursor();
+      rq.onsuccess = () => { const c = rq.result; if (!c) { res(); return; } const it = c.value, u = it.updatedAt || 0; if (u > (maxAt.get(it.scanId) || 0)) maxAt.set(it.scanId, u); c.continue(); };
+      rq.onerror = () => rej(rq.error);
+    });
+    const out = []; metaAt.forEach((at, id) => { if ((maxAt.get(id) || 0) > at + 1000) out.push(id); });
+    return out;
+  }
+  // Ghi dấu «mục này đã bị xóa lúc T» (bia mộ) để máy khác KHÔNG kéo mục đó sống lại khi gộp. Mục sửa/khôi phục SAU T (updatedAt > T) thì sống lại.
+  async function noteItemDeleted(scanId, itemId) {
+    if (!scanId || !itemId) return;
+    try {
+      const rec = await DB.dbGet(ST_SCANS, scanId); if (!rec) return;
+      rec.delItems = { ...(rec.delItems || {}), [itemId]: Date.now() };
+      await DB.dbPut(ST_SCANS, rec);
+    } catch (e) { console.warn('[scan-sync] ghi bia mộ lỗi', e); }
+    touch(scanId);
+  }
 
   /* ---------------- KÉO VỀ ---------------- */
+  const deletedBuf = [];
   async function mergeMeta(m, updated) {
     let rec = await DB.dbGet(ST_SCANS, m.scanId);
     if (!rec) {   // phiếu mới từ máy khác: tạo bản ghi chưa có ảnh (ảnh tải khi mở xem)
@@ -224,22 +285,36 @@ const ScanSync = (() => {
     }
     if (rotatedRemote && m.extracted) rec.extracted = m.extracted;
     if (m.rotChecked) rec.rotChecked = true;
+    // Bia mộ mục đã xóa: lấy mốc xóa MỚI hơn của hai bên
+    const tomb = rec.delItems = rec.delItems || {};
+    for (const id of Object.keys(m.delItems || {})) if ((m.delItems[id] || 0) > (tomb[id] || 0)) tomb[id] = m.delItems[id];
     rec.cloud.metaAt = updated;
     await DB.dbPut(ST_SCANS, rec);
     // Gộp từng mục: bản nào updatedAt mới hơn thì thắng
     const local = new Map((await itemsOf(m.scanId)).map(i => [i.id, i]));
     const plates = [];
     let pushBack = false;
+    const deleted = [];
     for (const ri of (m.items || [])) {
-      const li = local.get(ri.id);
+      const li = local.get(ri.id), T = tomb[ri.id] || 0;
+      if (T && (ri.updatedAt || 0) <= T) {                                         // bản online đã bị xóa (ở máy này hoặc máy khác) -> không cho sống lại
+        if (li && (li.updatedAt || 0) <= T) { await DB.dbDelete(ST_ITEMS, li.id); deleted.push(li.id); plates.push(li.bienSo); }
+        else if (li) pushBack = true;                                              // máy này đã sửa/khôi phục SAU lúc xóa -> giữ và đẩy lại
+        local.delete(ri.id); continue;
+      }
       if (!li || (ri.updatedAt || 0) > (li.updatedAt || 0)) {
         if (li) plates.push(li.bienSo);
         await DB.dbPut(ST_ITEMS, ri); plates.push(ri.bienSo);
       } else if ((li.updatedAt || 0) > (ri.updatedAt || 0)) pushBack = true;      // bản máy này mới hơn -> đẩy lại sau
       local.delete(ri.id);
     }
-    if (local.size) pushBack = true;                                            // máy này có mục mà bản online chưa có
-    if (pushBack) Y.touched.add(m.scanId);
+    for (const li of local.values()) {                                          // mục chỉ có ở máy này
+      const T = tomb[li.id] || 0;
+      if (T && (li.updatedAt || 0) <= T) { await DB.dbDelete(ST_ITEMS, li.id); deleted.push(li.id); plates.push(li.bienSo); }   // máy khác đã xóa -> dọn theo
+      else pushBack = true;                                                     // mục mới của máy này mà bản online chưa có -> đẩy lên (KHÔNG xóa)
+    }
+    if (deleted.length) deletedBuf.push(...deleted);
+    if (pushBack) markTouched(m.scanId);
     return plates.filter(Boolean);
   }
   async function pull() {
@@ -274,7 +349,7 @@ const ScanSync = (() => {
         }
       }
     }
-    if (need.length && window.ScanReview && ScanReview.afterRemoteMerge) await ScanReview.afterRemoteMerge(plates);
+    if ((need.length || deletedBuf.length) && window.ScanReview && ScanReview.afterRemoteMerge) await ScanReview.afterRemoteMerge(plates, deletedBuf.splice(0));
     if (lst.serverNow) {
       Y.since = Math.max(0, lst.serverNow - 120000);
       if (!lst.incremental) Y.fullAt = Date.now();                    // lượt này server đã liệt kê ĐỦ
@@ -569,7 +644,7 @@ const ScanSync = (() => {
   setTimeout(run, 800);                               // mở trang: dùng dữ liệu có sẵn trên máy ngay, đồng bộ chạy NGẦM sau đó
 
   return { storeUrl, callUrl, addGate, whenReady: () => gate, cfgInfo: () => ({ src: cfg.src, at: cfg.at || 0, legacy: hadLocal && !cfg.src }), markConfigAt: (t) => { cfg.at = t; persistCfg(); },
-    run, pull, touch, freeLocal, localImageBytes, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id),
+    run, pull, touch, noteItemDeleted, freeLocal, localImageBytes, ensureBlobs, refreshStatus, call, online, config: () => ({ ...cfg }), setConfig, validUrl, syncNow, testConnection, isGone: (id) => Y.gone.has(id), markGone: (id) => Y.gone.add(id),
     prefetchImages, pendingImages, pendingImageCount: async () => (await pendingImageIds(0, true)).length, prefetchState, stopPrefetch: () => { P.stop = true; }, makeSetupLink };
 })();
 window.ScanSync = ScanSync;

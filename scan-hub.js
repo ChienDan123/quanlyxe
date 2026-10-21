@@ -23,6 +23,8 @@ const ScanHub = (() => {
   const OLD_DEFAULT_MODEL = 'gemini-2.5-flash';        // mặc định cũ — cấu hình v1 trên hub mang giá trị này thì KHÔNG được đè model mới của máy
   const TICK_MS = 180000;                              // kiểm tra thay đổi từ máy khác mỗi 3 phút (1 request rất nhẹ)
   const H = { busy: false, again: false, error: '', lastOk: 0 };
+  const PTR_DATA = { scanId: '_data', kind: 'keys' };  // file «_data__keys»: kho dữ liệu dùng chung (ghi chú, xác nhận xe, người thực hiện…) — scanList/scanInventory bỏ qua
+  const DT = { busy: false, again: false, error: '', lastOk: 0, timer: null };
   let applying = false;                                // đang tự điền ô nhập từ hub -> không coi là người dùng sửa
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const loadL = () => { try { return JSON.parse(localStorage.getItem(LS) || '{}'); } catch (e) { return {}; } };
@@ -137,10 +139,61 @@ const ScanHub = (() => {
   }
   const pushNow = () => tick();
 
+  /* ---- KHO DỮ LIỆU DÙNG CHUNG: ghi chú · xác nhận xe đúng · người thực hiện · trạng thái xe tự thêm · dấu «đã in» ----
+     Gộp KHÓA-THEO-KHÓA, chỉ HỢP NHẤT — không bao giờ xóa dữ liệu của máy nào (máy mới / máy trống không thể làm mất dữ liệu máy kia):
+       • notes, owners : cùng khóa → bản có updatedAt / confirmedAt MỚI hơn thắng (bằng nhau thì chọn theo thứ tự chuỗi để hai máy ra cùng kết quả)
+       • assignees, statuses, printed : hợp của hai bên
+     Quy trình mỗi lượt: tải bản chung → gộp với máy này → ghi phần mới về máy (nếu có) → ghi bản đã gộp lên (nếu khác bản chung).
+     Hai máy ghi cùng lúc: bản ghi sau có thể thiếu khóa của máy kia, nhưng máy kia vẫn giữ nguyên dữ liệu và lượt sau tự đẩy bù (tự lành). */
+  const tsOf = (v) => { const t = typeof v === 'number' ? v : Date.parse(v); return isFinite(t) ? t : 0; };
+  const norm = (d) => ({ notes: (d && d.notes) || {}, owners: (d && d.owners) || {}, assignees: (d && d.assignees) || [], statuses: (d && d.statuses) || [], printed: (d && d.printed) || [] });
+  function mergeMap(a, b, key) {
+    const out = { ...a };
+    for (const k of Object.keys(b)) {
+      const r = b[k]; if (!r || typeof r !== 'object') continue;
+      const l = out[k];
+      if (!l) { out[k] = r; continue; }
+      const tr = tsOf(r[key]), tl = tsOf(l[key]);
+      if (tr > tl || (tr === tl && JSON.stringify(r) > JSON.stringify(l))) out[k] = r;
+    }
+    return out;
+  }
+  const union = (a, b) => [...new Set([...(a || []), ...(b || [])].filter(x => x != null && x !== ''))];
+  function mergeData(x, y) {
+    const a = norm(x), b = norm(y);
+    return { notes: mergeMap(a.notes, b.notes, 'updatedAt'), owners: mergeMap(a.owners, b.owners, 'confirmedAt'),
+      assignees: union(a.assignees, b.assignees), statuses: union(a.statuses, b.statuses), printed: union(a.printed, b.printed) };
+  }
+  const sortedPairs = (o) => Object.keys(o || {}).sort().map(k => [k, Object.keys(o[k] || {}).sort().map(f => [f, o[k][f]])]);
+  const canon = (d) => { const n = norm(d); return JSON.stringify([sortedPairs(n.notes), sortedPairs(n.owners), [...new Set(n.assignees)].sort(), [...new Set(n.statuses)].sort(), [...new Set(n.printed)].sort()]); };
+
+  async function dataSync() {
+    const api = window.AppDataSync; if (!api) return;
+    if (DT.busy) { DT.again = true; return; }
+    const c0 = Y.config(), cands = [...new Set([hubUrl(), c0.mode === 'gas2' ? c0.url2 : ''].filter(u => u && Y.validUrl(u)))];
+    if (!cands.length || (typeof navigator !== 'undefined' && navigator.onLine === false)) return;
+    DT.busy = true;
+    try {
+      let remote = {}, url = cands[0], got = false, lastErr = null;
+      for (const u of cands) {
+        try { remote = JSON.parse((await Y.callUrl(u, { action: 'scanTextGet', ...PTR_DATA })).text) || {}; url = u; got = true; break; }
+        catch (e) { if (/Chưa có trên Drive/i.test(msgOf(e))) { url = u; got = true; break; } lastErr = e; }
+      }
+      if (!got) throw lastErr;
+      const local = api.get(), merged = mergeData(local, remote), cm = canon(merged);
+      if (canon(local) !== cm) api.apply(merged);                                            // máy này thiếu phần của máy khác -> nhận về
+      if (canon(remote) !== cm) await Y.callUrl(url, { action: 'scanPut', ...PTR_DATA, mime: 'application/json', plates: '', text: JSON.stringify({ v: 1, at: Date.now(), ...merged }) });   // bản chung thiếu phần của máy này -> đẩy lên
+      DT.error = ''; DT.lastOk = Date.now();
+    } catch (e) { DT.error = msgOf(e).slice(0, 140); console.warn('[scan-hub] đồng bộ kho dữ liệu', e); }
+    finally { DT.busy = false; showInfo(); if (DT.again) { DT.again = false; setTimeout(dataSync, 800); } }
+  }
+  // app.js gọi mỗi khi ghi chú / xác nhận xe / người thực hiện… đổi ở máy này -> đẩy sau 5 giây (gộp nhiều thay đổi liên tiếp)
+  function dataChanged() { clearTimeout(DT.timer); DT.timer = setTimeout(dataSync, 5000); }
+
   function showInfo() {
     const el = document.getElementById('scanHubInfo'); if (!el) return;
-    el.classList.toggle('error-text', !!H.error);
-    el.textContent = H.error ? `⚠ Chưa đồng bộ được cấu hình giữa các máy: ${H.error} (Apps Script CHÍNH cần dán PHẦN 2 của AppsScript_ScanPatch.gs rồi Deploy bản mới).`
+    el.classList.toggle('error-text', !!(H.error || DT.error));
+    el.textContent = (!H.error && DT.error) ? `⚠ Chưa đồng bộ được ghi chú / xác nhận xe giữa các máy: ${DT.error} (tự thử lại sau ít phút; dữ liệu trên máy này vẫn nguyên vẹn).` : H.error ? `⚠ Chưa đồng bộ được cấu hình giữa các máy: ${H.error} (Apps Script CHÍNH cần dán PHẦN 2 của AppsScript_ScanPatch.gs rồi Deploy bản mới).`
       : (H.lastOk ? '🔄 Cấu hình (nơi lưu, cài đặt Gemini, tùy chọn) tự đồng bộ giữa các máy — lần cuối ' + new Date(H.lastOk).toLocaleTimeString('vi-VN') + '.' : '');
   }
   function injectInfo() {
@@ -180,9 +233,10 @@ const ScanHub = (() => {
   // Cổng chờ: lần đồng bộ ảnh đầu tiên đợi nhận xong cấu hình chung (tối đa 8 giây, không chặn nếu mạng chậm)
   Y.addGate(Promise.race([tick(), sleep(8000)]));
   setInterval(tick, TICK_MS);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
-  window.addEventListener('online', tick);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); dataSync(); } });
+  window.addEventListener('online', () => { tick(); dataSync(); });
+  setTimeout(dataSync, 3000); setInterval(dataSync, TICK_MS);
   setTimeout(maybeAskImages, 8000); setInterval(maybeAskImages, 30000);   // dừng hỏi khi đã trả lời (ASK_KEY)
-  return { pushNow, tick, status: () => ({ ...H }) };
+  return { pushNow, tick, dataSync, dataChanged, mergeData, canon, status: () => ({ ...H, data: { ...DT } }) };
 })();
 window.ScanHub = ScanHub;

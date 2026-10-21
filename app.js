@@ -146,6 +146,7 @@ function addStatusOption(name) {
   try {
     const saved = JSON.parse(localStorage.getItem(CUSTOM_STATUS_KEY) || '[]');
     saved.push(clean); localStorage.setItem(CUSTOM_STATUS_KEY, JSON.stringify(saved));
+    notifyDataChanged();
   } catch (e) { /* không lưu được thì chỉ có hiệu lực trong phiên này */ }
   return clean;
 }
@@ -607,11 +608,11 @@ async function gasRequest(url, payload) {
   return res.json();
 }
 
-async function connectViaAppsScript(url, { silent = false } = {}) {
+async function connectViaAppsScript(url, { silent = false, quiet = false } = {}) {
   const errEl = $('#gasError');
   if (errEl) errEl.classList.add('hidden');
   try {
-    if (!silent) toast('Đang kết nối Apps Script...');
+    if (!silent && !quiet) toast('Đang kết nối Apps Script...');
     const data = await gasRequest(url, null);
     if (!data || data.ok === false) {
       throw new Error((data && data.error) || 'Phản hồi không hợp lệ từ Apps Script.');
@@ -620,10 +621,11 @@ async function connectViaAppsScript(url, { silent = false } = {}) {
     if (!rows.length) {
       const msg = 'Không có dữ liệu trong Sheet, hoặc sai SHEET_NAME trong Apps Script.';
       if (!silent) { errEl.textContent = msg; errEl.classList.remove('hidden'); }
-      toast(msg, true);
+      if (!quiet) toast(msg, true);
       return;
     }
     processRows(rows);
+    _bgSig = sigOfSheet(data);
     state.gasUrl = url;
     state.mode = 'gas';
     state.lastCsvUrl = null;
@@ -631,7 +633,7 @@ async function connectViaAppsScript(url, { silent = false } = {}) {
     localStorage.setItem(MODE_KEY, 'gas');
     updateModeBadge();
     closeModal('connectModal');
-    toast(`Đã tải ${state.rawData.length} bản ghi (đồng bộ 2 chiều đang bật).`);
+    if (!quiet) toast(`Đã tải ${state.rawData.length} bản ghi (đồng bộ 2 chiều đang bật).`);
     // Đồng bộ mẫu Bản cam kết từ Sheet nếu có, và Sheet chưa có mẫu cục bộ mới hơn.
     trySyncTemplateFromSheet(url);
     // Yêu cầu #5: nếu phiên trước còn để lại các thay đổi CHƯA kịp đồng bộ lên
@@ -644,7 +646,7 @@ async function connectViaAppsScript(url, { silent = false } = {}) {
     const msg = 'Lỗi kết nối Apps Script: ' + err.message +
       '. Kiểm tra đã Deploy "Ứng dụng web" với quyền truy cập "Bất kỳ ai" chưa, và URL kết thúc bằng /exec.';
     if (!silent && errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); }
-    toast('Không kết nối được Apps Script.', true);
+    if (!quiet) toast('Không kết nối được Apps Script.', true);
   }
 }
 
@@ -671,8 +673,14 @@ function matchKeyForRow(row) {
 // lưu local trước, đồng bộ sau. Nếu dòng thiếu khoá khớp (Mã ID/MOTO_ID/Biển
 // số), báo cho người dùng biết thay đổi này chỉ nằm ở local, không tự đồng bộ
 // lên Sheet được (nhưng KHÔNG mất dữ liệu — vẫn còn trong IndexedDB).
+// Cho phép XẾP HÀNG thay đổi ngay cả khi chưa kết nối xong (mở trang đang hiện dữ liệu cache, hoặc mất mạng lúc mở): hàng đợi được lưu bền
+// (IndexedDB) và tự gửi khi kết nối được. TRƯỚC ĐÂY điều kiện là isWriteConnected() nên mọi sửa đổi trong khoảng đó bị BỎ khỏi hàng đợi,
+// rồi lần tải Sheet kế tiếp ghi đè mất. Chỉ chế độ CSV (chủ động chọn chỉ đọc) mới không xếp hàng.
+function queueWritesAllowed() {
+  return isWriteConnected() || (state.mode !== 'csv' && (localStorage.getItem(MODE_KEY) || 'gas') === 'gas');
+}
 function enqueueRowSync(row, updatesByHeader) {
-  if (!isWriteConnected()) return;
+  if (!queueWritesAllowed()) return;
   const mk = matchKeyForRow(row);
   if (!mk) {
     toast('Đã lưu cục bộ, nhưng dòng này thiếu Mã ID/MOTO_ID/Biển số nên không tự đồng bộ lên Sheet được.', true);
@@ -1056,7 +1064,11 @@ function restoreFilterState() {
 }
 
 /* ---------------------------- 5. XỬ LÝ DỮ LIỆU ĐỌC VÀO ---------------------- */
-function processRows(rows) {
+function processRows(rows, opts) {
+  // keepView (làm mới ngầm): nhớ các xe đang tick chọn theo KHÓA ỔN ĐỊNH (rowPrintKey) vì _rowId chỉ là số thứ tự dòng, đổi khi Sheet thêm/xóa dòng
+  const keepView = !!(opts && opts.keepView);
+  const keepPage = state.page;
+  const keepSel = keepView ? new Set(state.rawData.filter(r => state.exportSelected.has(r._rowId)).map(rowPrintKey)) : null;
   const sampleHeaders = Object.keys(rows[0] || {});
   const headerToKey = {};
   sampleHeaders.forEach(h => {
@@ -1107,8 +1119,10 @@ function processRows(rows) {
   // sắp xếp / lọc nhanh địa bàn cũ mà người dùng đã chọn ở phiên trước, thay vì
   // luôn bắt đầu từ danh sách trống mỗi lần tải dữ liệu (kể cả khi tải ngầm).
   restoreFilterState();
-  state.exportSelected = new Set();
-  state.page = 1;
+  if (keepView) {
+    state.exportSelected = new Set(state.rawData.filter(r => keepSel.has(rowPrintKey(r))).map(r => r._rowId));
+    state.page = keepPage;                                    // renderTable tự kẹp lại nếu vượt số trang
+  } else { state.exportSelected = new Set(); state.page = 1; }
   computeOwnerVehicleCounts();
   refreshAll();
   // Yêu cầu (Lưu dữ liệu cục bộ): lưu ngay dữ liệu vừa xử lý xong xuống
@@ -2263,6 +2277,7 @@ function loadPrintedMarks() {
 function savePrintedMarks() {
   try { localStorage.setItem(PRINTED_MARKS_KEY, JSON.stringify(Array.from(state.printedMarks))); }
   catch (e) { /* localStorage đầy/bị chặn -> bỏ qua */ }
+  notifyDataChanged();
 }
 function isRowPrinted(row) { return state.printedMarks.has(rowPrintKey(row)); }
 function markRowsPrinted(rows, printed) {
@@ -3098,7 +3113,7 @@ $('#btnBulkApply').addEventListener('click', () => {
     // Gộp ghi 1 lần cho toàn bộ lô (persist=false) — xem persistNotesStore() dưới.
     saveNoteFor(getEffectiveOwnerKey(r), { status: r.trangThaiXe, text: r.ghiChu }, false);
     // Chỉ đưa vào hàng đợi đồng bộ những dòng THỰC SỰ có thay đổi ghi lên Sheet.
-    if (writeConnected && Object.keys(updates).length) enqueueRowSync(r, updates);
+    if (Object.keys(updates).length) enqueueRowSync(r, updates);
   });
 
   persistNotesStore();       // ghi ghi-chú-cục-bộ 1 lần duy nhất cho toàn bộ lô
@@ -3112,7 +3127,7 @@ $('#btnBulkApply').addEventListener('click', () => {
     renderDetailPanelFor(currentDetailRow);
   }
   closeModal('bulkUpdateModal');
-  toast(`Đã cập nhật ${rows.length} xe (lưu cục bộ ngay).` + (writeConnected ? ' Đang đồng bộ ngầm lên Google Sheet...' : ''));
+  toast(`Đã cập nhật ${rows.length} xe (lưu cục bộ ngay).` + (writeConnected ? ' Đang đồng bộ ngầm lên Google Sheet...' : (queueWritesAllowed() ? ' Sẽ tự gửi lên Google Sheet khi kết nối xong.' : '')));
 });
 
 /* ---------------------------- 8. GHI CHÚ / TRẠNG THÁI CỤC BỘ ---------------- */
@@ -3140,6 +3155,7 @@ function saveNoteFor(ownerKey, data, persist = true) {
 }
 function persistNotesStore() {
   localStorage.setItem(NOTES_KEY, JSON.stringify(_notesStoreCache || {}));
+  notifyDataChanged();
 }
 
 /* ---- 8a-2. Danh sách "Người thực hiện" (Yêu cầu #5) ----------------------- */
@@ -3159,6 +3175,7 @@ function loadAssigneeList() {
 function saveAssigneeList(list) {
   _assigneeListCache = uniq(list);
   localStorage.setItem(ASSIGNEE_LIST_KEY, JSON.stringify(_assigneeListCache));
+  notifyDataChanged();
 }
 // Thêm 1 người thực hiện mới vào danh sách (nếu chưa có) và lưu lại — để lần
 // mở trang sau vẫn thấy người này trong danh sách chọn.
@@ -3235,7 +3252,7 @@ async function updateSingleRowFields(row, fieldUpdates) {
   saveNoteFor(getEffectiveOwnerKey(row), { status: row.trangThaiXe, text: row.ghiChu });
   // 4) Đồng bộ NGẦM lên Google Sheet nếu đang kết nối 2 chiều — fire-and-forget,
   //    có hàng đợi lưu bền + tự thử lại (xem enqueueSync/processSyncQueue).
-  if (isWriteConnected()) enqueueRowSync(row, updatesByHeader);
+  enqueueRowSync(row, updatesByHeader);
   return true;
 }
 
@@ -3260,6 +3277,7 @@ function loadConfirmedOwnerMap() {
 function saveConfirmedOwnerMap(map) {
   _confirmedOwnerMapCache = map;
   localStorage.setItem(CONFIRMED_OWNER_KEY, JSON.stringify(map));
+  notifyDataChanged();
 }
 
 // Đánh dấu `vehicleRow` là thuộc về `ownerRow` (theo Số CCCD), tự thêm ghi chú
@@ -3283,7 +3301,7 @@ async function confirmVehicleOwner(vehicleRow, ownerRow) {
   vehicleRow.ghiChu = newNote;
   persistRawDataToCache();
 
-  if (isWriteConnected()) enqueueRowSync(vehicleRow, { 'Ghi Chú': newNote });
+  enqueueRowSync(vehicleRow, { 'Ghi Chú': newNote });
   // Xe vừa được xác nhận sẽ được tính vào đúng nhóm chủ xe mới -> tính lại số
   // lượng xe/chủ xe để bộ lọc "nhiều xe" và cột sắp xếp "Số lượng xe" cập nhật đúng.
   computeOwnerVehicleCounts();
@@ -3538,12 +3556,9 @@ function setupDetailHScrollSync() {
     doSaveLocal(row);
     renderTable();
 
-    if (isWriteConnected()) {
-      enqueueRowSync(row, updates);
-      toast('Đã lưu cục bộ — đang đồng bộ ngầm lên Google Sheet...');
-    } else {
-      toast('Đã lưu cục bộ (chưa kết nối chế độ 2 chiều nên chưa đồng bộ Sheet).');
-    }
+    enqueueRowSync(row, updates);
+    toast(isWriteConnected() ? 'Đã lưu cục bộ — đang đồng bộ ngầm lên Google Sheet...'
+      : (queueWritesAllowed() ? 'Đã lưu cục bộ — sẽ tự gửi lên Google Sheet khi kết nối xong.' : 'Đã lưu cục bộ (chưa kết nối chế độ 2 chiều nên chưa đồng bộ Sheet).'));
   });
 })();
 
@@ -4507,6 +4522,90 @@ function refreshAll() {
   updateModeBadge();
   updateSyncStatusBadge();
 }
+
+/* ---- TỰ LÀM MỚI NGẦM TỪ SHEET (trước đây chỉ tải 1 lần lúc mở trang -> máy khác sửa Sheet thì máy này không bao giờ thấy) ----
+   An toàn dữ liệu:
+   • Chỉ làm mới khi KHÔNG còn thay đổi nào chờ gửi (hàng đợi trống / chỉ còn tác vụ bị khóa chờ người dùng — các tác vụ đó vẫn được áp lại bằng
+     reapplyPendingSyncToRawData trong processRows), để không tải về giá trị cũ trong lúc giá trị mới đang bay lên.
+   • Không làm khi đang mở hộp thoại / đang gõ vào ô nhập; nội dung Sheet không đổi (so chữ ký) thì KHÔNG vẽ lại bảng.
+   • Giữ nguyên trang đang xem + các xe đang tick chọn. Ghi đè Sheet vẫn là «thay đổi sau đè thay đổi trước» theo từng ô (updateRow chỉ ghi các cột đã sửa). */
+var _bgSig = '', _bgBusy = false, _bgLastAt = 0, _applyingRemote = false;
+const BG_REFRESH_MS = 90000;
+function sigOfSheet(data) {
+  try { const s = JSON.stringify([data.headers, data.rows]); let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return s.length + ':' + h; } catch (e) { return ''; }
+}
+function uiBusyForRefresh() {
+  if (document.querySelector('[id$="Modal"]:not(.hidden), [id$="Overlay"]:not(.hidden)')) return true;
+  const a = document.activeElement;
+  return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !a.readOnly && a.type !== 'checkbox' && a.type !== 'button');
+}
+async function backgroundRefresh(force) {
+  if (_bgBusy || state.mode === 'csv' || (localStorage.getItem(MODE_KEY) || 'gas') !== 'gas') return;
+  if (!force && Date.now() - _bgLastAt < BG_REFRESH_MS - 5000) return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (syncInFlight || nextRunnableSyncJob()) { processSyncQueue(); return; }   // gửi hết thay đổi của máy này lên trước, rồi mới kéo về
+  if (!force && uiBusyForRefresh()) return;
+  _bgBusy = true;
+  try {
+    const url = state.gasUrl || localStorage.getItem(GAS_URL_KEY) || DEFAULT_GAS_URL;
+    if (!url) return;
+    if (!isWriteConnected()) {                                   // lần kết nối lúc mở trang thất bại (mất mạng…) -> thử lại im lặng
+      await connectViaAppsScript(url, { silent: true, quiet: true }); _bgLastAt = Date.now(); return;
+    }
+    const data = await gasRequest(url, null);
+    _bgLastAt = Date.now();
+    if (!data || data.ok === false) return;
+    const sig = sigOfSheet(data);
+    if (sig && sig === _bgSig) return;                           // Sheet không đổi -> không vẽ lại
+    if (syncInFlight || nextRunnableSyncJob() || (!force && uiBusyForRefresh())) return;   // trong lúc chờ mạng người dùng vừa sửa/mở hộp thoại -> để lượt sau
+    const rows = rowsFromHeaderArray(data.headers, data.rows);
+    if (!rows.length) return;
+    processRows(rows, { keepView: true });
+    _bgSig = sig;
+    updateModeBadge();
+  } catch (e) { console.warn('[refresh] làm mới ngầm lỗi (tự thử lại)', e); }
+  finally { _bgBusy = false; }
+}
+window.BackgroundRefresh = backgroundRefresh;
+setInterval(() => backgroundRefresh(false), 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) backgroundRefresh(false); });
+window.addEventListener('online', () => setTimeout(() => backgroundRefresh(true), 1500));
+
+/* ---- KHO DỮ LIỆU LOCALSTORAGE DÙNG CHUNG GIỮA CÁC MÁY (scan-hub.js gọi) ----
+   Ghi chú cục bộ, «xác nhận xe đúng», danh sách người thực hiện, trạng thái xe tự thêm, dấu «đã in» trước đây chỉ nằm ở từng trình duyệt
+   nên mỗi máy một khác. Hub gộp theo khóa (khóa nào đổi SAU thì thắng; danh sách thì hợp nhất) và KHÔNG BAO GIỜ xóa dữ liệu của máy nào. */
+function notifyDataChanged() { if (_applyingRemote) return; try { if (window.ScanHub && ScanHub.dataChanged) ScanHub.dataChanged(); } catch (e) { /* bỏ qua */ } }
+window.AppDataSync = {
+  get() {
+    let statuses = []; try { statuses = JSON.parse(localStorage.getItem(CUSTOM_STATUS_KEY) || '[]'); } catch (e) { /* bỏ qua */ }
+    return {
+      notes: loadNotesStore(), owners: loadConfirmedOwnerMap(),
+      assignees: loadAssigneeList().filter(x => !DEFAULT_ASSIGNEES.includes(x)),
+      statuses: Array.isArray(statuses) ? statuses : [], printed: Array.from(state.printedMarks),
+    };
+  },
+  apply(d) {
+    _applyingRemote = true;
+    try {
+      const ts = (v) => { const t = typeof v === 'number' ? v : Date.parse(v); return isFinite(t) ? t : 0; };
+      let changed = false;
+      const notes = loadNotesStore();
+      for (const k of Object.keys(d.notes || {})) { const r = d.notes[k]; if (r && (!notes[k] || ts(r.updatedAt) > ts(notes[k].updatedAt))) { notes[k] = r; changed = true; } }
+      if (changed) persistNotesStore();
+      let c2 = false; const owners = loadConfirmedOwnerMap();
+      for (const k of Object.keys(d.owners || {})) { const r = d.owners[k]; if (r && (!owners[k] || ts(r.confirmedAt) > ts(owners[k].confirmedAt))) { owners[k] = r; c2 = true; } }
+      if (c2) { saveConfirmedOwnerMap(owners); try { computeOwnerVehicleCounts(); } catch (e) { /* bỏ qua */ } }
+      const list = loadAssigneeList(), addA = (d.assignees || []).filter(x => x && !list.includes(x));
+      if (addA.length) saveAssigneeList([...list, ...addA]);
+      const addS = (d.statuses || []).filter(s => s && !STATUS_OPTIONS.some(o => o.toLowerCase() === String(s).toLowerCase()));
+      if (addS.length) { addS.forEach(s => STATUS_OPTIONS.push(s)); try { const saved = JSON.parse(localStorage.getItem(CUSTOM_STATUS_KEY) || '[]'); localStorage.setItem(CUSTOM_STATUS_KEY, JSON.stringify([...new Set([...saved, ...addS])])); } catch (e) { /* bỏ qua */ } }
+      const addP = (d.printed || []).filter(k => !state.printedMarks.has(k));
+      if (addP.length) { addP.forEach(k => state.printedMarks.add(k)); savePrintedMarks(); }
+      if (changed || c2 || addA.length || addS.length || addP.length) { try { renderTable(); } catch (e) { /* bỏ qua */ } return true; }
+      return false;
+    } finally { _applyingRemote = false; }
+  },
+};
 
 // Bản triển khai Apps Script MỚI NHẤT do chủ dự án công bố trong gas-url.json (cùng thư mục với index.html).
 // Máy nào đang giữ URL cũ trong localStorage sẽ tự chuyển sang URL mới khi «rev» trong file lớn hơn «rev» đã áp dụng trên máy đó.

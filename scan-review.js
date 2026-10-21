@@ -1587,6 +1587,7 @@ const ScanReview = (() => {
     total = Math.max(total, ...rest.map(i => i.slotX || 0));
     rest.forEach(i => { i.slotTotal = total; });
     await DB.dbDelete(ST_ITEMS, it.id);
+    if (window.ScanSync && ScanSync.noteItemDeleted) await ScanSync.noteItemDeleted(it.scanId, it.id);   // bia mộ: máy khác không kéo mục này sống lại
     for (const i of rest) await saveItem(i);
     R.items = R.items.filter(i => i.id !== it.id);
     if (it.bienSo) await recomputeLink(it.bienSo);
@@ -1987,7 +1988,9 @@ const ScanReview = (() => {
         const item = dir < 0 ? c.before : c.after, other = dir < 0 ? c.after : c.before, rowState = dir < 0 ? c.rowBefore : c.rowAfter;
         if (rowState && c.rowId) { const row = findRow(c.rowId); if (row) await updateSingleRowFields(row, rowState); }
         // before/after = null khi bước đó là «thêm phiếu thiếu» (before null) hoặc «xóa phiếu thừa» (after null)
-        if (item) await DB.dbPut(ST_ITEMS, clone(item)); else if (other) await DB.dbDelete(ST_ITEMS, other.id);
+        // Hoàn tác / làm lại là MỘT LẦN SỬA MỚI: đóng dấu updatedAt = bây giờ, nếu không bản cũ sẽ thua bản đã đẩy lên Drive và bị máy khác đè lại
+        if (item) { const ci = clone(item); ci.updatedAt = Date.now(); await DB.dbPut(ST_ITEMS, ci); }
+        else if (other) { await DB.dbDelete(ST_ITEMS, other.id); if (window.ScanSync && ScanSync.noteItemDeleted) await ScanSync.noteItemDeleted(other.scanId, other.id); }
         S.emit('itemsChanged', { scanId: (item || other).scanId });
         if (c.before) await recomputeLink(c.before.bienSo);
         if (c.after) await recomputeLink(c.after.bienSo);
@@ -2896,7 +2899,10 @@ const ScanReview = (() => {
     return items.length;
   }
   // Sau khi kéo phiếu mới từ online: tính lại liên kết biển số để icon 📷 hiện ngay trên bảng chính
-  async function afterRemoteMerge(plates) {
+  async function afterRemoteMerge(plates, deletedIds) {
+    // Mục vừa được gộp / xóa theo máy khác: nạp lại danh sách trong bộ nhớ để màn so sánh đang mở hiện đúng (ghi DB luôn xảy ra trước)
+    try { if (R.items && R.items.length) R.items = (await DB.dbGetAll(ST_ITEMS)).map(normItem); } catch (e) { /* bỏ qua */ }
+    if (deletedIds && deletedIds.length && R.pane.open && !R.items.some(i => i.id === R.pane.id)) R.pane.open = false;
     for (const pl of new Set((plates || []).filter(Boolean))) await recomputeLink(pl);
     refreshMainTable();
   }
