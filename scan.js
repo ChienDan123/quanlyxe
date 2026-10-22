@@ -120,9 +120,15 @@ const ScanApp = (() => {
   // Handler chạy KHÔNG chờ (fire-and-forget) và lỗi của handler không làm hỏng hàng đợi quét.
   const _handlers = {};
   const on = (evt, fn) => { (_handlers[evt] = _handlers[evt] || []).push(fn); };
-  const emit = (evt, data) => (_handlers[evt] || []).forEach(fn => {
-    try { Promise.resolve(fn(data)).catch(e => console.warn('[scan] handler ' + evt, e)); } catch (e) { console.warn('[scan] handler ' + evt, e); }
-  });
+  // Khi chạy SONG SONG nhiều tờ, các sự kiện cùng loại có thể phát gần như đồng thời. Handler (scan-review.js) đọc-ghi
+  // chung các store scanItems/plateLinks nên được XẾP HÀNG: mỗi sự kiện chạy xong mới tới sự kiện cùng loại kế tiếp (tránh ghi đè lẫn nhau).
+  const _emitChain = {};
+  const emit = (evt, data) => {
+    const run = () => Promise.all((_handlers[evt] || []).map(fn => {
+      try { return Promise.resolve(fn(data)).catch(e => console.warn('[scan] handler ' + evt, e)); } catch (e) { console.warn('[scan] handler ' + evt, e); return null; }
+    }));
+    _emitChain[evt] = (_emitChain[evt] || Promise.resolve()).then(run, run);
+  };
 
   // Chuẩn hóa biển số: UPPERCASE, bỏ khoảng trắng / chấm / gạch (Sprint 3 sẽ dùng để khớp).
   function normalizeBienSo(s) {
@@ -261,7 +267,7 @@ const ScanApp = (() => {
   const DEFAULT_MODEL = 'gemini-3.8-flash';
   const DEFAULT_FALLBACK_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
   const OLD_DEFAULT_MODEL = 'gemini-2.5-flash';   // mặc định cũ -> tự nâng lên mặc định mới (xem loadSettings)
-  const SETTINGS_VER = 2;                         // v2: thêm fallbackModels + đổi model mặc định
+  const SETTINGS_VER = 4;                        // v2: thêm fallbackModels + đổi model mặc định · v3: giảm keyMinGapMs/globalStaggerMs (tăng tốc)
 
   const DEFAULT_SETTINGS = {
     name: 'main',
@@ -272,6 +278,13 @@ const ScanApp = (() => {
     maxEdgePx: 2000,
     pagesPerSheet: 2,          // số mặt / phiếu: mặc định 2 (mặt trước + sau); 1..8
     skipDuplicates: true,      // bỏ qua tờ đã quét (trùng hash ảnh mặt 1)
+    /* ---- CHẠY SONG SONG + GIỚI HẠN TỐC ĐỘ (sửa được trong Cài đặt hoặc trực tiếp ở đây) ---- */
+    concurrency: 0,            // số tờ xử lý đồng thời: 0 = TỰ ĐỘNG (số key đang dùng được + 1, tối đa maxConcurrency); 1 = tuần tự như cũ
+    maxConcurrency: 4,         // trần khi để TỰ ĐỘNG
+    perKeyParallel: 1,         // số request ĐỒNG THỜI tối đa trên 1 key (1 = an toàn nhất, tránh 429)
+    keyMinGapMs: 1000,        // khoảng nghỉ tối thiểu GIỮA 2 request liên tiếp của CÙNG 1 key (tính từ lúc request trước kết thúc). Trước 2000ms: xử lý tuần tự nên chỉ tốn thêm giây chờ
+    globalStaggerMs: 400,    // khoảng cách tối thiểu giữa 2 lần BẮT ĐẦU request bất kỳ (tránh bắn dồn dập cùng lúc)
+    renderConcurrency: 2,      // số tờ được render/nén ảnh cùng lúc (giữ RAM + CPU trình duyệt ổn định)
   };
 
   // Chuẩn hóa tên model: bỏ tiền tố "models/", chỉ giữ ký tự hợp lệ, bỏ trùng. Nhận mảng hoặc chuỗi "a, b, c".
@@ -288,7 +301,15 @@ const ScanApp = (() => {
   const modelChain = (st) => normalizeModelList([st.model || DEFAULT_MODEL, ...(st.fallbackModels || [])]);
   let _chainCache = [];   // chuỗi model gần nhất (để chip trạng thái key biết đang xét model nào)
 
+  // Cache cài đặt trong RAM: trước đây mỗi tờ + mỗi lần gọi Gemini đều đọc IndexedDB lại. Trả BẢN SAO để nơi gọi sửa thoải mái.
+  let _settingsCache = null;
+  const cloneSettings = (s) => ({ ...s, fallbackModels: [...(s.fallbackModels || [])] });
   async function loadSettings() {
+    if (!_settingsCache) _settingsCache = await loadSettingsRaw();
+    return cloneSettings(_settingsCache);
+  }
+  const clampNum = (v, lo, hi, d) => { v = Number(v); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
+  async function loadSettingsRaw() {
     let stored = {};
     try { stored = (await dbGet(ST_SETTINGS, 'main')) || {}; } catch (e) { return { ...DEFAULT_SETTINGS, fallbackModels: [...DEFAULT_FALLBACK_MODELS] }; }
     const st = { ...DEFAULT_SETTINGS, ...stored };
@@ -297,15 +318,26 @@ const ScanApp = (() => {
     if ((stored.settingsVer || 0) < SETTINGS_VER) {
       if (!stored.model || stored.model === OLD_DEFAULT_MODEL) st.model = DEFAULT_MODEL;
       if (!Array.isArray(stored.fallbackModels)) st.fallbackModels = [...DEFAULT_FALLBACK_MODELS];
+      // v3: giá trị nghỉ cũ (2000/500ms — mặc định cũ) -> mặc định mới nhanh hơn; giá trị người dùng tự chỉnh thì giữ nguyên
+      // v4: chạy song song thật sự -> nâng mặc định (300/150ms của v3) lên 1000/400ms cho an toàn trước 429; giá trị người dùng tự chỉnh thì giữ nguyên
+      if (stored.keyMinGapMs === 2000 || stored.keyMinGapMs === 300 || stored.keyMinGapMs == null) st.keyMinGapMs = DEFAULT_SETTINGS.keyMinGapMs;
+      if (stored.globalStaggerMs === 500 || stored.globalStaggerMs === 150 || stored.globalStaggerMs == null) st.globalStaggerMs = DEFAULT_SETTINGS.globalStaggerMs;
       st.settingsVer = SETTINGS_VER;
       try { await dbPut(ST_SETTINGS, { ...st, name: 'main' }); } catch (e) { /* bỏ qua, lần sau migrate lại */ }
     }
     st.model = normalizeModelList(st.model)[0] || DEFAULT_MODEL;
     st.fallbackModels = normalizeModelList(st.fallbackModels);
+    // Chuẩn hóa thông số song song (giá trị lạ -> về mặc định, kẹp trong khoảng an toàn)
+    st.concurrency = Math.round(clampNum(st.concurrency, 0, 8, DEFAULT_SETTINGS.concurrency));
+    st.maxConcurrency = Math.round(clampNum(st.maxConcurrency, 1, 8, DEFAULT_SETTINGS.maxConcurrency));
+    st.perKeyParallel = Math.round(clampNum(st.perKeyParallel, 1, 3, DEFAULT_SETTINGS.perKeyParallel));
+    st.keyMinGapMs = Math.round(clampNum(st.keyMinGapMs, 0, 60000, DEFAULT_SETTINGS.keyMinGapMs));
+    st.globalStaggerMs = Math.round(clampNum(st.globalStaggerMs, 0, 10000, DEFAULT_SETTINGS.globalStaggerMs));
+    st.renderConcurrency = Math.round(clampNum(st.renderConcurrency, 1, 4, DEFAULT_SETTINGS.renderConcurrency));
     _chainCache = modelChain(st);
     return st;
   }
-  async function saveSettings(s) { await dbPut(ST_SETTINGS, { ...DEFAULT_SETTINGS, ...s, name: 'main' }); }
+  async function saveSettings(s) { _settingsCache = null; await dbPut(ST_SETTINGS, { ...DEFAULT_SETTINGS, ...s, name: 'main' }); }
 
   /* ---------------------------- 4. QUẢN LÝ API KEY ---------------------------- */
   const listKeys = async () => (await dbGetAll(ST_KEYS)).sort((a, b) => a.createdAt - b.createdAt);
@@ -416,6 +448,9 @@ const ScanApp = (() => {
   const isModelDead = (m, now = Date.now()) => { const s = _modelState.get(m); return !!(s && s.dead && s.until > now); };
   const modelCoolUntil = (m, now = Date.now()) => { const s = _modelState.get(m); return s && !s.dead && s.until > now ? s.until : 0; };
   function markModelOverload(m) {
+    // Chạy song song: nhiều tờ có thể cùng nhận 503 từ 1 model gần như đồng thời -> chỉ tính 1 lần, không leo thang 30s→60s→90s oan
+    const cur = _modelState.get(m);
+    if (cur && !cur.dead && cur.until > Date.now()) return Math.ceil((cur.until - Date.now()) / 1000);
     const n = ((_modelState.get(m) || {}).overloadCount || 0) + 1;
     const sec = OVERLOAD_COOLDOWN_SEC[Math.min(n - 1, OVERLOAD_COOLDOWN_SEC.length - 1)];
     _modelState.set(m, { overloadCount: n, until: Date.now() + sec * 1000, dead: false });
@@ -464,6 +499,13 @@ const ScanApp = (() => {
     // fatal / blocked / parse / cancelled: lỗi do yêu cầu, KHÔNG phạt key.
   }
 
+  /* ---- TRẠNG THÁI CHẠY CỦA TỪNG KEY (trong RAM) — điều phối khi nhiều tờ gọi Gemini đồng thời ----
+     busy: số request đang bay trên key · lastStart/lastEnd: mốc request gần nhất · dùng để (1) không dồn >perKeyParallel request lên 1 key,
+     (2) chèn khoảng nghỉ keyMinGapMs giữa 2 request liên tiếp của cùng key, (3) xoay đều key (key bắt đầu lâu nhất được ưu tiên). */
+  const _keyRt = new Map();
+  const keyRt = (id) => { let r = _keyRt.get(id); if (!r) { r = { busy: 0, lastStart: 0, lastEnd: 0 }; _keyRt.set(id, r); } return r; };
+  let _lastGlobalStart = 0;   // lần BẮT ĐẦU request gần nhất (bất kỳ key) — dùng cho globalStaggerMs
+
   // Chờ có đếm ngược, hủy được.
   async function waitWithCountdown(ms, onTick, signal) {
     const end = Date.now() + ms;
@@ -489,19 +531,28 @@ const ScanApp = (() => {
         báo UI "Đang chờ…", tối đa maxWaitRounds lần rồi mới bỏ cuộc (kind 'quota' -> hàng đợi tạm dừng).
         Nếu MỌI model đều 'dead' (sai tên) -> dừng với kind 'nomodel'.
      Chạy TUẦN TỰ (mỗi lần 1 request) theo đúng yêu cầu, không song song. */
+  /* ---- «THINKING» của model: mặc định model flash đời mới SUY NGHĨ trước khi trả lời -> thêm nhiều giây/tờ mà OCR theo schema không cần.
+     Đặt mức thấp (gemini-3+: thinkingLevel 'low'; gemini-2.5 flash: thinkingBudget 1024; bản lite vốn không suy nghĩ -> không đụng).
+     Model nào từ chối tham số này (400 nhắc tới «thinking») -> nhớ lại trong phiên và gọi lại KHÔNG kèm tham số: không bao giờ làm hỏng lần quét. */
+  const _noThink = new Set();
+  function thinkingCfg(model) {
+    if (_noThink.has(model) || /lite/i.test(model)) return null;
+    const m = /gemini-(\d+)(?:\.(\d+))?/i.exec(model || ''); if (!m) return null;
+    const major = +m[1], minor = +(m[2] || 0);
+    if (major >= 3) return { thinkingLevel: 'low' };
+    if (major === 2 && minor >= 5) return { thinkingBudget: 1024 };
+    return null;
+  }
   async function geminiGenerate({ parts, schema, onStatus, signal, systemInstruction }) {
     const st = await loadSettings();
     const chain = modelChain(st);
     const say = (m, level) => { if (onStatus) onStatus(m, level || 'info'); };
-    const body = {
-      contents: [{ role: 'user', parts }],
-      generationConfig: { temperature: 0 },
-    };
-    if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
-    if (schema) {
-      body.generationConfig.responseMimeType = 'application/json';
-      body.generationConfig.responseSchema = schema;
-    }
+    // Thân request dựng 1 lần (ảnh base64 rất nặng — không dựng lại mỗi vòng); chỉ phần generationConfig đổi theo model (thinking)
+    const baseBody = { contents: [{ role: 'user', parts }] };
+    if (systemInstruction) baseBody.systemInstruction = { parts: [{ text: systemInstruction }] };
+    const baseCfg = { temperature: 0 };
+    if (schema) { baseCfg.responseMimeType = 'application/json'; baseCfg.responseSchema = schema; }
+    const bodyFor = (model) => { const t = thinkingCfg(model); return { ...baseBody, generationConfig: t ? { ...baseCfg, thinkingConfig: t } : baseCfg }; };
     let waitRound = 0;
     for (;;) {
       if (signal && signal.aborted) throw new GeminiError('cancelled', 'Đã hủy');
@@ -512,13 +563,27 @@ const ScanApp = (() => {
       if (!alive.length) throw new GeminiError('nomodel', `Không model nào dùng được (đều báo không tồn tại/không hỗ trợ): ${chain.join(', ')}. Kiểm tra lại tên model trong ⚙️ Cài đặt.`);
 
       // Chọn cặp (model, key): model ưu tiên cao nhất đang sẵn sàng + key rảnh lâu nhất
-      let pick = null;
+      // Chạy song song: chỉ nhận key đang RẢNH (busy < perKeyParallel) và đã nghỉ đủ keyMinGapMs. Chọn + giữ chỗ (busy++) diễn ra ĐỒNG BỘ
+      // (không có await ở giữa) nên 2 tờ không bao giờ cùng chộp 1 key.
+      let pick = null, busyWait = 0;
       for (const model of alive) {
         if (modelCoolUntil(model, now)) continue;
-        const key = usable
-          .filter(k => (k.cooldownUntil || 0) <= now && !quotaUntil(k, model, now))
-          .sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0))[0];
-        if (key) { pick = { model, key }; break; }
+        const cands = usable.filter(k => (k.cooldownUntil || 0) <= now && !quotaUntil(k, model, now));
+        if (!cands.length) continue;
+        const free = cands.filter(k => { const r = keyRt(k.id); return r.busy < st.perKeyParallel && now - r.lastEnd >= (r.gap != null ? r.gap : st.keyMinGapMs); });
+        if (free.length) {
+          free.sort((a, b) => (keyRt(a.id).lastStart - keyRt(b.id).lastStart) || ((a.lastUsed || 0) - (b.lastUsed || 0)));
+          pick = { model, key: free[0] }; break;
+        }
+        // Model ưu tiên còn key dùng được nhưng đang BẬN/đang nghỉ giữa 2 request -> chờ ngắn thay vì tụt xuống model dự phòng
+        // (model dự phòng yếu hơn có thể làm giảm chất lượng OCR; chỉ chuyển khi model chính thật sự quá tải/hết quota).
+        busyWait = Math.min(...cands.map(k => { const r = keyRt(k.id); return r.busy >= st.perKeyParallel ? 300 : Math.max(50, (r.gap != null ? r.gap : st.keyMinGapMs) - (now - r.lastEnd)); }));
+        break;
+      }
+      if (!pick && busyWait) { await sleep(Math.min(busyWait, 1000)); continue; }
+      if (pick) {   // giãn cách toàn cục giữa 2 lần bắt đầu request
+        const gw = _lastGlobalStart + st.globalStaggerMs - now;
+        if (gw > 0) { await sleep(gw); continue; }
       }
 
       if (!pick) {
@@ -535,8 +600,9 @@ const ScanApp = (() => {
       const { model, key } = pick, isFallback = model !== chain[0];
       say(`Gọi ${model}${isFallback ? ' (dự phòng)' : ''} bằng "${key.label}"…`, isFallback ? 'warn' : 'info');
       const t0 = performance.now();
+      const rt = keyRt(key.id); rt.busy++; rt.lastStart = _lastGlobalStart = Date.now();   // giữ chỗ key này
       try {
-        const data = await requestOnce(key, model, body, st.timeoutSec * 1000, signal);
+        const data = await requestOnce(key, model, bodyFor(model), st.timeoutSec * 1000, signal);
         const cand = data.candidates && data.candidates[0];
         const block = data.promptFeedback && data.promptFeedback.blockReason;
         if (block) throw new GeminiError('blocked', `Gemini chặn nội dung: ${block}`);
@@ -554,6 +620,7 @@ const ScanApp = (() => {
       } catch (e) {
         if (!(e instanceof GeminiError)) throw e;
         await recordKeyResult(key, e, model);
+        if (e.kind === 'fatal' && thinkingCfg(model) && /think/i.test(e.message)) { _noThink.add(model); say(`${model} không nhận cấu hình thinking → gọi lại không kèm.`, 'warn'); continue; }
         if (e.kind === 'cancelled' || e.kind === 'fatal' || e.kind === 'blocked' || e.kind === 'parse') throw e;
         if (e.kind === 'invalid') say(`Key "${key.label}" KHÔNG HỢP LỆ — đã loại khỏi vòng. ${e.message}`, 'error');
         else if (e.kind === 'overload') {
@@ -566,6 +633,10 @@ const ScanApp = (() => {
         else say(`Key "${key.label}": ${e.message} → đổi key`, 'warn');
         notifyKeysChanged();
         // overload / nomodel / quota / transient / invalid: quay lại đầu vòng, chọn cặp (model, key) kế
+      } finally {
+        rt.busy = Math.max(0, rt.busy - 1); rt.lastEnd = Date.now();
+        rt.gap = Math.round(st.keyMinGapMs * (1 + Math.random() * 0.5));   // jitter +0–50%: các request không đều tăm tắp như máy
+        // trả key (kể cả khi lỗi/hủy) để tờ khác dùng
       }
     }
   }
@@ -719,6 +790,14 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     let res = await analyzeOnce(front, back, onStatus, signal, extras);
     let f = front, b = back, rotated = { front: 0, back: 0 };
     const dF = normDeg(res.json.huongMat1), dB = back ? normDeg(res.json.huongMat2) : 0;
+    // Chỉ MẶT 2 lệch: dữ liệu xe/chủ hộ/vùng xe đều lấy từ mặt 1 (đã đúng chiều) -> chỉ xoay ảnh để LƯU, KHÔNG gọi Gemini đọc lại (tiết kiệm cả 1 lượt gọi).
+    // Có mặt phụ (3..8) thì vẫn đọc lại như cũ vì xe trên mặt phụ cũng được đọc từ ảnh.
+    if (!dF && dB && !(extras && extras.length)) {
+      say(`  ↻ Mặt 2 lệch chiều (${dB}°) → xoay ảnh lưu, không cần đọc lại.`, 'warn');
+      let b2 = back, rot = { front: 0, back: 0 };
+      try { b2 = await rotatePrepared(back, dB); rot = { front: 0, back: dB }; } catch (e) { say('  Không xoay được ảnh mặt 2: ' + (e.message || e), 'warn'); }
+      return { ...res, front, back: b2, rotated: rot };
+    }
     if (dF || dB) {
       say(`  ↻ Ảnh lệch chiều (mặt 1: ${dF}°, mặt 2: ${dB}°) → tự xoay rồi đọc lại…`, 'warn');
       try {
@@ -948,7 +1027,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
      Xử lý TUẦN TỰ tuyệt đối: hết tờ này mới sang tờ kế, hết file này mới sang file kế.
      PDF chỉ được MỞ khi tới lượt (expandEntry) và ĐÓNG ngay khi xong file -> không
      giữ nhiều file lớn trong RAM. */
-  const Q = { entries: [], running: false, paused: false, abort: null, seq: 0, jobNo: 0 };
+  const Q = { entries: [], running: false, paused: false, aborts: new Set(), seq: 0, jobNo: 0 };   // aborts: AbortController của mọi tờ đang chạy (nút Dừng hủy hết)
 
   /* ---- LƯU TIẾN ĐỘ HÀNG ĐỢI (để sự cố / tắt máy giữa chừng thì lần sau chạy tiếp, không phải upload lại) ----
      Mỗi entry lưu 2 bản ghi trong store scanQueue:
@@ -989,7 +1068,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
   const allJobs = () => Q.entries.flatMap(e => e.jobs || []);
   const platesText = (job) => (job.extracted && job.extracted.bienSo.length) ? job.extracted.bienSo.join(', ') : '';
 
-  function dbgLog(msg, level) {
+  function logLine(msg, level) {
     const el = $('#scanLog');
     const line = document.createElement('div');
     line.className = 'scan-log-' + (level || 'info');
@@ -998,6 +1077,26 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     while (el.childNodes.length > 500) el.removeChild(el.firstChild); // giữ log gọn khi chạy hàng nghìn tờ
     el.scrollTop = el.scrollHeight;
     $('#scanStatusText').textContent = msg;
+  }
+
+  const dbgLog = logLine;   // log chung; processJob có bản riêng gắn thêm số tờ [#n] vì các tờ chạy đan xen
+
+  /* ---- Semaphore giới hạn số tờ render/nén ảnh cùng lúc (canvas + base64 rất tốn RAM/CPU; Gemini là điểm nghẽn thật nên 2 là đủ để luôn có ảnh sẵn) ---- */
+  const _render = { active: 0, waiters: [] };
+  async function withRenderSlot(fn, limit) {
+    while (_render.active >= limit) await new Promise(r => _render.waiters.push(r));
+    _render.active++;
+    try { return await fn(); }
+    finally { _render.active--; const w = _render.waiters.shift(); if (w) w(); }
+  }
+
+  /* ---- Khóa theo hash ảnh: 2 tờ GIỐNG HỆT nhau chạy song song sẽ không cùng gọi Gemini — tờ sau chờ tờ trước xong rồi mới kiểm tra trùng ---- */
+  const _hashLocks = new Map();
+  async function acquireHash(hash) {
+    while (_hashLocks.has(hash)) await _hashLocks.get(hash);
+    let release; const p = new Promise(r => { release = r; });
+    _hashLocks.set(hash, p);
+    return () => { if (_hashLocks.get(hash) === p) _hashLocks.delete(hash); release(); };
   }
 
   // Tìm bản ghi scan đã xong có cùng hash ảnh mặt 1 (chống quét trùng)
@@ -1039,7 +1138,9 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     };
     if (entry.type === 'pdf') {
       dbgLog(`Đang mở PDF "${entry.name}" (${(entry.files[0].size / 1048576).toFixed(1)}MB)…`);
-      entry.getDoc = async () => entry.doc || (entry.doc = await openPdf(entry.files[0]));
+      // Dùng promise nhớ lại: nhiều tờ chạy song song cùng gọi getDoc() vẫn chỉ MỞ PDF 1 lần (không tốn gấp đôi RAM)
+      entry.getDoc = () => entry.doc ? Promise.resolve(entry.doc)
+        : (entry.docP || (entry.docP = openPdf(entry.files[0]).then(d => (entry.doc = d), e => { entry.docP = null; throw e; })));
       const doc = await entry.getDoc();
       const n = doc.numPages;
       const from = Math.max(1, parseInt(entry.pageFrom, 10) || 1);
@@ -1052,8 +1153,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         mk(entry.name, label, async (maxEdge, maxBytes) => {
           const d = await entry.getDoc();
           const out = [];
-          for (const no of nums) out.push(await renderPdfPage(d, no, maxEdge, entry.name, maxBytes)); // tuần tự từng trang
-          return out;
+          return Promise.all(nums.map(no => renderPdfPage(d, no, maxEdge, entry.name, maxBytes))); // các mặt của 1 tờ render ĐỒNG THỜI (pdf.js worker + canvas riêng); thứ tự kết quả giữ nguyên
         });
       }
       dbgLog(`PDF "${entry.name}": quét trang ${from}–${to} (tổng ${n}) → ${entry.jobs.length} tờ (${pps} mặt/tờ).`, 'ok');
@@ -1062,7 +1162,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       for (let i = 0; i < files.length; i += pps) {
         const grp = files.slice(i, i + pps);
         mk(grp.map(f => f.name).join(' + '), grp.length > 1 ? 'ảnh ' + (i + 1) + '-' + (i + grp.length) : 'ảnh ' + (i + 1),
-          async (maxEdge, maxBytes) => { const out = []; for (const f of grp) out.push(await prepareImageFile(f, maxEdge, maxBytes)); return out; });
+          (maxEdge, maxBytes) => Promise.all(grp.map(f => prepareImageFile(f, maxEdge, maxBytes))));
       }
       dbgLog(`${files.length} ảnh → ${entry.jobs.length} tờ (${pps} mặt/tờ).`, 'ok');
     }
@@ -1098,22 +1198,38 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     if (skipped) dbgLog(`Khôi phục "${entry.name}": ${skipped}/${saved.length} tờ đã xong từ lần trước → bỏ qua, chạy tiếp phần còn lại.`, 'ok');
   }
 
+  /* ---- PREFETCH: render/nén ảnh tờ KẾ TIẾP ngay khi tờ hiện tại bắt đầu chờ Gemini ----
+     Trước đây: render xong mới gọi Gemini, Gemini xong mới render tờ sau -> CPU và mạng thay phiên chờ nhau.
+     Nay chỉ trước 1 tờ (RAM không phình), Gemini vẫn gọi tuần tự từng tờ. Lỗi render giữ trong promise, nổi lên đúng tờ đó khi tới lượt. */
+  function prefetchRender(job) {
+    if (!job || job.status !== 'wait' || job._pre) return;
+    job._pre = (async () => { const st = await loadSettings(); return withRenderSlot(() => job.render(st.maxEdgePx, pageBytesCap(job.entry.pps || 2)), st.renderConcurrency); })();
+    job._pre.catch(() => {});   // tránh unhandledrejection; lỗi thật được await lại trong processJob
+  }
+  const nextWaitJob = (job) => { const js = job.entry.jobs || [], i = js.indexOf(job); return js.slice(i + 1).find(j => j.status === 'wait') || null; };
+
   /* ---- Xử lý 1 tờ: render/nén -> (bỏ qua nếu trùng) -> lưu DB -> Gemini -> đối sánh -> lưu ---- */
   async function processJob(job, dsIdx) {
     job.status = 'run'; job.error = '';
     renderJobRow(job); updateAll();
-    Q.abort = new AbortController();
+    const dbgLog = (m, l) => logLine(`[#${job.id}] ${m}`, l);   // gắn số tờ vào log vì nhiều tờ chạy đan xen
+    const ctrl = new AbortController(); Q.aborts.add(ctrl);     // mỗi tờ 1 controller riêng; nút Dừng hủy tất cả
+    let releaseHash = null;
     let rec = null;
     try {
       const st = await loadSettings();
       const known = allJobs().length;
       const pos = allJobs().indexOf(job) + 1;
       dbgLog(`Tờ ${pos}/${known} — ${job.label} (${job.pagesDesc}): chuẩn bị ảnh…`);
-      const pages = await job.render(st.maxEdgePx, pageBytesCap(job.entry.pps || 2));
+      // Render/nén ảnh của tờ này diễn ra trong lúc các tờ khác đang chờ Gemini trả lời (đường ống) — nhưng chỉ tối đa renderConcurrency tờ cùng lúc
+      const pre = job._pre; job._pre = null;   // dùng bản đã render trước (nếu có)
+      const pages = await (pre || withRenderSlot(() => job.render(st.maxEdgePx, pageBytesCap(job.entry.pps || 2)), st.renderConcurrency));
+      if (!Q.paused && (Q.conc || 1) <= 1) prefetchRender(nextWaitJob(job));   // chạy song song thì các worker đã tự gối đầu — không prefetch thêm để RAM không phình   // ảnh tờ này đã sẵn -> bắt đầu chuẩn bị tờ kế trong lúc đợi Gemini
       const front = pages[0], back = pages[1] || null, extras = pages.slice(2);
       dbgLog(`  mặt 1: ${Math.round(front.blob.size / 1024)}KB` + (back ? `, mặt 2: ${Math.round(back.blob.size / 1024)}KB` : ' (không có mặt 2)') + (extras.length ? `, +${extras.length} mặt phụ` : ''));
       const hash = await sha256Hex(front.blob);
       if (st.skipDuplicates && hash) {
+        releaseHash = await acquireHash(hash);   // chờ nếu 1 tờ cùng hash đang được quét — xong rồi mới kiểm tra trùng
         const ex = await findDoneByHash(hash);
         if (ex) {
           job.status = 'dup'; job.scanId = ex.id; job.extracted = ex.extracted; job.match = ex.match || null;
@@ -1134,7 +1250,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       if (job.prevScanId && job.prevScanId !== rec.id) { try { const o = await dbGet(ST_SCANS, job.prevScanId); if (o && o.status !== 'done') await dbDelete(ST_SCANS, o.id); } catch (x) { /* bỏ qua */ } job.prevScanId = null; }   // bản dở / lỗi của lần trước: bỏ, tránh rác + bản ghi đôi
       await dbPut(ST_SCANS, rec);
       await saveEntryMeta(job.entry);   // ghi scanId của tờ đang quét: nếu sập sau khi quét xong, lần sau nhận ra tờ này đã xong
-      const res = await analyzeSheet({ front, back, extras, onStatus: dbgLog, signal: Q.abort.signal });
+      const res = await analyzeSheet({ front, back, extras, onStatus: dbgLog, signal: ctrl.signal });
       const match = matchPlates(res.extracted.bienSo, dsIdx);
       if (res.rotated && (res.rotated.front || res.rotated.back)) {   // lưu ảnh ĐÃ xoay đúng chiều (hash giữ nguyên của bản gốc để chống quét trùng)
         rec.frontBlob = res.front.blob; rec.frontMime = res.front.mime;
@@ -1166,7 +1282,8 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         if (e && e.raw) $('#scanJsonRaw').textContent = String(e.raw);
       }
     } finally {
-      Q.abort = null;
+      Q.aborts.delete(ctrl);
+      if (releaseHash) releaseHash();
       renderJobRow(job); updateAll();
       // Lưu tiến độ NGAY sau mỗi tờ. Nếu sập đúng giữa lúc ghi, lần sau tờ này chạy lại và bị chặn bởi kiểm tra trùng hash ảnh (không tạo bản ghi đôi).
       await saveEntryMeta(job.entry);
@@ -1195,6 +1312,14 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       if (stale.length) dbgLog(`Dọn ${stale.length} bản ghi quét dở dang của lần trước (sẽ quét lại).`, 'warn');
     } catch (x) { console.warn('[scan] dọn bản ghi dở lỗi', x); }
   }
+  // Số tờ chạy đồng thời: cài đặt > 0 thì dùng đúng số đó; 0 = TỰ ĐỘNG = số key đang dùng được + 1 (tối đa maxConcurrency)
+  async function resolveConcurrency() {
+    const st = await loadSettings();
+    if (st.concurrency > 0) return st.concurrency;
+    const now = Date.now();
+    const ok = (await listKeys()).filter(k => k.enabled && k.status !== 'invalid' && (k.cooldownUntil || 0) <= now && !keyQuotaBlockedSec(k, now)).length;
+    return Math.max(1, Math.min(st.maxConcurrency, ok + 1));
+  }
   async function runQueueInner() {
     if (Q.running) return;
     Q.running = true; Q.paused = false; updateAll();
@@ -1214,11 +1339,24 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
           dbgLog(`Không mở được "${entry.name}": ${e.message}`, 'error');
           continue; // file hỏng -> sang file kế
         }
-        for (const job of entry.jobs) {
-          if (Q.paused) break;
-          if (job.status !== 'wait') continue;
-          await processJob(job, dsIdx);
-        }
+        // CHẠY SONG SONG có kiểm soát: N «worker» cùng lấy tờ kế tiếp của file này. Số request thật sự tới Gemini vẫn bị
+        // geminiGenerate chặn lại (mỗi key tối đa perKeyParallel request, nghỉ keyMinGapMs giữa 2 request, giãn cách globalStaggerMs),
+        // nên tăng N không làm tăng tốc độ bắn request quá mức — chỉ giúp mọi key luôn có việc để làm.
+        const waiting = entry.jobs.filter(j => j.status === 'wait').length;
+        const conc = Math.max(1, Math.min(await resolveConcurrency(), waiting));
+        Q.conc = conc;
+        if (conc > 1) dbgLog(`⚡ Chạy song song ${conc} tờ cùng lúc (xoay key, có giới hạn tốc độ).`, 'ok');
+        let cursor = 0;
+        const worker = async () => {
+          while (!Q.paused) {
+            let job = null;
+            while (cursor < entry.jobs.length) { const j = entry.jobs[cursor++]; if (j.status === 'wait') { job = j; break; } }
+            if (!job) return;
+            try { await processJob(job, dsIdx); }
+            catch (e) { console.warn('[scan] worker lỗi ngoài dự kiến', e); }   // processJob đã tự bắt lỗi; chốt chặn để 1 tờ hỏng không giết cả đàn
+          }
+        };
+        await Promise.all(Array.from({ length: conc }, (_, i) => (async () => { if (i) await sleep(i * 400); await worker(); })()));   // khởi động so le
         const pending = entry.jobs.some(j => j.status === 'wait' || j.status === 'run');
         if (!pending) {
           entry.status = entry.jobs.some(j => j.status === 'error') ? 'partial' : 'done';
@@ -1384,7 +1522,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     // Người dùng chủ động bấm Bắt đầu/Tiếp tục -> xóa cờ «đã tạm dừng» (mở lại web sẽ tự chạy tiếp); bấm Tạm dừng/Dừng -> đặt cờ (mở lại web KHÔNG tự chạy)
     $('#btnScanStart').addEventListener('click', () => { setUserPaused(false); runQueue(); });
     $('#btnScanPause').addEventListener('click', () => { setUserPaused(true); Q.paused = true; dbgLog('Sẽ tạm dừng sau khi xong tờ đang xử lý.', 'warn'); updateAll(); });
-    $('#btnScanStop').addEventListener('click', () => { setUserPaused(true); Q.paused = true; if (Q.abort) Q.abort.abort('user'); });
+    $('#btnScanStop').addEventListener('click', () => { setUserPaused(true); Q.paused = true; for (const c of [...Q.aborts]) { try { c.abort('user'); } catch (x) { /* bỏ qua */ } } });   // hủy MỌI tờ đang chạy (Q.abort cũ không còn tồn tại)
     $('#btnScanRetry').addEventListener('click', () => {
       // Đưa các tờ lỗi về trạng thái chờ rồi chạy lại
       for (const j of allJobs()) if (j.status === 'error') { j.status = 'wait'; j.error = ''; renderJobRow(j); }
