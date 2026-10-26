@@ -1111,6 +1111,7 @@ function processRows(rows, opts) {
   // trong hàng đợi đồng bộ ngầm -> áp lại các thay đổi đó NGAY trên dữ liệu
   // vừa tải, để không bị "trồi ngược" về giá trị cũ trên giao diện.
   reapplyPendingSyncToRawData();
+  normalizeAllCccdFromConfirmNotes();   // chuẩn hoá Số CCCD/MST theo ghi chú «Đã xác nhận thuộc về…»
 
   state.filters = Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()]));
   state.excludes = Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()]));
@@ -3256,6 +3257,156 @@ async function updateSingleRowFields(row, fieldUpdates) {
   return true;
 }
 
+/* ---- 8a. Chuẩn hoá Số CCCD/MST từ ghi chú «Đã xác nhận thuộc về [TÊN] - CCCD [SỐ]» ----------
+   Quy tắc ưu tiên số định danh (tìm trong CHÍNH đoạn ghi chú xác nhận):
+     1) CCCD 12 số (hoặc 11 số do Excel làm mất số 0 đầu)
+     2) CMND 9 số đầu 205 / 206
+     3) Giấy tờ khác (CMND cũ 200…, số hộ khẩu…) — chỉ dùng để ĐIỀN VÀO ô còn TRỐNG, không bao giờ đè số đã có.
+   Số điện thoại / MST ghi kèm nhãn («SĐT», «MST») bị bỏ qua hoàn toàn. Không bao giờ «hạ cấp» (đang là CCCD 12 số thì không đè bằng CMND).
+   Có «dấu vết cục bộ» (prev) để: nếu người dùng tự sửa lại ô CCCD sau đó thì lần tải sau KHÔNG ghi đè lại. */
+const CCCD_NORM_KEY = 'vehicleCccdNormV1';
+const CCCD_ALLOW_TIER3_FILL = true;   // false = bỏ hẳn nhóm 3 (không điền cả vào ô trống)
+let _cccdNormMapCache = null;
+function loadCccdNormMap() {
+  if (_cccdNormMapCache) return _cccdNormMapCache;
+  try { _cccdNormMapCache = JSON.parse(localStorage.getItem(CCCD_NORM_KEY) || '{}') || {}; }
+  catch (e) { _cccdNormMapCache = {}; }
+  return _cccdNormMapCache;
+}
+function saveCccdNormMap(map) {
+  _cccdNormMapCache = map;
+  try { localStorage.setItem(CCCD_NORM_KEY, JSON.stringify(map)); } catch (e) { /* đầy bộ nhớ -> bỏ qua */ }
+}
+function cccdCompact(v) { return (v == null ? '' : String(v)).replace(/[\s.'`]/g, ''); }
+// 1 = CCCD (12 số / 11 số) · 2 = CMND 9 số 205|206 · 3 = số khác · 0 = không phải dãy số thuần
+function cccdTier(v) {
+  const d = cccdCompact(v);
+  if (!/^\d+$/.test(d)) return 0;
+  if (d.length === 12 || d.length === 11) return 1;
+  if (/^20[56]\d{6}$/.test(d)) return 2;
+  return 3;
+}
+// Tìm số định danh tốt nhất trong ghi chú xác nhận. Nhiều lần xác nhận -> lấy lần SAU CÙNG. Trả { num, tier } hoặc null.
+function cccdFromConfirmNote(note) {
+  if (!note) return null;
+  let found = null;
+  String(note).normalize('NFC').split(/[;|\n]/).forEach(seg => {
+    let s = stripDiacritics(seg);
+    if (!/xac nhan.{0,40}thuoc/.test(s)) return;                 // «Đã xác nhận thuộc về…» và các biến thể
+    if (/truoc khi cap nhat/.test(s)) return;                    // đã sửa thành «CCCD trước khi cập nhật: [số cũ]» -> số này là số CŨ, không dùng để chuẩn hoá
+    s = s.replace(/\b(\d{3})[ .](\d{3})[ .](\d{3})[ .](\d{3})\b/g, '$1$2$3$4')   // 079 123 456 789 -> 079123456789
+         .replace(/\b(\d{3})[ .](\d{3})[ .](\d{3})\b/g, '$1$2$3');               // 205 123 456   -> 205123456
+    let best = null, prevEnd = 0, m;
+    const re = /\d{6,}/g;
+    while ((m = re.exec(s))) {
+      const label = s.slice(Math.max(prevEnd, m.index - 22), m.index);           // nhãn đứng ngay trước số này
+      prevEnd = m.index + m[0].length;
+      if (/(sdt|dt\b|dien thoai|\btel\b|phone|\bmst\b|ma so thue)/.test(label)) continue;   // SĐT / MST: không phải giấy tờ cá nhân
+      let tier = cccdTier(m[0]);
+      if (tier < 3 && /(ho khau|\bhk\b|\bso ho\b)/.test(label)) tier = 3;       // số hộ khẩu (kể cả đủ 9/12 số) -> nhóm 3
+      if (!best || tier < best.tier) best = { num: m[0], tier };
+    }
+    if (best) found = best;
+  });
+  return found;
+}
+// Sau khi Số CCCD/MST đã được cập nhật theo số trong ghi chú xác nhận, sửa đoạn ghi chú:
+//   «Đã xác nhận thuộc về [TÊN] - CCCD [SỐ]»  ->  «Đã xác nhận thuộc về [TÊN] - CCCD trước khi cập nhật: [SỐ CŨ]»
+// - Chỉ sửa trong các đoạn «Đã xác nhận thuộc về…» (đoạn cách nhau bởi ; | xuống dòng), giữ nguyên tên và các đoạn ghi chú khác.
+// - Chỉ thay đúng dãy số trùng với Số CCCD/MST mới (`newNum`); SĐT / MST / số khác ghi kèm được giữ nguyên.
+// - Số cũ trống -> ghi «(trống)». Chạy lại nhiều lần không đổi gì (đoạn đã sửa được bỏ qua).
+const CCCD_NOTE_PREV_LABEL = 'CCCD trước khi cập nhật: ';
+function rewriteConfirmNoteForCccdUpdate(note, newNum, prevNum) {
+  if (!note || !newNum) return note;
+  const target = cccdCompact(newNum);
+  const prevTxt = (prevNum == null ? '' : String(prevNum)).trim() || '(trống)';
+  let changed = false;
+  const parts = String(note).split(/([;|\n])/);                 // giữ nguyên ký tự phân cách
+  for (let i = 0; i < parts.length; i += 2) {
+    const seg = parts[i], plain = stripDiacritics(seg);
+    if (!/xac nhan.{0,40}thuoc/.test(plain) || /truoc khi cap nhat/.test(plain)) continue;
+    const re = /\d(?:[\d .]*\d)?/g;
+    let m;
+    while ((m = re.exec(seg))) {
+      if (cccdCompact(m[0]) !== target) continue;
+      const before = seg.slice(0, m.index);
+      if (/(sđt|sdt|điện thoại|dien thoai|\btel\b|\bmst\b|mã số thuế)\s*[:\-–]?\s*$/i.test(before)) continue;   // số điện thoại / MST: không đụng tới
+      const lab = before.match(/(cccd|cmnd|cmtnd|cmt|căn cước(?: công dân)?)\s*(?:\/\s*mst)?\s*[:\-–]?\s*$/i);
+      const start = lab ? m.index - lab[0].length : m.index;
+      parts[i] = seg.slice(0, start) + CCCD_NOTE_PREV_LABEL + prevTxt + seg.slice(m.index + m[0].length);
+      changed = true;
+      break;
+    }
+  }
+  return changed ? parts.join('') : note;
+}
+// Quyết định có cập nhật Số CCCD/MST của `row` hay không. force=true khi người dùng VỪA bấm «Xác nhận đúng».
+function planCccdFromConfirmNote(row, force) {
+  const f = cccdFromConfirmNote(row.ghiChu);
+  if (!f) return null;
+  const cur = cccdCompact(row.cccd);
+  if (cur === f.num) return null;                                // đã đúng
+  if (f.tier === 3) { if (!CCCD_ALLOW_TIER3_FILL || cur) return null; }   // nhóm 3: chỉ điền ô trống
+  else {
+    const curRank = !cur ? 9 : (cccdTier(cur) || 8);             // trống 9 · chữ/không phải số 8 · còn lại 1..3
+    if (curRank < f.tier) return null;                           // không hạ cấp (CCCD -> CMND)
+  }
+  if (!force) {
+    const mk = loadCccdNormMap()[vehicleKey(row)];
+    if (mk && mk.num === f.num && cur !== cccdCompact(mk.prev)) return null;   // người dùng đã tự sửa sau lần chuẩn hoá trước
+  }
+  return { num: f.num, tier: f.tier, prev: row.cccd || '' };
+}
+// Gom nhiều dòng vào hàng đợi đồng bộ bằng 1 lần lưu (enqueueSync từng dòng sẽ ghi IndexedDB cả hàng đợi mỗi lần -> chậm khi hàng trăm xe).
+function enqueueRowSyncBulk(items) {
+  if (!items.length || !queueWritesAllowed()) return;
+  const idx = new Map();
+  syncQueue.forEach(j => { if (j !== syncCurrentJob) idx.set(j.matchHeader + '\u0001' + j.matchValue, j); });
+  items.forEach(it => {
+    const mk = matchKeyForRow(it.row);
+    if (!mk) return;                                             // thiếu khoá khớp: chỉ lưu cục bộ, không báo từng dòng
+    const k = mk.header + '\u0001' + mk.value, job = idx.get(k);
+    if (job) {
+      Object.assign(job.updates, it.updates); job.rowId = it.row._rowId;
+      if (job.blocked) { job.blocked = false; job.attempts = 0; }
+    } else {
+      const nj = { id: 'sync_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), rowId: it.row._rowId,
+        matchHeader: mk.header, matchValue: mk.value, updates: Object.assign({}, it.updates), attempts: 0, createdAt: Date.now() };
+      syncQueue.push(nj); idx.set(k, nj);
+    }
+  });
+  persistSyncQueue(); updateSyncStatusBadge(); processSyncQueue();
+}
+// Rà TOÀN BỘ dữ liệu đang có (gọi sau mỗi lần tải/đọc cache). Trả về số xe được cập nhật.
+function normalizeAllCccdFromConfirmNotes() {
+  const map = loadCccdNormMap(), items = [];
+  state.rawData.forEach(row => {
+    if (!row.ghiChu) return;
+    const p = planCccdFromConfirmNote(row, false);
+    if (!p) {
+      // Dữ liệu ĐÃ chuẩn hoá từ trước (còn dấu vết số cũ trên máy này) mà ghi chú vẫn ở dạng «… - CCCD [SỐ]» -> sửa ghi chú.
+      const mk = map[vehicleKey(row)];
+      if (mk && mk.num && cccdCompact(row.cccd) === cccdCompact(mk.num)) {
+        const fixed = rewriteConfirmNoteForCccdUpdate(row.ghiChu, mk.num, mk.prev);
+        if (fixed !== row.ghiChu) { row.ghiChu = fixed; items.push({ row, updates: { 'Ghi Chú': fixed } }); }
+      }
+      return;
+    }
+    const fixed = rewriteConfirmNoteForCccdUpdate(row.ghiChu, p.num, p.prev);   // đọc số từ ghi chú TRƯỚC khi sửa (planCccd đã chạy ở trên)
+    row.cccd = p.num;
+    map[vehicleKey(row)] = { num: p.num, prev: p.prev };
+    const upd = { 'Số CCCD/MST': p.num };
+    if (fixed !== row.ghiChu) { row.ghiChu = fixed; upd['Ghi Chú'] = fixed; }
+    items.push({ row, updates: upd });
+  });
+  if (!items.length) return 0;
+  saveCccdNormMap(map);
+  enqueueRowSyncBulk(items);
+  persistRawDataToCache();
+  try { toast(`Đã chuẩn hoá Số CCCD/MST cho ${items.length} xe theo ghi chú «Đã xác nhận thuộc về…».`); } catch (e) { /* bỏ qua */ }
+  return items.length;
+}
+
 /* ---- 8b. "Xác nhận xe đúng" (Mục III -> Mục I) --------------------------- */
 // map: { [vehicleKey]: { ownerCccd, ownerName, confirmedAt } }
 // TỐI ƯU HIỆU NĂNG QUAN TRỌNG NHẤT trong ứng dụng: loadConfirmedOwnerMap() được
@@ -3282,9 +3433,8 @@ function saveConfirmedOwnerMap(map) {
 
 // Đánh dấu `vehicleRow` là thuộc về `ownerRow` (theo Số CCCD), tự thêm ghi chú
 // (giữ nguyên ghi chú cũ nếu có) và ghi ngược về Sheet nếu đang kết nối 2 chiều.
-// KHÔNG đổi Số CCCD/MST gốc của vehicleRow — chỉ đánh dấu qua bảng ánh xạ riêng,
-// nên khi xem chi tiết trực tiếp xe này hoặc in Bản cam kết, xe vẫn hiển thị
-// đúng thông tin gốc như trước.
+// Số CCCD/MST của vehicleRow được chuẩn hoá theo số trong ghi chú xác nhận (xem 8a:
+// CCCD 12/11 số > CMND 205/206 > khác, không hạ cấp); số cũ được nhớ cục bộ (prev).
 // LOCAL-FIRST: xác nhận + cập nhật Ghi Chú ngay trong bộ nhớ/IndexedDB, đồng
 // bộ Sheet ở hàng đợi ngầm (không await mạng, không còn cần try/catch báo lỗi
 // ngay tại đây — lỗi mạng sẽ tự được xử lý/thử lại bởi hàng đợi đồng bộ).
@@ -3299,9 +3449,19 @@ async function confirmVehicleOwner(vehicleRow, ownerRow) {
   const oldNote = (vehicleRow.ghiChu || '').trim();
   const newNote = (!oldNote || !oldNote.includes(noteAddition)) ? (oldNote ? `${oldNote}; ${noteAddition}` : noteAddition) : oldNote;
   vehicleRow.ghiChu = newNote;
+  // Chuẩn hoá Số CCCD/MST của xe theo số ghi trong ghi chú xác nhận (ưu tiên CCCD 12/11 số > CMND 205/206 > khác; không hạ cấp).
+  const syncUpdates = { 'Ghi Chú': newNote };
+  const cccdPlan = planCccdFromConfirmNote(vehicleRow, true);
+  if (cccdPlan) {
+    const fixedNote = rewriteConfirmNoteForCccdUpdate(vehicleRow.ghiChu, cccdPlan.num, cccdPlan.prev);   // «CCCD [SỐ]» -> «CCCD trước khi cập nhật: [SỐ CŨ]»
+    vehicleRow.ghiChu = fixedNote; syncUpdates['Ghi Chú'] = fixedNote;
+    vehicleRow.cccd = cccdPlan.num;
+    syncUpdates['Số CCCD/MST'] = cccdPlan.num;
+    const nm = loadCccdNormMap(); nm[vehicleKey(vehicleRow)] = { num: cccdPlan.num, prev: cccdPlan.prev }; saveCccdNormMap(nm);
+  }
   persistRawDataToCache();
 
-  enqueueRowSync(vehicleRow, { 'Ghi Chú': newNote });
+  enqueueRowSync(vehicleRow, syncUpdates);
   // Xe vừa được xác nhận sẽ được tính vào đúng nhóm chủ xe mới -> tính lại số
   // lượng xe/chủ xe để bộ lọc "nhiều xe" và cột sắp xếp "Số lượng xe" cập nhật đúng.
   computeOwnerVehicleCounts();
@@ -4641,6 +4801,7 @@ async function applyPublishedGasUrl() {
     if (Array.isArray(cached) && cached.length) {
       state.rawData = cached;
       reapplyPendingSyncToRawData();
+      normalizeAllCccdFromConfirmNotes();
       restoreFilterState();
       state.exportSelected = new Set();
       state.page = 1;
