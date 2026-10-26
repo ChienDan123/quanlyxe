@@ -36,6 +36,14 @@
     bi: 'LiberationSerif-BoldItalic.ttf',
   };
 
+  // Các lựa chọn «Lý do thu hồi» — ĐÚNG nguyên văn (2 mục lấy từ cổng dịch vụ công + mục cũ).
+  // Dùng chung cho form (thu-hoi-ui.js) và bộ điền nhanh sang dichvucong.
+  const REASONS = [
+    'Xe hỏng không sử dụng được hoặc xe bị phá huỷ do nguyên nhân khách quan.',
+    'Xe hết niên hạn sử dụng; xe không được phép lưu hành theo quy định của pháp luật.',
+    'Xe bị mất cắp, chiếm đoạt không tìm được, chủ xe đề nghị thu hồi giấy chứng nhận đăng ký xe.',
+  ];
+
   /* ---------------------------- 2. DANH SÁCH TRƯỜNG --------------------------
      key      : tên trường trong đối tượng dữ liệu
      label    : nhãn hiển thị trên form
@@ -277,5 +285,5 @@
     return doc.save();
   }
 
-  return { PAGE, LEFT, RIGHT, FONT_FILES, FIELDS, BOI_FIELDS, LINES, makeMeasure, layout, createPdf, clean };
+  return { PAGE, LEFT, RIGHT, FONT_FILES, FIELDS, BOI_FIELDS, REASONS, LINES, makeMeasure, layout, createPdf, clean };
 });

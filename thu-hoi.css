@@ -9,3 +9,17 @@
 .th-canvas{display:block;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.25);}
 .th-warn{background:#fdecea;color:#8a1c12;border:1px solid #f1aeb5;border-radius:4px;padding:6px 8px;margin-bottom:8px;font-size:13px;}
 @media (max-width:900px){.th-body{grid-template-columns:1fr;}.th-form{max-height:none;}}
+
+/* ---- Bổ sung: nút in trực tiếp, chọn mục in bồi, hướng dẫn dichvucong ---- */
+.th-footer{display:flex;flex-direction:column;gap:6px;align-items:stretch;}
+.th-btnrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+.th-grp{min-width:130px;font-size:13px;}
+.th-boi-tools{margin-bottom:6px;display:flex;gap:6px;}
+.th-boi-row{border:1px solid #e0e0e0;border-radius:4px;padding:6px 8px;margin-bottom:6px;background:#fafafa;}
+.th-boi-row .tpl-input{margin-top:4px;}
+.th-chk{display:flex;gap:6px;align-items:center;font-size:13px;font-weight:600;cursor:pointer;}
+.th-date3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:4px;}
+.th-help{background:#eef7ee;border:1px solid #a5d6a7;border-radius:4px;padding:8px 10px;margin-bottom:8px;font-size:13px;}
+.th-help ol{margin:6px 0 6px 18px;padding:0;}
+.th-bm{display:inline-block;padding:2px 10px;border-radius:12px;background:#2e7d32;color:#fff;text-decoration:none;cursor:grab;font-weight:600;}
+.th-form select.tpl-input{width:100%;box-sizing:border-box;}
