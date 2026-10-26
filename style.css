@@ -129,6 +129,10 @@ input,select,textarea{font-family:inherit;font-size:14px;}
   resize:horizontal;overflow:auto;width:100%;min-width:190px;max-width:900px;
 }
 
+/* Lọc theo Chuyên đề: tên chuyên đề dài -> ô rộng hơn, chip được phép xuống dòng thay vì tràn. */
+.filter-field[data-field="chuyenDe"]{flex:1 1 280px;}
+.filter-field[data-field="chuyenDe"] .ms-chip{white-space:normal;max-width:100%;}
+
 /* ---------- CÁCH KHỚP KHI TÌM ĐỊA CHỈ ----------------------------------------
    Hàng nhỏ dưới ô tìm/lọc "Địa chỉ / Phường-Xã", cho chọn 1 trong 2 cách khớp
    (Chứa chuỗi / Bắt đầu bằng). Xem ADDR_MATCH_MODES trong app.js. */

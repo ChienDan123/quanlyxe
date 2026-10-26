@@ -72,12 +72,20 @@ const FAMILY_COLUMN_INDEX = 24;
 // thể (kết hợp được nhiều người cùng lúc, giống các bộ lọc khác), kèm tuỳ
 // chọn đặc biệt "Chưa có ai thực hiện" (xem UNASSIGNED_FILTER_VALUE bên dưới).
 // Bỏ trống bộ lọc (không tick ai) mặc định đã có nghĩa là "Tất cả".
-const FILTER_FIELDS = ['bienSo', 'cccd', 'chuXe', 'diaChi', 'trangThaiXe', 'nguoiThucHien'];
+const FILTER_FIELDS = ['bienSo', 'cccd', 'chuXe', 'diaChi', 'trangThaiXe', 'nguoiThucHien', 'chuyenDe'];
 const FILTER_LABELS = {
   bienSo: 'Biển số', cccd: 'Số CCCD/MST', chuXe: 'Chủ phương tiện',
   diaChi: 'Địa chỉ / Phường-Xã', trangThaiXe: 'Trạng thái xe',
-  nguoiThucHien: 'Người thực hiện'
+  nguoiThucHien: 'Người thực hiện', chuyenDe: 'Chuyên đề'
 };
+// Lọc theo «Chuyên đề»: lấy từ CỘT G (index 6) của sheet «Tong hop». Ưu tiên nhận cột theo TÊN
+// (tiêu đề bắt đầu bằng «Chuyên đề…»); không thấy tên thì lấy đúng theo VỊ TRÍ cột G
+// (chỉ khi cột G chưa phải một cột hệ thống đã biết) — cùng cách làm với cột «gia đình» (cột Y).
+// Trường này CHỈ có ở khối «Lọc theo», không có ở khối «Loại trừ» (xem FILTER_FIELDS_NO_EXCLUDE).
+const CHUYENDE_COLUMN_INDEX = 6;
+const FILTER_FIELDS_NO_EXCLUDE = ['chuyenDe'];
+// Một ô Chuyên đề có thể ghi nhiều chuyên đề, ngăn cách bằng xuống dòng / dấu ; / dấu |.
+const CHUYENDE_SPLIT_RE = /[\n;|]+/;
 // Giá trị "giả" đại diện cho các dòng CHƯA gán Người thực hiện, dùng trong bộ
 // lọc "Người thực hiện" ở trang chủ (không phải giá trị thật trong dữ liệu).
 const UNASSIGNED_FILTER_VALUE = '__chua_thuc_hien__';
@@ -1087,6 +1095,13 @@ function processRows(rows, opts) {
 
   // Lưu DANH SÁCH TIÊU ĐỀ CỘT THẬT đang có trên Google Sheet — màn «So sánh phiếu → Thêm thông tin mới» chỉ cho tìm & chọn trong danh sách này
   // (không cho gõ tên cột mới để tạo cột tùy ý). Nhớ thêm ở localStorage để còn dùng được khi dữ liệu nạp từ bộ nhớ đệm.
+  // Cột «Chuyên đề» (cột G): theo tên trước, không thấy thì theo vị trí G nếu cột G chưa là cột hệ thống đã biết.
+  let chuyenDeHeaderKey = sampleHeaders.find(h => stripDiacritics(h).startsWith('chuyen de'));
+  if (!chuyenDeHeaderKey) {
+    const g = sampleHeaders[CHUYENDE_COLUMN_INDEX];
+    if (g && String(g).trim() && !headerToKey[g]) chuyenDeHeaderKey = g;
+  }
+
   state.sheetHeaders = sampleHeaders.filter(h => String(h || '').trim());
   try { if (state.sheetHeaders.length) localStorage.setItem('qlxSheetHeaders', JSON.stringify(state.sheetHeaders)); } catch (e) { /* bỏ qua */ }
 
@@ -1103,6 +1118,7 @@ function processRows(rows, opts) {
       }
     });
     obj.giaDinh = familyHeaderKey ? (r[familyHeaderKey] || '').toString().trim() : '';
+    obj.chuyenDe = chuyenDeHeaderKey ? (r[chuyenDeHeaderKey] || '').toString().trim() : '';
     return obj;
   }).filter(r => r.bienSo || r.soKhung || r.chuXe || r.cccd);
 
@@ -1136,7 +1152,14 @@ function processRows(rows, opts) {
 // cho "Lọc theo" (giữ lại) và "Loại trừ" (loại bỏ) để 2 bên luôn khớp cùng quy tắc:
 //  - diaChi: khớp địa chỉ gốc HOẶC phường/xã mới;
 //  - nguoiThucHien: dòng chưa gán người được quy về UNASSIGNED_FILTER_VALUE.
+// Danh sách chuyên đề của 1 dòng (cột G «Tong hop»). Dòng nạp từ bộ nhớ đệm IndexedDB của phiên cũ chưa có
+// thuộc tính chuyenDe -> tạm lấy từ cột lạ (_extra) cho tới khi dữ liệu mới tải về từ server.
+function rowChuyenDeValues(row) {
+  const raw = row.chuyenDe !== undefined ? row.chuyenDe : c08ExtraValue(row, ['chuyen de']);
+  return (raw || '').toString().split(CHUYENDE_SPLIT_RE).map(v => v.trim().replace(/\s+/g, ' ')).filter(Boolean);
+}
 function rowValueInSet(row, key, set) {
+  if (key === 'chuyenDe') return rowChuyenDeValues(row).some(v => set.has(v));   // chọn nhiều = HOẶC
   if (key === 'diaChi') return set.has(row.diaChi) || set.has(row.phuongXaMoi);
   if (key === 'nguoiThucHien') return set.has((row.nguoiThucHien || '').trim() || UNASSIGNED_FILTER_VALUE);
   return set.has(row[key]);
@@ -1213,7 +1236,9 @@ function collectOptions(field, data) {
     return hasUnassigned ? [...names, UNASSIGNED_FILTER_VALUE] : names;
   }
   data.forEach(row => {
-    if (field === 'diaChi') {
+    if (field === 'chuyenDe') {
+      rowChuyenDeValues(row).forEach(v => set.add(v));
+    } else if (field === 'diaChi') {
       if (row.diaChi) set.add(row.diaChi);
       if (row.phuongXaMoi) set.add(row.phuongXaMoi);
     } else if (row[field]) {
@@ -1410,7 +1435,7 @@ const excludeBar = $('#excludeBar');
 function buildExcludeBar() {
   const wrap = $('#excludeFields');
   if (!wrap) return;
-  wrap.innerHTML = FILTER_FIELDS.map(f => `
+  wrap.innerHTML = FILTER_FIELDS.filter(f => !FILTER_FIELDS_NO_EXCLUDE.includes(f)).map(f => `
     <div class="filter-field exclude-field" data-field="${f}">
       <label class="ex-toggle" title="Bật/tắt điều kiện loại trừ này (giữ nguyên các giá trị đã chọn)">
         <input type="checkbox" data-ex-toggle="${f}"> <span>Loại trừ ${escapeHtml(FILTER_LABELS[f])}</span>
