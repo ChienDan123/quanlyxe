@@ -3658,6 +3658,7 @@ function renderDetailPanelFor(row) {
       </div>
       <div class="owner-card-actions">
         ${window.ScanHooks ? window.ScanHooks.detailButtonHtml(row) : ''}
+        <button type="button" id="btnThuHoiPanel" class="btn btn-secondary btn-sm" title="Lập Giấy khai thu hồi đăng ký xe, biển số xe (PDF) cho xe đang xem">🗒️ Giấy khai thu hồi</button>
         <button type="button" id="btnCreateCommitmentPanel" class="btn btn-primary btn-sm">
           📄 Tạo Bản cam kết (${state.exportSelected.size} xe đã chọn)
         </button>
