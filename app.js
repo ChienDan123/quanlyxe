@@ -238,6 +238,9 @@ const state = {
   // Yêu cầu (Lọc nhanh theo Địa bàn cũ): null = không lọc (hiện đầy đủ), hoặc
   // 1 trong các key của QUICK_DIA_BAN_OPTIONS ('tam_dan' | 'tam_thai' | 'phu_thinh').
   quickDiaBan: null,
+  // Lọc theo DANH SÁCH BIỂN SỐ dán từ Excel: raw = nội dung đã dán (để hiện lại / lưu lại),
+  // keys = tập biển số đã chuẩn hoá (c08IdKey), labels = key -> biển số như người dùng dán.
+  plateFilter: { raw: '', keys: new Set(), labels: new Map() },
   // Cache số lượng xe theo từng chủ xe (tính theo CCCD hiệu lực, có tính cả
   // các xe đã được "Xác nhận xe đúng"). Được tính lại mỗi khi dữ liệu thay đổi.
   ownerVehicleCounts: new Map(),
@@ -1042,6 +1045,7 @@ function persistFilterState() {
       excludeOn: { ...state.excludeOn },
       extraFilters: { ...state.extraFilters },
       quickDiaBan: state.quickDiaBan,
+      plateFilterRaw: state.plateFilter.raw,
       sortCriteria: state.sortCriteria,
       addrMatchMode: state.addrMatchMode,
     };
@@ -1066,6 +1070,7 @@ function restoreFilterState() {
     }
     if (data && data.extraFilters) Object.assign(state.extraFilters, data.extraFilters);
     if (data && typeof data.quickDiaBan !== 'undefined') state.quickDiaBan = data.quickDiaBan;
+    if (data && typeof data.plateFilterRaw === 'string') setPlateFilter(data.plateFilterRaw);
     if (data && Array.isArray(data.sortCriteria)) state.sortCriteria = data.sortCriteria;
     if (data && ADDR_MATCH_MODES.some(m => m.key === data.addrMatchMode)) state.addrMatchMode = data.addrMatchMode;
   } catch (e) { /* dữ liệu lưu bị hỏng -> bỏ qua, dùng mặc định */ }
@@ -1201,6 +1206,8 @@ function getFiltered(skipIncludeField, skipExcludeField) {
     if (state.extraFilters.excludeSigned && isRowSigned(row)) return false;
     // Yêu cầu (Lọc nhanh theo Địa bàn cũ): kết hợp AND với các bộ lọc khác.
     if (state.quickDiaBan && !rowMatchesQuickDiaBan(row, state.quickDiaBan)) return false;
+    // Lọc theo danh sách biển số dán từ Excel (AND với các bộ lọc khác).
+    if (state.plateFilter.keys.size && !state.plateFilter.keys.has(plateKeyOfRow(row))) return false;
     // Module Quét phiếu: lọc xe đã có phiếu scan / Đã kiểm / Chưa kiểm (window.ScanHooks do scan-review.js cung cấp).
     if (window.ScanHooks && !window.ScanHooks.rowPassesFilter(row)) return false;
     return true;
@@ -1426,6 +1433,7 @@ function refreshFilterUIs() {
   // lại từ localStorage lúc tải dữ liệu). Có 2 ô chọn (Lọc theo + Loại trừ).
   $all('.addr-match-select').forEach(el => { el.value = state.addrMatchMode; });
   renderExcludeStatus();
+  renderPlateFilter();
 }
 
 const filterBar = $('#filterBar');
@@ -1622,6 +1630,7 @@ $('#btnClearFilters').addEventListener('click', () => {
   // Yêu cầu (Lọc nhanh theo Địa bàn cũ): "Xóa bộ lọc" cũng bỏ chọn địa bàn cũ.
   state.quickDiaBan = null;
   updateQuickDiaBanButtonsUI();
+  clearPlateFilter();   // "Xóa bộ lọc" cũng bỏ danh sách biển số đã dán
   renderSortBar();
   state.page = 1;
   // FIX BUG: trước đây xóa bộ lọc không reset trạng thái đã chọn xe (checkbox),
@@ -1655,6 +1664,91 @@ if (quickDiaBanWrap) {
     renderTable();
   });
 }
+
+/* ------------------- 6b-3. LỌC THEO DANH SÁCH BIỂN SỐ DÁN TỪ EXCEL ---------- */
+// Người dùng copy 1 cột biển số từ Excel rồi dán vào ô #plateFilterInput. Nội dung được tách theo
+// xuống dòng / tab / dấu , ; (Excel copy cột = mỗi ô 1 dòng), mỗi mục chuẩn hoá bằng c08IdKey()
+// (bỏ khoảng trắng, "-", ".", viết hoa) nên "92A-123.45", "92a 12345", "92A12345" đều khớp nhau.
+// Dòng tiêu đề (VD "Biển số") hoặc mục không giống biển số (thiếu chữ hoặc số) tự bị bỏ qua.
+// Mục có khoảng trắng bên trong chỉ được tách nhỏ khi MỌI phần đều trông như 1 biển số đầy đủ
+// (VD "92A-12345 92B-23456"); còn "92A 12345" vẫn được hiểu là 1 biển số.
+const plateKeyCache = new WeakMap();
+function plateKeyOfRow(row) {
+  const src = row.bienSo;
+  let c = plateKeyCache.get(row);
+  if (!c || c.src !== src) { c = { src, key: c08IdKey(src) }; plateKeyCache.set(row, c); }
+  return c.key;
+}
+function looksLikePlateKey(k) { return k.length >= 4 && /\d/.test(k) && /[A-Z]/.test(k); }
+function parsePlateList(raw) {
+  const labels = new Map();
+  const add = (text) => {
+    const k = c08IdKey(text);
+    if (looksLikePlateKey(k) && !labels.has(k)) labels.set(k, text.trim());
+  };
+  String(raw || '').split(/[\r\n\t,;]+/).forEach(tok => {
+    const t = tok.trim().replace(/^"+|"+$/g, '');
+    if (!t) return;
+    const pieces = t.split(/\s+/);
+    if (pieces.length > 1 && pieces.every(p => c08IdKey(p).length >= 6 && looksLikePlateKey(c08IdKey(p)))) pieces.forEach(add);
+    else add(t);
+  });
+  return labels;
+}
+function setPlateFilter(raw) {
+  const labels = parsePlateList(raw);
+  state.plateFilter = { raw: String(raw || ''), keys: new Set(labels.keys()), labels };
+}
+function clearPlateFilter() {
+  setPlateFilter('');
+  const ta = $('#plateFilterInput');
+  if (ta) ta.value = '';
+}
+// Vẽ lại dòng trạng thái + nút xóa (KHÔNG ghi đè ô nhập khi người dùng đang gõ/dán trong đó).
+function renderPlateFilter() {
+  const wrap = $('#plateFilterWrap');
+  if (!wrap) return;
+  const pf = state.plateFilter;
+  const ta = $('#plateFilterInput'), status = $('#plateFilterStatus'), btn = $('#btnClearPlateFilter');
+  if (ta && document.activeElement !== ta && ta.value !== pf.raw) ta.value = pf.raw;
+  if (btn) btn.disabled = !pf.raw.trim();
+  wrap.classList.toggle('has-values', pf.keys.size > 0);
+  if (!status) return;
+  status.title = '';
+  status.classList.remove('warn');
+  if (!pf.raw.trim()) { status.textContent = 'Chưa dán danh sách.'; return; }
+  if (!pf.keys.size) {
+    status.textContent = 'Không nhận diện được biển số nào trong nội dung đã dán.';
+    status.classList.add('warn');
+    return;
+  }
+  const found = new Set(); let matched = 0;
+  state.rawData.forEach(r => { const k = plateKeyOfRow(r); if (pf.keys.has(k)) { found.add(k); matched++; } });
+  const missing = Array.from(pf.keys).filter(k => !found.has(k));
+  const shown = getFiltered(null).length;   // đã gồm cả các bộ lọc/loại trừ khác đang bật
+  let text = `Nhận diện ${pf.keys.size} biển số · khớp ${matched} xe`;
+  if (shown < matched) text += ` · đang hiện ${shown} (còn lại bị ẩn bởi bộ lọc/loại trừ khác)`;
+  if (missing.length) {
+    text += ` · ${missing.length} biển không có trong dữ liệu`;
+    status.title = 'Không tìm thấy: ' + missing.slice(0, 30).map(k => pf.labels.get(k) || k).join(', ') + (missing.length > 30 ? ', …' : '');
+  }
+  status.textContent = text;
+  if (missing.length || shown < matched) status.classList.add('warn');
+}
+(function bindPlateFilter() {
+  const ta = $('#plateFilterInput');
+  if (!ta) return;
+  let timer = null;
+  const apply = () => { setPlateFilter(ta.value); state.page = 1; refreshFilterUIs(); renderTable(); };
+  // Dán / gõ / sửa -> áp dụng tự động sau 300ms (gộp nhiều lần gõ liên tiếp; dán danh sách lớn vẫn mượt).
+  ta.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(apply, 300); });
+  const btn = $('#btnClearPlateFilter');
+  if (btn) btn.addEventListener('click', () => {
+    clearTimeout(timer);
+    clearPlateFilter();
+    state.page = 1; refreshFilterUIs(); renderTable();
+  });
+})();
 
 /* ------------------- 6c. THANH SẮP XẾP + LỌC BỔ SUNG + XUẤT EXCEL --------- */
 // Yêu cầu 2A: vẽ danh sách tiêu chí sắp xếp đang chọn (kéo thêm được nhiều

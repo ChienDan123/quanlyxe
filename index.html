@@ -291,6 +291,16 @@
       <label>Biển số</label>
       <div class="ms-control" data-field="bienSo"></div>
     </div>
+    <!-- Lọc theo DANH SÁCH BIỂN SỐ: dán cột biển số copy từ Excel (xem 6b-3 trong app.js). -->
+    <div class="filter-field plate-filter-wrap" id="plateFilterWrap">
+      <label for="plateFilterInput">Lọc theo danh sách biển số <span class="plate-hint">(dán từ Excel)</span></label>
+      <textarea id="plateFilterInput" class="plate-filter-input" rows="2" spellcheck="false" autocomplete="off"
+        placeholder="Copy cột biển số trong Excel rồi dán (Ctrl+V) vào đây — mỗi dòng/ô một biển số"></textarea>
+      <div class="plate-filter-foot">
+        <span id="plateFilterStatus" class="plate-filter-status">Chưa dán danh sách.</span>
+        <button type="button" id="btnClearPlateFilter" class="btn btn-ghost btn-sm" disabled title="Bỏ bộ lọc theo danh sách biển số">Xóa danh sách</button>
+      </div>
+    </div>
     <div class="filter-field" data-field="cccd">
       <label>Số CCCD/MST</label>
       <div class="ms-control" data-field="cccd"></div>

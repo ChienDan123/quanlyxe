@@ -21,6 +21,7 @@
     try {
       if (id === 'filterBar') {
         return Object.values(state.filters).reduce((n, set) => n + set.size, 0) + (state.quickDiaBan ? 1 : 0)
+          + (state.plateFilter && state.plateFilter.keys.size ? 1 : 0)   // lọc theo danh sách biển số dán từ Excel
           + (window.ScanHooks && window.ScanHooks.activeCount ? window.ScanHooks.activeCount() : 0); // lọc theo phiếu scan
       }
       if (id === 'sortBar') return (state.sortCriteria || []).length;

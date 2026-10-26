@@ -129,6 +129,16 @@ input,select,textarea{font-family:inherit;font-size:14px;}
   resize:horizontal;overflow:auto;width:100%;min-width:190px;max-width:900px;
 }
 
+/* Lọc theo danh sách biển số dán từ Excel */
+.filter-field.plate-filter-wrap{flex:1 1 300px;}
+.filter-field label .plate-hint{text-transform:none;font-weight:400;}
+.plate-filter-input{width:100%;box-sizing:border-box;min-height:36px;max-height:160px;resize:vertical;border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;font-family:inherit;background:#fff;}
+.plate-filter-input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 2px rgba(30,95,191,.12);}
+.plate-filter-wrap.has-values .plate-filter-input{border-color:var(--primary);background:var(--highlight);}
+.plate-filter-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+.plate-filter-status{font-size:12px;color:var(--text-muted);}
+.plate-filter-status.warn{color:var(--warn);}
+
 /* Lọc theo Chuyên đề: tên chuyên đề dài -> ô rộng hơn, chip được phép xuống dòng thay vì tràn. */
 .filter-field[data-field="chuyenDe"]{flex:1 1 280px;}
 .filter-field[data-field="chuyenDe"] .ms-chip{white-space:normal;max-width:100%;}
