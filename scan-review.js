@@ -392,6 +392,14 @@ const ScanReview = (() => {
 
   // Giá trị CHÍNH XÁC sẽ ghi khi người dùng chọn «Dữ liệu từ phiếu scan đúng» — luôn lấy từ PHIẾU, không lấy lại giá trị Sheet cũ.
   // (Ghi chú là ngoại lệ: luôn NỐI THÊM, không ghi đè.)
+  // ---- CCCD: Excel hay bỏ số 0 đầu (012…→12…): 11 số vs 12 số chỉ khác số 0 đầu là CÙNG MỘT SỐ, không phải sửa đổi ----
+  const isCccdKey = (key) => key === 'cccd' || key === 'nguoiSuDungCccd' || key === 'nguoiMuaCccd';
+  const cccdSameLZ = (a, b) => {
+    const x = String(a == null ? '' : a).replace(/[\s.'`]/g, ''), y = String(b == null ? '' : b).replace(/[\s.'`]/g, '');
+    if (!x || !y || !/^\d+$/.test(x) || !/^\d+$/.test(y)) return false;
+    const pad = (d) => d.length === 11 ? '0' + d : d;                 // 11 số (mất số 0 đầu) -> bù lại 12 số
+    return pad(x) === pad(y);
+  };
   function exactScanValue(key, sv, c) {
     const s0 = String(sv == null ? '' : sv).trim();
     if (key === 'cccd' || key === 'nguoiSuDungCccd' || key === 'nguoiMuaCccd') return (c && c.newVal != null) ? c.newVal : s0.replace(/\D/g, '');
@@ -419,8 +427,9 @@ const ScanReview = (() => {
       // Chủ xe đã đánh dấu « (Đã chết)» trên Sheet: bỏ hậu tố khi so sánh để không báo khác biệt giả
       const deadSuffix = key === 'chuXe' && isDead(dsv), dsvCmp = deadSuffix ? stripDead(dsv) : dsv;
       let c = spec.cmp(sv, dsvCmp);
+      if (isCccdKey(key) && cccdSameLZ(sv, dsvCmp)) c = { state: 'same' };   // chỉ khác số 0 đầu (Excel) -> coi là KHỚP, không ghi / không đánh dấu đã sửa
       // Đã chọn «phiếu đúng» nhưng hàm so sánh coi là khớp (lệch số 0 đầu / dấu / thiếu số cuối...) -> vẫn phải ghi đúng giá trị phiếu
-      if (srcSel === 'scan' && c.state === 'same' && key !== 'ghiChu' && String(sv).trim() && exactScanValue(key, sv, c) !== String(dsvCmp).trim())
+      if (srcSel === 'scan' && c.state === 'same' && key !== 'ghiChu' && String(sv).trim() && !(isCccdKey(key) && cccdSameLZ(sv, dsvCmp)) && exactScanValue(key, sv, c) !== String(dsvCmp).trim())
         c = { state: 'diff', newVal: exactScanValue(key, sv, c), defaultDecision: 'apply', note: 'Bạn chọn lấy từ phiếu: sẽ ghi đúng giá trị trên phiếu thay cho giá trị Sheet' };
       let dec = it.decisions[key] || null;                              // quyết định người dùng đã chọn (nếu có)
       // Người dùng đã sửa giá trị bên Sheet (khác giá trị gốc) -> trường này là "sửa Sheet"
@@ -539,7 +548,8 @@ const ScanReview = (() => {
     if (prefs.tag && fromScan.length) toWrite.ghiChu = withSourceTag(('ghiChu' in toWrite) ? toWrite.ghiChu : row.ghiChu, fromScan);
     // GIỮ DỮ LIỆU CŨ: trường lấy từ phiếu mà Sheet ĐANG CÓ giá trị khác -> ghi giá trị cũ vào Ghi chú (luôn bật, không phụ thuộc dấu 📷)
     const olds = v.fields.filter(f => willWrite(f) && f.decision === 'apply' && !f.spec.meta && f.spec.key !== 'ghiChu' && (!onlyKeys || onlyKeys.includes(f.spec.key))
-      && String(f.dsVal || '').trim() && String(f.dsVal).trim() !== String(f.writeVal).trim())
+      && String(f.dsVal || '').trim() && String(f.dsVal).trim() !== String(f.writeVal).trim()
+      && !(isCccdKey(f.spec.key) && cccdSameLZ(f.dsVal, f.writeVal)))   // CCCD chỉ khác số 0 đầu: không ghi «Trước cập nhật»
       .map(f => ({ label: TAG_LABEL[f.spec.key] || f.spec.label, old: f.dsVal }));
     if (olds.length) toWrite.ghiChu = withOldValues(('ghiChu' in toWrite) ? toWrite.ghiChu : row.ghiChu, olds);
     // Còn trường chưa giải quyết? ('later' hoặc đã chọn ghi nhưng chưa áp dụng vì chỉ áp dụng 1 phần)
@@ -2159,7 +2169,7 @@ const ScanReview = (() => {
     if (!blob) return `<div class="rv-pg" data-page="${page}"><div class="rv-pg-label">${label}</div><div class="sv-empty">Không có ${escapeHtml(label.toLowerCase())}.</div></div>`;
     const url = URL.createObjectURL(blob); urls.push(url);
     const media = mime === 'application/pdf' ? `<iframe class="rv-pg-pdf" src="${url}" title="${escapeHtml(label)}"></iframe>`
-      : `<img class="rv-pg-img" src="${url}" alt="${escapeHtml(label)}" title="Bấm vào ảnh để chuyển tới xe · kéo để dời ảnh · nhấp đúp để phóng to / thu nhỏ"><div class="rv-boxes" aria-hidden="true"></div>`;
+      : `<div class="rv-pg-wrap"><img class="rv-pg-img" src="${url}" alt="${escapeHtml(label)}" title="Bấm vào ảnh để chuyển tới xe · kéo để dời ảnh · nhấp đúp để phóng to / thu nhỏ"><div class="rv-boxes" aria-hidden="true"></div></div>`;   // lớp khung nằm TRONG wrap (position:relative) nên luôn dính theo ảnh khi kéo / phóng
     const rot = (window.ScanRotate && mime !== 'application/pdf') ? ScanRotate.buttonsHtml(page) : '';   // nút xoay RIÊNG từng mặt (scan-rotate.js)
     return `<div class="rv-pg" data-page="${page}"><div class="rv-pg-label">${label} <a class="btn btn-ghost btn-sm" href="${url}" target="_blank" rel="noopener">↗ Mở tab mới</a>${rot}</div>${media}</div>`;
   }
@@ -2222,8 +2232,8 @@ const ScanReview = (() => {
     document.querySelectorAll('#rvImgBody .rv-pg').forEach(pg => {
       const img = pg.querySelector('.rv-pg-img'), layer = pg.querySelector('.rv-boxes'); if (!img || !layer) return;
       if (!img.complete || !img.naturalWidth) { ready = false; img.addEventListener('load', layoutBoxes, { once: true }); return; }
-      layer.style.left = img.offsetLeft + 'px'; layer.style.top = img.offsetTop + 'px';
-      layer.style.width = img.offsetWidth + 'px'; layer.style.height = img.offsetHeight + 'px';
+      // Lớp khung đã phủ kín wrap (CSS: absolute, 100%×100%) và khung xe tính theo % → không cần đặt px, tự theo ảnh khi kéo / phóng.
+      layer.style.left = layer.style.top = layer.style.width = layer.style.height = '';
     });
     if (ready && p.pendingScroll) { const id = p.pendingScroll; p.pendingScroll = null; scrollImageToItem(id); }
   }

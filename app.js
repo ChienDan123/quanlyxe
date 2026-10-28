@@ -1132,6 +1132,7 @@ function processRows(rows, opts) {
   // trong hàng đợi đồng bộ ngầm -> áp lại các thay đổi đó NGAY trên dữ liệu
   // vừa tải, để không bị "trồi ngược" về giá trị cũ trên giao diện.
   reapplyPendingSyncToRawData();
+  cleanupLeadingZeroCccdTraces();       // gỡ dấu vết «sửa CCCD» giả do Excel bỏ số 0 đầu (dữ liệu cũ)
   normalizeAllCccdFromConfirmNotes();   // chuẩn hoá Số CCCD/MST theo ghi chú «Đã xác nhận thuộc về…»
 
   state.filters = Object.fromEntries(FILTER_FIELDS.map(f => [f, new Set()]));
@@ -2093,7 +2094,12 @@ function c08IsCccd12(v) {
 // Kiểm tra trên văn bản GỐC (chưa lọc), vì dấu vết có thể nằm trong đoạn 📷 sẽ bị lọc khỏi Ghi chú.
 function c08IsIdentityUpdated(row) {
   const raw = [row.trangThaiXe, row.ghiChu, row.ketQuaPhieu].join(' ; ').normalize('NFC');
-  return C08_TRACE_DETECT.test(stripDiacritics(raw)) && c08IsCccd12(row.cccd);
+  const plain = stripDiacritics(raw);
+  if (!C08_TRACE_DETECT.test(plain) || !c08IsCccd12(row.cccd)) return false;
+  // Lấy các «CCCD=số cũ» trong dấu vết: chỉ tính là đã cập nhật nếu số cũ KHÁC số hiện tại (bỏ qua chênh lệch số 0 đầu do Excel)
+  const olds = [];
+  plain.replace(/(?:truoc cap nhat[^:|]*:|;)\s*cccd\s*=\s*([^;|]*)/g, (s0, v) => { olds.push(v); return s0; });
+  return olds.length ? olds.some(o => !cccdSameLZ(o, row.cccd)) : true;
 }
 
 // Tên người sử dụng / người mua của xe (4 cột «Người sử dụng xe - …» ở Tong hop). Tên khoá nội bộ do
@@ -3397,6 +3403,80 @@ function saveCccdNormMap(map) {
   try { localStorage.setItem(CCCD_NORM_KEY, JSON.stringify(map)); } catch (e) { /* đầy bộ nhớ -> bỏ qua */ }
 }
 function cccdCompact(v) { return (v == null ? '' : String(v)).replace(/[\s.'`]/g, ''); }
+// Excel hay bỏ số 0 đầu của CCCD (012…→12…): 11 số vs 12 số chỉ khác số 0 đầu là CÙNG MỘT SỐ -> KHÔNG phải sửa đổi.
+function cccdSameLZ(a, b) {
+  const x = cccdCompact(a), y = cccdCompact(b);
+  if (!x || !y || !/^\d+$/.test(x) || !/^\d+$/.test(y)) return false;
+  const pad = (d) => d.length === 11 ? '0' + d : d;              // 11 số (mất số 0 đầu) -> bù lại 12 số
+  return pad(x) === pad(y);
+}
+// Gỡ dấu vết «đã sửa CCCD» sai trong Ghi chú / Kết quả phiếu của 1 dòng (số cũ chỉ khác số 0 đầu so với Số CCCD/MST hiện tại).
+// Trả { note, result, changed }. Chạy lại nhiều lần không đổi gì thêm.
+function stripLeadingZeroCccdTrace(note, result, cur) {
+  let changed = false;
+  const dates = new Set();
+  const parts = String(note || '').split('|');
+  const kept = [];
+  parts.forEach(seg => {
+    const m = seg.match(/^(\s*)⏪Trước cập nhật từ phiếu (\d{1,2}\/\d{1,2}):\s*([\s\S]*?)\s*$/);
+    if (!m) { kept.push(seg); return; }
+    const pairs = m[3].split(';').map(x => x.trim()).filter(Boolean);
+    const rest = pairs.filter(pr => {
+      const c = pr.match(/^CCCD\s*=\s*(.*)$/i);
+      return !(c && cccdSameLZ(c[1], cur));                      // «CCCD=số cũ» trùng số hiện tại (chỉ lệch số 0 đầu) -> bỏ
+    });
+    if (rest.length === pairs.length) { kept.push(seg); return; }
+    changed = true; dates.add(m[2]);
+    if (rest.length) kept.push(`${m[1]}⏪Trước cập nhật từ phiếu ${m[2]}: ${rest.join('; ')} `);
+  });
+  // Dấu nguồn «📷Phiếu dd/mm: CCCD, SĐT» cùng ngày: bỏ nhãn CCCD (giữ các trường khác như SĐT / Cam kết)
+  const out = [];
+  kept.forEach(seg => {
+    const m = seg.match(/^(\s*)📷Phiếu (\d{1,2}\/\d{1,2}):\s*([\s\S]*?)\s*$/);
+    if (!m || !dates.has(m[2])) { out.push(seg); return; }
+    const labels = m[3].split(',').map(x => x.trim()).filter(Boolean), rest = labels.filter(x => x.toUpperCase() !== 'CCCD');
+    if (rest.length === labels.length) { out.push(seg); return; }
+    changed = true;
+    if (rest.length) out.push(`${m[1]}📷Phiếu ${m[2]}: ${rest.join(', ')} `);
+  });
+  let n = out.map(x => x.trim()).filter(Boolean).join(' | ');
+  // Dạng «CCCD trước khi cập nhật: [số cũ]» mà số cũ ≡ số hiện tại -> khôi phục «CCCD [số]» (thực ra chưa đổi gì)
+  n = n.replace(/CCCD trước khi cập nhật:\s*(\d[\d .]*\d)/g, (s0, old) => {
+    if (!cccdSameLZ(old, cur)) return s0;
+    changed = true; return 'CCCD ' + cccdCompact(cur);
+  });
+  let r = String(result || '');
+  if (changed && /Đã cập nhật từ phiếu:/.test(r)) {             // «Đã cập nhật từ phiếu: CCCD, SĐT» -> bỏ nhãn CCCD
+    r = r.replace(/(Đã cập nhật từ phiếu:\s*)([^·]*)/, (s0, h, list) => {
+      const labs = list.split(',').map(x => x.trim()).filter(Boolean), rest = labs.filter(x => x.toUpperCase() !== 'CCCD');
+      return rest.length ? h + rest.join(', ') + ' ' : '';
+    }).replace(/\s*·\s*·\s*/g, ' · ').replace(/^\s*·\s*|\s*·\s*$/g, '').trim();
+  }
+  return { note: changed ? n : String(note || ''), result: changed ? r : String(result || ''), changed };
+}
+// Rà TOÀN BỘ dữ liệu đã làm trước đó: gỡ dấu vết «đã sửa CCCD» giả do Excel bỏ số 0 đầu, đồng bộ lại lên Sheet. Trả số xe được sửa.
+function cleanupLeadingZeroCccdTraces() {
+  const map = loadCccdNormMap(), items = [];
+  let mapChanged = false;
+  state.rawData.forEach(row => {
+    if (!row.cccd) return;
+    const mk = map[vehicleKey(row)];
+    if (mk && cccdSameLZ(mk.prev, mk.num)) { delete map[vehicleKey(row)]; mapChanged = true; }   // lần «chuẩn hoá» cũ thực ra chỉ lệch số 0
+    if (!row.ghiChu) return;
+    const r = stripLeadingZeroCccdTrace(row.ghiChu, row.ketQuaPhieu, row.cccd);
+    if (!r.changed) return;
+    const upd = { 'Ghi Chú': r.note };
+    row.ghiChu = r.note;
+    if (r.result !== String(row.ketQuaPhieu || '')) { row.ketQuaPhieu = r.result; upd['Kết quả đối chiếu phiếu'] = r.result; }
+    items.push({ row, updates: upd });
+  });
+  if (mapChanged) saveCccdNormMap(map);
+  if (!items.length) return 0;
+  enqueueRowSyncBulk(items);
+  persistRawDataToCache();
+  try { toast(`Đã gỡ dấu vết «sửa CCCD» giả (chỉ lệch số 0 đầu) cho ${items.length} xe.`); } catch (e) { /* bỏ qua */ }
+  return items.length;
+}
 // 1 = CCCD (12 số / 11 số) · 2 = CMND 9 số 205|206 · 3 = số khác · 0 = không phải dãy số thuần
 function cccdTier(v) {
   const d = cccdCompact(v);
@@ -3464,7 +3544,7 @@ function planCccdFromConfirmNote(row, force) {
   const f = cccdFromConfirmNote(row.ghiChu);
   if (!f) return null;
   const cur = cccdCompact(row.cccd);
-  if (cur === f.num) return null;                                // đã đúng
+  if (cur === f.num || cccdSameLZ(cur, f.num)) return null;      // đã đúng (kể cả chỉ lệch số 0 đầu do Excel)
   if (f.tier === 3) { if (!CCCD_ALLOW_TIER3_FILL || cur) return null; }   // nhóm 3: chỉ điền ô trống
   else {
     const curRank = !cur ? 9 : (cccdTier(cur) || 8);             // trống 9 · chữ/không phải số 8 · còn lại 1..3
@@ -4920,6 +5000,7 @@ async function applyPublishedGasUrl() {
     if (Array.isArray(cached) && cached.length) {
       state.rawData = cached;
       reapplyPendingSyncToRawData();
+      cleanupLeadingZeroCccdTraces();
       normalizeAllCccdFromConfirmNotes();
       restoreFilterState();
       state.exportSelected = new Set();

@@ -88,6 +88,8 @@ textarea.rv-edit { resize: vertical; }
 .rv-imgpane-body { --z: 100; flex: 1; overflow: auto; padding: 6px; }
 .rv-pg { margin-bottom: 10px; }
 .rv-pg-label { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+.rv-pg-wrap { position: relative; width: calc(var(--z) * 1%); }
+.rv-pg-wrap > .rv-pg-img { width: 100%; }
 .rv-pg-img { width: calc(var(--z) * 1%); max-width: none; display: block; cursor: zoom-in; border: 1px solid #d1d5db; }
 .rv-pg-pdf { width: calc(var(--z) * 1%); height: 60vh; border: 0; }
 .rv-imgpane-body[data-mode="side1"] .rv-pg:nth-child(2) { display: none; }
@@ -187,3 +189,15 @@ textarea.rv-edit { resize: vertical; }
 .rv-modal .modal-body::-webkit-scrollbar-track { background: #e5e7eb; border-radius: 7px; }
 .rv-modal .modal-body::-webkit-scrollbar-thumb { background: #6366f1; border-radius: 7px; border: 2px solid #e5e7eb; }
 .rv-modal .modal-body::-webkit-scrollbar-thumb:hover { background: #4338ca; }
+
+/* ---- Khung xe + nhãn biển số trên ảnh: nằm TRONG ảnh, dính theo khung của từng xe (tọa độ %) ---- */
+.rv-boxes { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+.rv-box { position: absolute; box-sizing: border-box; border: 2px solid #e67e00; border-radius: 3px; pointer-events: auto; cursor: pointer; }
+.rv-box.cur { border-color: #d11; box-shadow: 0 0 0 2px rgba(221,17,17,.25); }
+.rv-box-tag { position: absolute; left: 2px; top: 2px; max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 5px; font-size: 11px; line-height: 16px; font-weight: 700; color: #fff; background: #e67e00; border-radius: 3px; }
+.rv-box.cur .rv-box-tag { background: #d11; }
+.rv-box.pulse { animation: rvPulse 1.2s ease-out 2; }
+@keyframes rvPulse { 0% { box-shadow: 0 0 0 0 rgba(221,17,17,.7); } 100% { box-shadow: 0 0 0 14px rgba(221,17,17,0); } }
+.rv-chooser { position: fixed; z-index: 9999; display: flex; flex-direction: column; gap: 4px; padding: 8px; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.2); }
+.rv-flash { animation: rvFlash 1.4s ease-out 1; }
+@keyframes rvFlash { 0% { background: #fff3b0; } 100% { background: transparent; } }
