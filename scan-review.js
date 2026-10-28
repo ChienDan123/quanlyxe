@@ -307,12 +307,19 @@ const ScanReview = (() => {
   /* ------------------------------------------------------------------ */
   /* 3. TÍNH TOÁN "KHUNG NHÌN" SO SÁNH CHO 1 MỤC                          */
   /* ------------------------------------------------------------------ */
+  // Vị trí nhãn biển số (đỏ/cam) trên ảnh do người dùng tự kéo: id mục -> {l, t} (% so với khung xe → phóng/thu ảnh vẫn đúng chỗ)
+  const TAGPOS_KEY = 'vehicleScanTagPosV1';
+  function loadTagPos() { try { return new Map(Object.entries(JSON.parse(localStorage.getItem(TAGPOS_KEY) || '{}'))); } catch (e) { return new Map(); } }
+  function saveTagPos() { try { localStorage.setItem(TAGPOS_KEY, JSON.stringify(Object.fromEntries([...R.pane.tagPos].slice(-400)))); } catch (e) { /* bỏ qua */ } }
   // Trạng thái màn hình (khai báo sớm vì computeView/preview đều dùng)
   const R = {
     items: [], filter: 'review', checker: '', search: '', page: 1, pageSize: 12, busy: false, listIds: [],
     // Khung ảnh phiếu đặt cạnh bảng so sánh (vừa xem ảnh vừa đối chiếu)
     pane: { open: false, id: null, loadedId: null, loadedScan: null, mode: 'both', zoom: 100, urls: [], token: 0,
-      regions: new Map(), pendingScroll: null, ro: null },   // regions: itemId -> vùng xe trên mặt 1 (0..1); pendingScroll: cuộn ảnh tới xe này khi ảnh tải xong
+      regions: new Map(), pendingScroll: null, ro: null,
+      // tagPos: vị trí nhãn đã kéo · userPanned: người dùng tự kéo/cuộn ảnh (khác với ảnh tự cuộn tới xe) · progUntil: mốc giờ tới lúc đó
+      // mọi cuộn là do chương trình · focusedId: xe được focus lần gần nhất · dragging: đang kéo nhãn
+      tagPos: loadTagPos(), userPanned: false, progUntil: 0, focusedId: null, dragging: false },   // regions: itemId -> vùng xe trên mặt 1 (0..1); pendingScroll: cuộn ảnh tới xe này khi ảnh tải xong
   };
   // Tùy chọn của người dùng (nhớ trên máy): người thực hiện mặc định, ghi dấu 📷, xác nhận nhanh = áp dụng luôn
   const PREF_KEY = 'vehicleScanPrefsV1';
@@ -2179,7 +2186,7 @@ const ScanReview = (() => {
     const b = e.target.closest('[data-rot]'); if (!b || !window.ScanRotate) return;
     const [page, deg] = b.dataset.rot.split(':').map(Number), it = R.items.find(i => i.id === R.pane.id); if (!it) return;
     const btns = document.querySelectorAll('#rvImgBody [data-rot]'); btns.forEach(x => { x.disabled = true; });
-    try { await ScanRotate.rotate(it.scanId, page, deg); await renderPane(true); }   // nạp lại ảnh + khung xe (vùng đã quy đổi theo góc xoay)
+    try { await ScanRotate.rotate(it.scanId, page, deg); resetTagPos(it.scanId); await renderPane(true); }   // nạp lại ảnh + khung xe (vùng đã quy đổi theo góc xoay)
     catch (err) { btns.forEach(x => { x.disabled = false; }); toast('Không xoay được ảnh: ' + (err.message || err), true); }
   }
   // Phiếu cũ chưa kiểm hướng: nhờ Gemini nhận hướng (nền, 1 lần / phiếu) rồi nạp lại ảnh nếu có xoay
@@ -2188,7 +2195,7 @@ const ScanReview = (() => {
     const info = $('#rvImgInfo'); if (info) info.insertAdjacentHTML('beforeend', ' <span id="rvRotNote" class="hint">⏳ Đang nhận hướng ảnh…</span>');
     const r = await ScanRotate.autoOrient(rec.id);
     const note = $('#rvRotNote'); if (note) note.remove();
-    if (r && r.changed && R.pane.open && R.pane.loadedScan === rec.id) { await renderPane(true); toast('Đã tự xoay ảnh phiếu cho đúng chiều (có thể chỉnh lại bằng nút xoay).'); }
+    if (r && r.changed && R.pane.open && R.pane.loadedScan === rec.id) { resetTagPos(rec.id); await renderPane(true); toast('Đã tự xoay ảnh phiếu cho đúng chiều (có thể chỉnh lại bằng nút xoay).'); }
   }
 
   /* ---- BẤM ẢNH ↔ XE ----
@@ -2220,7 +2227,8 @@ const ScanReview = (() => {
       const layer = pg.querySelector('.rv-boxes'); if (!layer) return;
       layer.innerHTML = pg.dataset.page === '1' ? [...p.regions].map(([id, r]) => {
         const it = R.items.find(i => i.id === id); if (!it) return '';
-        return `<div class="rv-box ${id === p.id ? 'cur' : ''}" data-box="${escapeHtml(id)}" style="left:${r.x0 * 100}%;top:${r.y0 * 100}%;width:${(r.x1 - r.x0) * 100}%;height:${(r.y1 - r.y0) * 100}%" title="Bấm để chuyển tới xe ${escapeHtml(it.bienSoRaw || '')}"><span class="rv-box-tag">${boxLabel(it)}</span></div>`;
+        const tp = p.tagPos.get(id);   // nhãn đã được người dùng kéo tới chỗ khác
+        return `<div class="rv-box ${id === p.id ? 'cur' : ''}" data-box="${escapeHtml(id)}" style="left:${r.x0 * 100}%;top:${r.y0 * 100}%;width:${(r.x1 - r.x0) * 100}%;height:${(r.y1 - r.y0) * 100}%" title="Bấm để chuyển tới xe ${escapeHtml(it.bienSoRaw || '')}"><span class="rv-box-tag${tp ? ' moved' : ''}"${tp ? ` style="left:${tp.l}%;top:${tp.t}%"` : ''} title="Kéo để dời nhãn tránh che chữ · nhấp đúp để về chỗ cũ">${boxLabel(it)}</span></div>`;
       }).join('') : '';
     });
     layoutBoxes();
@@ -2236,9 +2244,11 @@ const ScanReview = (() => {
       layer.style.left = layer.style.top = layer.style.width = layer.style.height = '';
     });
     if (ready && p.pendingScroll) { const id = p.pendingScroll; p.pendingScroll = null; scrollImageToItem(id); }
+    followTag();
   }
   function markBoxes() {
     document.querySelectorAll('#rvImgBody .rv-box').forEach(b => b.classList.toggle('cur', b.dataset.box === R.pane.id));
+    followTag();
   }
   // Cuộn khung ảnh tới đúng vị trí xe (và nháy khung cho dễ thấy)
   function scrollImageToItem(id) {
@@ -2252,10 +2262,108 @@ const ScanReview = (() => {
       const bb = box.getBoundingClientRect(), r = body.getBoundingClientRect();
       const top = body.scrollTop + (bb.top - r.top) - Math.max(12, (body.clientHeight - bb.height) / 2);
       const left = body.scrollLeft + (bb.left - r.left) - Math.max(12, (body.clientWidth - bb.width) / 2);
+      p.userPanned = false; markProg(1200);                 // cuộn tự động tới xe: chưa phải do người dùng kéo
       body.scrollTo({ top: Math.max(0, top), left: Math.max(0, left), behavior: 'smooth' });
+      followTag();
       box.classList.remove('pulse'); void box.offsetWidth; box.classList.add('pulse');
     });
     return true;
+  }
+  /* ---- NHÃN BIỂN SỐ TRÊN ẢNH: kéo dời · chạy theo khi kéo ảnh · hành vi cuộn ảnh / danh sách ---- */
+  const markProg = (ms) => { R.pane.progUntil = Date.now() + ms; };   // trong khoảng này mọi sự kiện scroll coi như do chương trình gây ra
+  function resetTagPos(scanId) {                                       // ảnh vừa xoay → vị trí nhãn cũ không còn đúng
+    itemsOfScan(scanId).forEach(i => R.pane.tagPos.delete(i.id)); saveTagPos();
+  }
+  // (1) Kéo nhãn biển số tới chỗ không che chữ. Chạm nhẹ (không kéo) vẫn là «bấm khung xe» như cũ; nhấp đúp = đặt lại vị trí gốc.
+  function enableTagDrag(body) {
+    if (!body) return;
+    let st = null, lastDrag = 0;
+    body.addEventListener('pointerdown', (e) => {
+      const tag = e.target.closest && e.target.closest('.rv-box-tag');
+      if (!tag || e.button !== 0) return;
+      const box = tag.closest('.rv-box'), wrap = tag.closest('.rv-pg-wrap'); if (!box || !wrap) return;
+      e.stopPropagation();                                              // không để enablePan kéo cả ảnh
+      const tr = tag.getBoundingClientRect();                           // đo vị trí đang NHÌN THẤY (đã gồm độ lệch «chạy theo»)
+      st = { tag, box, wrap, id: box.dataset.box, pid: e.pointerId, x: e.clientX, y: e.clientY, gx: e.clientX - tr.left, gy: e.clientY - tr.top, w: tr.width, h: tr.height, moved: false, l: 0, t: 0 };
+    }, true);
+    body.addEventListener('pointermove', (e) => {
+      if (!st || e.pointerId !== st.pid) return;
+      if (!st.moved) {
+        if (Math.hypot(e.clientX - st.x, e.clientY - st.y) < 4) return;   // chưa đủ xa = vẫn là cú bấm
+        st.moved = true; R.pane.dragging = true;
+        st.tag.classList.add('dragging', 'moved'); st.tag.style.transform = '';
+        try { st.tag.setPointerCapture(st.pid); } catch (err) { /* bỏ qua */ }
+      }
+      const wr = st.wrap.getBoundingClientRect(), br = st.box.getBoundingClientRect();
+      // Giữ nhãn trong phạm vi tấm ảnh
+      const vx = Math.min(Math.max(e.clientX - st.gx, wr.left), Math.max(wr.left, wr.right - st.w));
+      const vy = Math.min(Math.max(e.clientY - st.gy, wr.top), Math.max(wr.top, wr.bottom - st.h));
+      // Đổi sang % so với khung xe (vùng padding của .rv-box) để phóng/thu ảnh vẫn giữ đúng chỗ
+      st.l = Math.round((vx - (br.left + st.box.clientLeft)) / st.box.clientWidth * 1e4) / 100;
+      st.t = Math.round((vy - (br.top + st.box.clientTop)) / st.box.clientHeight * 1e4) / 100;
+      st.tag.style.left = st.l + '%'; st.tag.style.top = st.t + '%';
+      e.preventDefault();
+    });
+    const end = (e) => {
+      if (!st || (e && e.pointerId !== st.pid)) return;
+      const s = st; st = null; R.pane.dragging = false; s.tag.classList.remove('dragging');
+      try { s.tag.releasePointerCapture(s.pid); } catch (err) { /* bỏ qua */ }
+      if (!s.moved) return;
+      lastDrag = Date.now();
+      R.pane.tagPos.delete(s.id); R.pane.tagPos.set(s.id, { l: s.l, t: s.t }); saveTagPos();
+      followTag();
+    };
+    body.addEventListener('pointerup', end); body.addEventListener('pointercancel', end);
+    // Thả chuột sau khi kéo nhãn không được tính là «bấm khung xe»
+    body.addEventListener('click', (e) => {
+      if (Date.now() - lastDrag < 300 && e.target.closest && e.target.closest('.rv-box-tag')) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+    body.addEventListener('dblclick', (e) => {
+      const tag = e.target.closest && e.target.closest('.rv-box-tag'), box = tag && tag.closest('.rv-box'); if (!box) return;
+      e.stopPropagation();
+      R.pane.tagPos.delete(box.dataset.box); saveTagPos();
+      tag.classList.remove('moved'); tag.style.left = tag.style.top = ''; tag.style.transform = '';
+      followTag();
+    }, true);
+  }
+  // (2) Nhãn của xe đang xem CHẠY THEO: khi người dùng kéo ảnh sang phải/xuống để đọc thông tin xe, nhãn không trôi ra ngoài khung nhìn —
+  // nó dịch vào phần giao giữa «khung xe» và «vùng đang nhìn thấy» (không trôi sang vùng của xe khác). Nhãn còn nằm trọn trong vùng nhìn thì giữ nguyên vị trí người dùng đặt.
+  let _followRaf = 0;
+  function followTag() { if (_followRaf) return; _followRaf = requestAnimationFrame(() => { _followRaf = 0; applyFollow(); }); }
+  function shiftInto(pos, size, bMin, bMax, vMin, vMax) {              // độ dịch cần thiết trên 1 trục
+    let lo = Math.max(bMin, vMin), hi = Math.min(bMax, vMax);
+    if (lo >= hi) { if (bMax <= vMin) { lo = vMin; hi = vMin + size; } else { hi = vMax; lo = vMax - size; } }   // khung xe nằm hẳn ngoài vùng nhìn → bám mép gần nhất
+    const target = (hi - lo) >= size ? Math.min(Math.max(pos, lo), hi - size) : lo;
+    return target - pos;
+  }
+  function applyFollow() {
+    const p = R.pane, body = $('#rvImgBody'); if (!p.open || !body || p.dragging) return;
+    body.querySelectorAll('.rv-box-tag.following').forEach(t => { t.style.transform = ''; t.classList.remove('following'); });   // bỏ độ lệch cũ để đo vị trí gốc
+    const box = body.querySelector(`.rv-box[data-box="${CSS.escape(p.id || '')}"]`), tag = box && box.querySelector('.rv-box-tag'); if (!tag) return;
+    const br = body.getBoundingClientRect(), vl = br.left, vt = br.top, vr = br.left + body.clientWidth, vb = br.top + body.clientHeight;   // clientWidth/Height: trừ thanh cuộn
+    const xr = box.getBoundingClientRect(), tr = tag.getBoundingClientRect(); if (!tr.width || !xr.width) return;   // mặt 1 đang ẩn
+    if (tr.left >= vl && tr.right <= vr && tr.top >= vt && tr.bottom <= vb) return;                                   // vẫn thấy trọn → không cần chạy theo
+    const dx = shiftInto(tr.left, tr.width, xr.left, xr.right, vl, vr), dy = shiftInto(tr.top, tr.height, xr.top, xr.bottom, vt, vb);
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    tag.style.transform = `translate(${dx}px, ${dy}px)`; tag.classList.add('following');
+  }
+  // Mọi lần cuộn khung ảnh: nhãn chạy theo; nếu không phải do chương trình cuộn thì ghi nhận «người dùng đã tự kéo ảnh»
+  function onImgScroll() { const p = R.pane; if (Date.now() > p.progUntil) p.userPanned = true; followTag(); }
+  // Khung xe có đang (một phần đáng kể) nằm trong vùng nhìn của khung ảnh không?
+  function boxInView(id) {
+    const body = $('#rvImgBody'), box = body && body.querySelector(`.rv-box[data-box="${CSS.escape(id)}"]`); if (!box) return false;
+    const bb = box.getBoundingClientRect(), r = body.getBoundingClientRect(); if (!bb.width) return false;
+    const w = Math.min(bb.right, r.left + body.clientWidth) - Math.max(bb.left, r.left), h = Math.min(bb.bottom, r.top + body.clientHeight) - Math.max(bb.top, r.top);
+    return w >= Math.min(bb.width, 80) && h >= Math.min(bb.height, 80);
+  }
+  // (3) Đưa PHẦN ĐẦU thẻ đối chiếu lên ngay dưới thanh công cụ dính. Đang xem đúng thẻ đó (phần nhìn thấy đủ lớn) thì không cuộn — không giật về đầu thẻ.
+  function revealCardHead(card) {
+    const sc = document.querySelector('#scanReviewModal .modal-body'), tb = document.querySelector('#scanReviewModal .rv-toolbar'); if (!sc || !card) return;
+    const sr = sc.getBoundingClientRect(), cr = card.getBoundingClientRect();
+    const visTop = sr.top + (tb ? tb.offsetHeight + 2 : 44), visBottom = sr.top + sc.clientHeight, vh = Math.max(1, visBottom - visTop);
+    const overlap = Math.min(cr.bottom, visBottom) - Math.max(cr.top, visTop);
+    if (overlap >= Math.min(cr.height, vh * 0.5)) return;               // đang xem đúng xe này rồi
+    sc.scrollTo({ top: Math.max(0, sc.scrollTop + (cr.top - visTop) - 4), behavior: 'smooth' });
   }
   function closeChooser() {
     const d = document.getElementById('rvChooser'); if (d) d.remove();
@@ -2308,7 +2416,7 @@ const ScanReview = (() => {
     }
     const idx = R.listIds.indexOf(id), page = idx >= 0 ? Math.floor(idx / R.pageSize) + 1 : R.page;
     if (page !== R.page) { R.page = page; renderReview(); }
-    await setFocus(id, 'center', scrollImage);
+    await setFocus(id, 'head', scrollImage);   // 'head': đưa phần ĐẦU thẻ lên (không cuộn nếu đang xem đúng thẻ này)
     const card = document.querySelector(`.rv-card[data-id="${CSS.escape(id)}"]`);
     if (card) { card.classList.remove('rv-flash'); void card.offsetWidth; card.classList.add('rv-flash'); setTimeout(() => card.classList.remove('rv-flash'), 2200); }
   }
@@ -2319,7 +2427,9 @@ const ScanReview = (() => {
   }
   function applyPaneView() {
     const body = $('#rvImgBody'), p = R.pane;
+    markProg(500);                                      // đổi chế độ / mức phóng làm ảnh tự dịch → không tính là người dùng kéo
     body.dataset.mode = p.mode; body.style.setProperty('--z', p.zoom);
+    followTag();
     document.querySelectorAll('#rvImgPane [data-pane^="side"], #rvImgPane [data-pane="both"]').forEach(b => b.classList.toggle('btn-primary', b.dataset.pane === (p.mode === 'both' ? 'both' : p.mode)));
   }
   async function renderPane(force) {
@@ -2328,6 +2438,7 @@ const ScanReview = (() => {
     $('#rvWork').classList.toggle('with-pane', p.open);
     if (!p.open) {   // đóng: dọn ảnh + đặt lại mức phóng
       p.urls.forEach(revoke); p.urls = []; p.loadedId = null; p.loadedScan = null; p.zoom = 100; p.regions = new Map(); p.pendingScroll = null;
+      p.userPanned = false; p.focusedId = null; p.dragging = false;
       if (p.ro) { p.ro.disconnect(); p.ro = null; }
       closeChooser(); $('#rvImgBody').innerHTML = ''; return;
     }
@@ -2353,6 +2464,7 @@ const ScanReview = (() => {
       + (rec._cloudMsg ? ` <span class="error-text">${escapeHtml(rec._cloudMsg)}</span>` : '');
     $('#rvImgBody').innerHTML = pageBlock('Mặt 1', rec.frontBlob, rec.frontMime, p.urls, 1) +
       (rec.backBlob ? pageBlock('Mặt 2 (xác nhận / chữ ký)', rec.backBlob, rec.backMime, p.urls, 2) : '<div class="rv-pg" data-page="2"><div class="rv-pg-label">Mặt 2</div><div class="sv-empty">Phiếu không có mặt 2.</div></div>');
+    markProg(600);                                      // nạp ảnh mới: mọi dịch chuyển cuộn lúc này không tính là người dùng kéo
     applyPaneView();
     drawBoxes();
     if (window.ResizeObserver) { p.ro = new ResizeObserver(layoutBoxes); document.querySelectorAll('#rvImgBody .rv-pg-img').forEach(i => p.ro.observe(i)); }
@@ -2361,13 +2473,21 @@ const ScanReview = (() => {
   }
   // scroll: true = cuộn thẻ vào vùng nhìn · 'center' = đưa thẻ ra giữa · imgScroll: cuộn khung ảnh tới đúng chỗ xe này
   async function setFocus(id, scroll, imgScroll = true) {
-    R.pane.open = true; R.pane.id = id;
+    const p = R.pane, changed = p.focusedId !== id;     // chuyển sang xe KHÁC so với lần focus trước?
+    if (changed) p.userPanned = false;                  // xe mới → bỏ ghi nhận «người dùng đã tự kéo ảnh» của xe cũ
+    p.focusedId = id;
+    p.open = true; p.id = id;
     document.querySelectorAll('.rv-card.rv-focus').forEach(c => c.classList.remove('rv-focus'));
     const card = document.querySelector(`.rv-card[data-id="${CSS.escape(id)}"]`);
-    if (card) { card.classList.add('rv-focus'); if (scroll) card.scrollIntoView({ block: scroll === 'center' ? 'center' : 'nearest', behavior: scroll === 'center' ? 'smooth' : 'auto' }); }
+    if (card) {
+      card.classList.add('rv-focus');
+      if (scroll === 'head') revealCardHead(card);
+      else if (scroll) card.scrollIntoView({ block: scroll === 'center' ? 'center' : 'nearest', behavior: scroll === 'center' ? 'smooth' : 'auto' });
+    }
     await renderPane(false);
     markBoxes();
-    if (imgScroll) scrollImageToItem(id);
+    // Đưa ảnh về đúng xe — TRỪ khi vẫn là xe này, người dùng đã tự kéo ảnh để đọc thông tin xe đó và khung xe còn trong tầm nhìn
+    if (imgScroll && (changed || !p.userPanned || !boxInView(id))) scrollImageToItem(id);
   }
   function closePane() { R.pane.open = false; document.querySelectorAll('.rv-card.rv-focus').forEach(c => c.classList.remove('rv-focus')); renderPane(false); }
   // Mục trước / sau trong danh sách đang lọc (tự sang trang nếu cần) — duyệt phiếu liên tục
@@ -2405,7 +2525,10 @@ const ScanReview = (() => {
   }
 
   function bindReviewUI() {
+    enableTagDrag($('#rvImgBody'));                    // phải gắn TRƯỚC enablePan (kéo nhãn không được kéo cả ảnh)
     enablePan($('#rvImgBody')); window.addEventListener('resize', syncStickyOffset);
+    $('#rvImgBody').addEventListener('scroll', onImgScroll, { passive: true });   // nhãn chạy theo + nhận biết người dùng tự kéo ảnh
+    window.addEventListener('resize', followTag);
     $('#rvImgBody').addEventListener('click', onRotateClick);   // nút xoay (nút không kích hoạt «bấm ảnh → xe» vì onImageClick bỏ qua button)
     $('#rvImgBody').addEventListener('click', onImageClick);   // bấm ảnh → tới xe (sau enablePan: kéo ảnh xong không bị tính là click)
     $('#btnScanOpenReview').addEventListener('click', open);

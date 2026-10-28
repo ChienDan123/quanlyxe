@@ -201,3 +201,10 @@ textarea.rv-edit { resize: vertical; }
 .rv-chooser { position: fixed; z-index: 9999; display: flex; flex-direction: column; gap: 4px; padding: 8px; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.2); }
 .rv-flash { animation: rvFlash 1.4s ease-out 1; }
 @keyframes rvFlash { 0% { background: #fff3b0; } 100% { background: transparent; } }
+
+/* ===== UX nhãn biển số trên ảnh: kéo dời được + chạy theo khi kéo ảnh =====
+   Có tiền tố #rvImgBody để thắng các luật cùng tên ở scan-review-ui.css (nạp SAU file này) */
+#rvImgBody .rv-box-tag { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }   /* touch-action:none: kéo nhãn bằng ngón tay không bị trình duyệt cướp để cuộn */
+#rvImgBody .rv-box-tag.moved { max-width: none; }                       /* nhãn đã dời ra khỏi khung xe: không cắt chữ theo bề ngang khung */
+#rvImgBody .rv-box-tag.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 3px 10px rgba(0,0,0,.4); }
+#rvImgBody .rv-box-tag.following { z-index: 4; box-shadow: 0 0 0 2px rgba(255,255,255,.9), 0 2px 6px rgba(0,0,0,.35); will-change: transform; }   /* đang bám mép vùng nhìn: viền trắng cho dễ thấy trên nền ảnh */
