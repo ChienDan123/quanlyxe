@@ -70,8 +70,9 @@ const ScanReview = (() => {
     { key: 'trangThaiXe', label: 'Trạng thái xe (tình trạng phương tiện)', cmp: C.cmpStatus },
     { key: 'ghiChu', label: 'Ghi chú', cmp: C.cmpNote },
     { key: 'tinhTrangCamKet', label: 'Tình trạng cam kết', cmp: C.cmpCommit },
-    // Người thực hiện: trường "meta" — không làm xe bị tính là "có khác biệt", chỉ ghi kèm khi áp dụng.
-    { key: 'nguoiThucHien', label: 'Người thực hiện', cmp: C.cmpAssignee, meta: true },
+    // Người kiểm phiếu (cột AQ): trường "meta" — không làm xe bị tính là "có khác biệt", chỉ ghi kèm khi áp dụng.
+    // TÁCH RIÊNG với «Người thực hiện» (cột AA, dùng ở bảng chính / Chi tiết chủ phương tiện): màn đối chiếu phiếu KHÔNG đọc/ghi cột AA.
+    { key: 'nguoiKiemPhieu', label: 'Người kiểm phiếu', cmp: C.cmpAssignee, meta: true },
   ];
   const NOTEWORTHY = (code) => code && !['khong_ro', 'dang_hoat_dong'].includes(code);
 
@@ -317,6 +318,7 @@ const ScanReview = (() => {
     // Khung ảnh phiếu đặt cạnh bảng so sánh (vừa xem ảnh vừa đối chiếu)
     pane: { open: false, id: null, loadedId: null, loadedScan: null, mode: 'both', zoom: 100, urls: [], token: 0,
       regions: new Map(), pendingScroll: null, ro: null,
+      edit: null, recRef: null,   // edit: bản NHÁP khung đang chỉnh (chưa lưu) · recRef: {id, extracted} của phiếu đang mở (dựng lại khung sau khi lưu)
       // tagPos: vị trí nhãn đã kéo · userPanned: người dùng tự kéo/cuộn ảnh (khác với ảnh tự cuộn tới xe) · progUntil: mốc giờ tới lúc đó
       // mọi cuộn là do chương trình · focusedId: xe được focus lần gần nhất · dragging: đang kéo nhãn
       tagPos: loadTagPos(), userPanned: false, progUntil: 0, focusedId: null, dragging: false },   // regions: itemId -> vùng xe trên mặt 1 (0..1); pendingScroll: cuộn ảnh tới xe này khi ảnh tải xong
@@ -330,7 +332,7 @@ const ScanReview = (() => {
   const ADD_STATUS = '__add_status__';
   const ADD_NEW = (typeof ASSIGNEE_ADD_NEW_VALUE !== 'undefined') ? ASSIGNEE_ADD_NEW_VALUE : '__add_new__';
   const assigneeList = () => { try { return typeof loadAssigneeList === 'function' ? loadAssigneeList() : []; } catch (e) { return []; } };
-  // Nhãn NGẮN dùng trong dấu nguồn "📷Phiếu dd/mm: CCCD, SĐT" (Người thực hiện không lấy từ phiếu nên không có)
+  // Nhãn NGẮN dùng trong dấu nguồn "📷Phiếu dd/mm: CCCD, SĐT" (Người kiểm phiếu không lấy từ phiếu nên không có)
   const TAG_LABEL = { trangThaiXe: 'Trạng thái', chuXe: 'Chủ xe', cccd: 'CCCD', soDienThoai: 'SĐT', ghiChu: 'Ghi chú', tinhTrangCamKet: 'Cam kết',
     nguoiSuDungTen: 'Người SD-Tên', nguoiSuDungDiaChi: 'Người SD-Địa chỉ', nguoiSuDungCccd: 'Người SD-CCCD', nguoiSuDungSdt: 'Người SD-SĐT',
     nguoiMuaTen: 'Người mua-Tên', nguoiMuaDiaChi: 'Người mua-Địa chỉ', nguoiMuaCccd: 'Người mua-CCCD', nguoiMuaSdt: 'Người mua-SĐT' };
@@ -342,6 +344,10 @@ const ScanReview = (() => {
     it.edits = it.edits || {}; it.sheetEdits = it.sheetEdits || {}; it.fixed = it.fixed || {};
     it.decisions = it.decisions || {}; it.applied = it.applied || {}; it.imgChecked = !!it.imgChecked;
     it.source = it.source || {}; it.fieldChecked = it.fieldChecked || {}; it.sheetOk = it.sheetOk || {};
+    // Mục lưu trước khi tách cột: khóa 'nguoiThucHien' (AA) của màn đối chiếu nay là 'nguoiKiemPhieu' (AQ) → đổi tên khóa, KHÔNG mất giá trị
+    ['edits', 'sheetEdits', 'fixed', 'decisions', 'applied', 'source', 'fieldChecked', 'sheetOk'].forEach(m => {
+      if (it[m] && 'nguoiThucHien' in it[m]) { if (!('nguoiKiemPhieu' in it[m])) it[m].nguoiKiemPhieu = it[m].nguoiThucHien; delete it[m].nguoiThucHien; }
+    });
     it.orphanSheet = !!it.orphanSheet; it.orphanStale = it.orphanStale || null;   // phiếu lạ đã ghi thành hàng mới / hàng thừa chờ xóa
     it.partyRole = it.partyRole || ''; it.partyEdits = it.partyEdits || {}; it.partyDoneAt = it.partyDoneAt || null;   // người mua / người sử dụng
     // Các trường «chủ xe» (chuXe/cccd/soDienThoai) đã được CHUYỂN sang Người mua / Người sử dụng. null = mục cũ (chọn vai trò cho cả xe → coi như chuyển hết)
@@ -349,6 +355,8 @@ const ScanReview = (() => {
     it.userSkip = !!it.userSkip;   // true = người dùng chọn «Không có người sử dụng» (tắt tự động đưa vào bảng đối chiếu)
     it.customFields = Array.isArray(it.customFields) ? it.customFields : [];   // trường thông tin mới do người dùng thêm: [{id, key, name, value, doneAt}]
     // Phiếu nhiều xe: X = thứ tự xe này trên ảnh (Xe 1, Xe 2…), Y = TỔNG số xe ghi trên phiếu. null = chưa có (mục cũ) → tự suy ra, xem slotInfo()
+    // Khung biển số người dùng ĐÃ XÁC NHẬN LƯU: {page:1|2, x0,y0,x1,y1 (0..1), at}. boxOvPrev = bản lưu trước (khôi phục); boxOvOld = bản bị bỏ khi ảnh xoay
+    it.boxOv = it.boxOv || null; it.boxOvPrev = it.boxOvPrev || null; it.boxOvOld = it.boxOvOld || null;
     it.slotX = (Number.isInteger(it.slotX) && it.slotX > 0) ? it.slotX : null;
     it.slotTotal = (Number.isInteger(it.slotTotal) && it.slotTotal > 0) ? it.slotTotal : null;
     return it;
@@ -384,7 +392,7 @@ const ScanReview = (() => {
   }
   const isUnknownStatus = (v) => !!String(v || '').trim() && !matchStatus(v);
 
-  // Giá trị "bên phiếu" của 1 trường: ưu tiên giá trị người dùng đã SỬA TAY; Người thực hiện lấy mặc định ở thanh công cụ.
+  // Giá trị "bên phiếu" của 1 trường: ưu tiên giá trị người dùng đã SỬA TAY; Người kiểm phiếu lấy mặc định ở thanh công cụ.
   function scanValue(it, key) {
     if (it.edits && key in it.edits) return it.edits[key];
     // 4 trường «Người sử dụng xe» (AH–AK): lấy từ dòng người mua / sử dụng của phiếu (hoặc chỗ người dùng đã nhập ở khung cũ)
@@ -392,7 +400,7 @@ const ScanReview = (() => {
     if (isCustomKey(key)) { const cf = customByKey(it, key); return cf ? cf.value : ''; }   // trường mới: giá trị người dùng đã nhập
     // Phiếu là của NGƯỜI MUA / NGƯỜI SỬ DỤNG: thông tin chủ hộ trên phiếu không phải của chủ xe đứng tên -> không đem so với Sheet
     if (ownerMoved(it, key)) return '';   // trường này đã chuyển sang người mua / sử dụng → không so với Chủ xe trên Sheet
-    if (key === 'nguoiThucHien') return prefs.assignee || '';
+    if (key === 'nguoiKiemPhieu') return prefs.assignee || '';   // người kiểm phiếu mặc định (thanh công cụ)
     if (key === 'trangThaiXe') return scanStatus(it);
     return it.scanData[key] || '';
   }
@@ -570,8 +578,8 @@ const ScanReview = (() => {
       phieuScan: `Có — ${it.sheetLabel} (mã ${it.scanId.slice(0, 8)})`,
       kiemPhieu: it.review === 'da_kiem' ? 'Đã kiểm' : 'Chưa kiểm',
       ketQuaPhieu: it.result,
-      // Cột AQ «Người kiểm phiếu» luôn khớp «Người thực hiện» (giá trị vừa ghi > đang chọn > đã có trên Sheet)
-      nguoiKiemPhieu: String(toWrite.nguoiThucHien || prefs.assignee || row.nguoiThucHien || row.nguoiKiemPhieu || '').trim(),
+      // Cột AQ «Người kiểm phiếu»: giá trị vừa ghi > người đang chọn ở thanh công cụ > đã có trên Sheet. KHÔNG còn lấy / ghi cột AA «Người thực hiện».
+      nguoiKiemPhieu: String(toWrite.nguoiKiemPhieu || prefs.assignee || row.nguoiKiemPhieu || '').trim(),
     };
     // updateSingleRowFields = local-first + hàng đợi đồng bộ ngầm sẵn có của app
     await updateSingleRowFields(row, { ...toWrite, ...meta });
@@ -784,7 +792,7 @@ const ScanReview = (() => {
   const DEC_LABEL = { apply: '✅ Lấy từ phiếu', skip: '📋 Giữ Sheet (Sheet đúng)', later: '🕓 Để kiểm sau', sheetfix: '✏️ Ghi giá trị Sheet đã sửa' };
   const CAT_LABEL = { match: 'Khớp hoàn toàn', diff: 'Có khác biệt', orphan: 'Phiếu lạ (chưa có trong DS)' };
 
-  // Ô chọn Người thực hiện mặc định trên thanh công cụ (dùng chung danh sách với bảng chính)
+  // Ô chọn Người kiểm phiếu mặc định trên thanh công cụ (dùng chung DANH SÁCH TÊN với bảng chính; chỉ ghi vào cột AQ)
   function buildAssigneeSelect() {
     const sel = $('#rvAssignee'), list = assigneeList();
     if (prefs.assignee && !list.includes(prefs.assignee)) list.unshift(prefs.assignee);
@@ -804,7 +812,7 @@ const ScanReview = (() => {
     $('#rvList').innerHTML = '<p class="hint">Đang nạp dữ liệu…</p>';
     $('#rvChkTag').checked = !!prefs.tag; $('#rvChkQuick').checked = !!prefs.quick;
     buildAssigneeSelect();
-    bindOrphanToolbarBtn(); bindAqBtn(); bindLiveBtn();
+    bindOrphanToolbarBtn(); bindAqBtn(); bindAaAqBtn(); bindLiveBtn();
     const warn = $('#rvWarn');
     const msgs = [];
     if (!state.rawData.length) msgs.push('⚠️ <b>Chưa tải danh sách xe</b> từ Google Sheet — chưa so sánh được. Hãy kết nối Sheet rồi mở lại màn này.');
@@ -882,7 +890,8 @@ const ScanReview = (() => {
   /* ---- Đồng bộ BÙ cột AQ «Người kiểm phiếu» ----
      Lỗi cũ: AQ chỉ được ghi lúc bấm «Áp dụng»; nếu lúc đó Apps Script báo «Action không hỗ trợ: updateRow» thì giá trị chỉ nằm ở máy
      (row.nguoiKiemPhieu đã gán cục bộ nhưng Sheet vẫn trống) và không bao giờ được gửi lại.
-     Hàm này quét mọi xe có phiếu scan + «Người thực hiện» rồi đẩy AQ lên Sheet qua hàng đợi sẵn có (lưu bền, tự thử lại).
+     Hàm này quét mọi xe đang có «Người kiểm phiếu» (AQ) trên máy rồi đẩy AQ lên Sheet qua hàng đợi sẵn có (lưu bền, tự thử lại).
+     KHÔNG còn đọc cột AA «Người thực hiện» (bản cũ sao AA → AQ nên hai cột bị giẫm nhau; dữ liệu cũ xử lý ở nút «🧹 Rà AA → AQ»).
      Nhớ các xe đã đẩy trong localStorage để lần mở sau không gửi lặp; force=true (nút «Đồng bộ AQ») gửi lại TẤT CẢ.
      Trả về số xe đã đưa vào hàng đợi. */
   const AQ_DONE_KEY = 'vehicleAqBackfillV1';
@@ -896,11 +905,10 @@ const ScanReview = (() => {
       let v; try { v = computeView(it); } catch (e) { continue; }
       const row = v && v.row; if (!row || seen.has(row._rowId)) continue;     // mỗi xe chỉ xét 1 lần
       seen.add(row._rowId);
-      const who = String(row.nguoiThucHien || '').trim(); if (!who) continue;  // chưa chọn Người thực hiện -> không có gì để ghi
+      const who = String(row.nguoiKiemPhieu || '').trim(); if (!who) continue;  // chưa có Người kiểm phiếu -> không có gì để ghi
       const mk = matchKeyForRow(row); if (!mk) continue;                       // thiếu Mã ID/MOTO_ID/Biển số -> không khớp được dòng
       const sig = mk.header + '=' + mk.value;
       if (!force && done[sig] === who) continue;
-      row.nguoiKiemPhieu = who;
       enqueueRowSync(row, { [hdr]: who });                                     // gộp vào job cùng xe nếu đang chờ
       done[sig] = who; n++;
     }
@@ -979,6 +987,157 @@ const ScanReview = (() => {
     b.textContent = '🔁 Đồng bộ dữ liệu treo';
     b.title = 'Gửi lên Google Sheet mọi dữ liệu đang lưu trên máy mà Sheet chưa có (cột AQ, Người sử dụng xe, Ghi chú, Trạng thái, phiếu lạ…)';
     b.addEventListener('click', syncAllPending);
+    anchor.insertAdjacentElement('afterend', b);
+  }
+
+  /* ---- RÀ DỮ LIỆU CŨ: «Người thực hiện» (AA) → «Người kiểm phiếu» (AQ) ----
+     Lỗi cũ: màn đối chiếu phiếu ghi tên người kiểm vào CẢ cột AA «Người thực hiện» lẫn AQ «Người kiểm phiếu» (và còn sao AA → AQ),
+     nên tên người kiểm bị lẫn vào AA — giẫm lên «Người thực hiện» ở Chi tiết chủ phương tiện. Từ bản này màn đối chiếu CHỈ dùng AQ.
+     Công cụ này liệt kê các xe ĐÃ qua kiểm phiếu mà AA đang có tên và AQ trống HOẶC trùng AA (nghi AA là tên người kiểm). Xe có AA ≠ AQ
+     được coi là hai người khác nhau → không đụng tới. Người dùng xác nhận TỪNG xe hoặc THEO LÔ (lọc theo tên) rồi mới ghi.
+       • «Chuyển AA → AQ»: AQ = tên đó, AA xóa trống.   • «Giữ cả hai»: AA giữ nguyên, AQ = tên đó nếu đang trống.
+       • «Giữ AA»: tên là người thực hiện thật; AQ trùng thì bỏ trống (không còn bản sao).
+     Không mất dữ liệu: mọi thay đổi được SAO LƯU (giá trị AA/AQ cũ) trên máy, có nút tải JSON và «Hoàn tác lần gần nhất». Ghi qua hàng đợi đồng bộ sẵn có. */
+  const AAQ_DONE_KEY = 'vehicleAaAqConfirmedV1', AAQ_BACKUP_KEY = 'vehicleAaAqBackupV1';
+  const aaqLoad = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || 'null') || d; } catch (e) { return d; } };
+  const aaqSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* đầy bộ nhớ → bỏ qua */ } };
+  const aaqT = (v) => String(v == null ? '' : v).trim();
+  const aaqAct = { move: 'Chuyển AA → AQ (xóa AA)', both: 'Giữ cả AA và AQ', keep: 'Giữ AA (bỏ AQ trùng)' };
+  const aaqSig = (row) => { const mk = matchKeyForRow(row); return mk ? mk.header + '=' + mk.value : ''; };
+  function aaqCandidates() {
+    const done = aaqLoad(AAQ_DONE_KEY, {}), list = [], seen = new Set(); let noKey = 0;
+    for (const row of (state.rawData || [])) {
+      const aa = aaqT(row.nguoiThucHien), aq = aaqT(row.nguoiKiemPhieu);
+      if (!aa) continue;
+      const reviewed = !!(aaqT(row.phieuScan) || aaqT(row.kiemPhieu) || aaqT(row.ketQuaPhieu) || aq);   // xe có dấu vết kiểm phiếu
+      if (!reviewed) continue;
+      if (aq && aq !== aa) continue;                                                                   // AA ≠ AQ: hai người khác nhau → coi là đúng
+      const sig = aaqSig(row); if (!sig) { noKey++; continue; }
+      if (seen.has(sig) || done[sig] === aa) continue;                                                 // đã xác nhận với đúng tên này rồi
+      seen.add(sig); list.push({ row, sig, aa, aq, kind: aq ? 'same' : 'aaonly' });
+    }
+    return { list, noKey };
+  }
+  let _aaq = null;
+  function aaqEnsureModal() {
+    let m = $('#rvAaqModal'); if (m) return m;
+    m = document.createElement('div'); m.id = 'rvAaqModal'; m.className = 'modal-overlay hidden'; m.style.zIndex = 10055;
+    m.innerHTML = `<div class="modal modal-xl"><div class="modal-header"><h2>🧹 Rà «Người thực hiện» (AA) → «Người kiểm phiếu» (AQ)</h2><button type="button" class="modal-close" id="rvAaqClose">✕</button></div>
+      <div class="modal-body"><div id="rvAaqInfo" class="rv-warn"></div>
+      <div class="rv-toolbar" style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <select id="rvAaqName" class="row-inline-select" title="Lọc theo tên đang ở cột AA — nút chọn theo lô chỉ áp dụng cho các xe đang hiện"></select>
+        <button type="button" class="btn btn-secondary btn-sm" data-bulk="move">Tất cả đang hiện: chuyển AA → AQ</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-bulk="both">Tất cả đang hiện: giữ cả hai</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-bulk="keep">Tất cả đang hiện: giữ AA</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-bulk="">Bỏ chọn</button>
+      </div>
+      <div id="rvAaqBody" style="overflow:auto;max-height:55vh"></div></div>
+      <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;align-items:center;padding:12px 16px;flex-wrap:wrap">
+        <span id="rvAaqSummary" class="hint" style="margin-right:auto"></span>
+        <button type="button" class="btn btn-ghost btn-sm" id="rvAaqDownload" title="Tải file JSON chứa giá trị AA/AQ cũ của mọi thay đổi đã làm">⬇ Tải sao lưu</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="rvAaqUndo" title="Trả AA/AQ của lô vừa ghi gần nhất về giá trị cũ">↩ Hoàn tác lần gần nhất</button>
+        <button type="button" class="btn btn-secondary" id="rvAaqCancel">Đóng</button>
+        <button type="button" class="btn btn-primary" id="rvAaqApply">✔ Thực hiện các lựa chọn</button></div></div>`;
+    document.body.appendChild(m);
+    const close = () => m.classList.add('hidden');
+    $('#rvAaqClose').addEventListener('click', close); $('#rvAaqCancel').addEventListener('click', close);
+    $('#rvAaqName').addEventListener('change', (e) => { _aaq.name = e.target.value; aaqRender(); });
+    m.querySelectorAll('[data-bulk]').forEach(b => b.addEventListener('click', () => { aaqShown().forEach(c => { if (b.dataset.bulk) _aaq.dec[c.sig] = b.dataset.bulk; else delete _aaq.dec[c.sig]; }); aaqRender(); }));
+    $('#rvAaqBody').addEventListener('change', (e) => { const sel = e.target.closest('select[data-sig]'); if (!sel) return; if (sel.value) _aaq.dec[sel.dataset.sig] = sel.value; else delete _aaq.dec[sel.dataset.sig]; aaqSummary(); });
+    $('#rvAaqApply').addEventListener('click', aaqApply);
+    $('#rvAaqUndo').addEventListener('click', aaqUndo);
+    $('#rvAaqDownload').addEventListener('click', aaqDownload);
+    return m;
+  }
+  const aaqShown = () => _aaq.list.filter(c => !_aaq.name || c.aa === _aaq.name);
+  function aaqSummary() {
+    const n = Object.keys(_aaq.dec).length;
+    $('#rvAaqSummary').textContent = `Đã chọn ${n}/${_aaq.list.length} xe · chưa chọn = chưa ghi gì.`;
+    $('#rvAaqApply').disabled = !n;
+  }
+  function aaqRender() {
+    const names = [...new Set(_aaq.list.map(c => c.aa))].sort((a, b) => a.localeCompare(b, 'vi'));
+    $('#rvAaqName').innerHTML = `<option value="">Tên ở AA: tất cả (${_aaq.list.length})</option>` + names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)} (${_aaq.list.filter(c => c.aa === n).length})</option>`).join('');
+    $('#rvAaqName').value = _aaq.name;
+    const shown = aaqShown(), LIM = 300, body = $('#rvAaqBody');
+    $('#rvAaqInfo').innerHTML = `Có <b>${_aaq.list.length}</b> xe đã kiểm phiếu mà cột <b>AA «Người thực hiện»</b> đang có tên và <b>AQ «Người kiểm phiếu»</b> trống hoặc trùng AA — nghi tên đó là người kiểm phiếu.`
+      + (_aaq.noKey ? `<br>• ${_aaq.noKey} xe thiếu Mã ID/MOTO_ID/Biển số nên không rà được.` : '')
+      + `<br><span class="hint">Xe có AA và AQ là hai tên khác nhau được coi là đúng, không hiện ở đây. Mặc định chưa chọn → chưa ghi gì. Giá trị cũ luôn được sao lưu và hoàn tác được.</span>`;
+    if (!shown.length) { body.innerHTML = '<p class="hint" style="padding:16px">✅ Không có xe nào cần rà.</p>'; aaqSummary(); return; }
+    const opt = (v, t, cur) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${t}</option>`;
+    body.innerHTML = `<table class="data-table" style="width:100%"><thead><tr><th>Xe</th><th>AA Người thực hiện</th><th>AQ Người kiểm phiếu</th><th>Gợi ý</th><th>Xác nhận</th></tr></thead><tbody>`
+      + shown.slice(0, LIM).map(c => { const cur = _aaq.dec[c.sig] || '';
+        return `<tr><td><b>${escapeHtml(c.row.bienSo || '')}</b><div class="hint">${escapeHtml(c.row.chuXe || '')}</div></td>
+          <td style="background:rgba(255,200,0,.12)">${escapeHtml(c.aa)}</td><td style="background:rgba(0,150,255,.10)">${c.aq ? escapeHtml(c.aq) : '<i class="hint">(trống)</i>'}</td>
+          <td class="hint">${c.kind === 'same' ? 'AA trùng AQ — AQ có thể chỉ là bản sao của AA' : 'Xe đã kiểm phiếu, AQ trống — AA có thể là người kiểm'}</td>
+          <td><select class="row-inline-select" data-sig="${escapeHtml(c.sig)}"><option value="">— Chưa xác nhận —</option>${opt('move', aaqAct.move, cur)}${opt('both', aaqAct.both, cur)}${opt('keep', aaqAct.keep, cur)}</select></td></tr>`; }).join('')
+      + `</tbody></table>` + (shown.length > LIM ? `<p class="hint" style="padding:8px">Đang hiện ${LIM}/${shown.length} xe — nút chọn theo lô vẫn áp dụng cho cả ${shown.length} xe (lọc theo tên để xem từng nhóm).</p>` : '');
+    aaqSummary();
+  }
+  async function aaqApply() {
+    const picks = _aaq.list.filter(c => _aaq.dec[c.sig]);
+    if (!picks.length) return;
+    if (!isWriteConnected() && !confirm('Chưa kết nối Apps Script 2 chiều: thay đổi chỉ lưu trên máy này, chưa lên Google Sheet. Vẫn thực hiện?')) return;
+    if (!confirm(`Thực hiện cho ${picks.length} xe?\nGiá trị AA/AQ cũ được sao lưu, có thể hoàn tác.`)) return;
+    const done = aaqLoad(AAQ_DONE_KEY, {}), bak = aaqLoad(AAQ_BACKUP_KEY, []), b = Date.now(); let n = 0;
+    for (const c of picks) {
+      const act = _aaq.dec[c.sig], row = c.row; let newAa = c.aa, newAq = c.aq;
+      if (act === 'move') { newAq = c.aa; newAa = ''; }
+      else if (act === 'both') { newAq = c.aq || c.aa; }
+      else if (act === 'keep') { newAq = (c.aq === c.aa) ? '' : c.aq; }
+      bak.push({ b, t: b, sig: c.sig, bienSo: row.bienSo || '', act, aa: c.aa, aq: c.aq, newAa, newAq });   // SAO LƯU trước khi ghi
+      aaqSave(AAQ_BACKUP_KEY, bak.slice(-20000));
+      const fu = {};
+      if (newAa !== c.aa) fu.nguoiThucHien = newAa;
+      if (newAq !== c.aq) fu.nguoiKiemPhieu = newAq;
+      if (Object.keys(fu).length) await updateSingleRowFields(row, fu);   // local-first + hàng đợi đồng bộ ngầm sẵn có
+      done[c.sig] = c.aa; n++;
+    }
+    aaqSave(AAQ_DONE_KEY, done);
+    try { persistRawDataToCache(); } catch (e) { /* bỏ qua */ }
+    toast(`✅ Đã xử lý ${n} xe (AA/AQ). Có thể «Hoàn tác lần gần nhất» hoặc tải bản sao lưu.`);
+    try { refreshMainTable(); renderReview(); } catch (e) { /* bỏ qua */ }
+    const r = aaqCandidates(); _aaq = { list: r.list, noKey: r.noKey, dec: {}, name: '' }; aaqRender();
+  }
+  async function aaqUndo() {
+    const bak = aaqLoad(AAQ_BACKUP_KEY, []), last = [...bak].reverse().find(e => !e.undone);
+    if (!last) { toast('Chưa có lô nào để hoàn tác.', true); return; }
+    const batch = bak.filter(e => e.b === last.b && !e.undone);
+    if (!confirm(`Hoàn tác lô gần nhất (${batch.length} xe): trả AA và AQ về giá trị cũ?`)) return;
+    const byRow = new Map(); (state.rawData || []).forEach(r => { const sg = aaqSig(r); if (sg) byRow.set(sg, r); });
+    const done = aaqLoad(AAQ_DONE_KEY, {}); let n = 0;
+    for (const e of batch) {
+      const row = byRow.get(e.sig); if (!row) continue;
+      await updateSingleRowFields(row, { nguoiThucHien: e.aa, nguoiKiemPhieu: e.aq });
+      delete done[e.sig]; e.undone = true; n++;
+    }
+    aaqSave(AAQ_BACKUP_KEY, bak); aaqSave(AAQ_DONE_KEY, done);
+    try { persistRawDataToCache(); } catch (e) { /* bỏ qua */ }
+    toast(`↩ Đã hoàn tác ${n}/${batch.length} xe.`);
+    try { refreshMainTable(); renderReview(); } catch (e) { /* bỏ qua */ }
+    const r = aaqCandidates(); _aaq = { list: r.list, noKey: r.noKey, dec: {}, name: '' }; aaqRender();
+  }
+  function aaqDownload() {
+    const bak = aaqLoad(AAQ_BACKUP_KEY, []);
+    if (!bak.length) { toast('Chưa có bản sao lưu nào (chưa ghi thay đổi).', true); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(bak, null, 2)], { type: 'application/json' }));
+    a.download = 'sao-luu-AA-AQ-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  function aaqOpen() {
+    if (!state.rawData || !state.rawData.length) { toast('Chưa tải danh sách xe từ Google Sheet.', true); return; }
+    const r = aaqCandidates(); _aaq = { list: r.list, noKey: r.noKey, dec: {}, name: '' };
+    aaqEnsureModal().classList.remove('hidden'); aaqRender();
+  }
+  function bindAaAqBtn() {
+    if ($('#rvAaqBtn')) return;
+    const anchor = $('#rvAqBtn') || $('#rvOrphanBtn'); if (!anchor) return;
+    const b = document.createElement('button');
+    b.type = 'button'; b.id = 'rvAaqBtn'; b.className = 'btn btn-secondary btn-sm';
+    b.textContent = '🧹 Rà AA → AQ';
+    b.title = 'Rà dữ liệu kiểm phiếu cũ: tên người kiểm phiếu từng bị ghi vào cột AA «Người thực hiện» — xác nhận để chuyển sang cột AQ «Người kiểm phiếu»';
+    b.addEventListener('click', aaqOpen);
     anchor.insertAdjacentElement('afterend', b);
   }
 
@@ -1211,7 +1370,7 @@ const ScanReview = (() => {
   let _resending = false;
   async function autoResendPending() {
     if (_resending || !isWriteConnected() || !state.rawData.length) return;
-    backfillChecker();   // đồng bộ BÙ cột AQ «Người kiểm phiếu» cho mọi phiếu đã có Người thực hiện từ trước
+    backfillChecker();   // đồng bộ BÙ cột AQ «Người kiểm phiếu» còn nằm ở máy chưa lên Sheet
     // Tự gửi lại: phiếu lạ chưa ghi hàng; còn việc bù cột bổ sung chỉ tự chạy khi đã biết Apps Script hỗ trợ (tránh gửi lặp vô ích) — còn lại dùng nút «Rà lại phiếu lạ»
     const pend = R.items.filter(it => it.orphanDecision === 'apply' && it.bienSo && (!it.orphanSheet || (_extraSupported === true && orphanNeedsSync(it))));
     try { if (typeof processSyncQueue === 'function') processSyncQueue(); } catch (e) { /* bỏ qua */ }   // hàng đợi updateRow còn tồn
@@ -1233,8 +1392,8 @@ const ScanReview = (() => {
   };
   /* ---- Bộ lọc theo quy trình kiểm ---- */
   const NO_CHECKER = '__none__';
-  // «Tên người kiểm» = Người thực hiện: ưu tiên giá trị đã có trên Sheet, chưa có thì lấy giá trị đang chọn bên phiếu
-  const checkerOf = (v) => String((v.row && (v.row.nguoiKiemPhieu || v.row.nguoiThucHien)) || scanValue(v.it, 'nguoiThucHien') || '').trim();
+  // «Tên người kiểm» = cột AQ «Người kiểm phiếu»: ưu tiên giá trị đã có trên Sheet, chưa có thì lấy giá trị đang chọn bên phiếu (không dùng cột AA)
+  const checkerOf = (v) => String((v.row && v.row.nguoiKiemPhieu) || scanValue(v.it, 'nguoiKiemPhieu') || '').trim();
   // Có trường nào (hoặc phiếu lạ) đang để «Để kiểm sau»
   // (chỉ tính lựa chọn «Để kiểm sau» do người dùng chủ động chọn — mặc định chưa chọn cũng hiển thị «Để kiểm sau» nên không dùng f.decision)
   const hasLater = (v) => v.fields.some(f => !f.spec.meta && isActionable(f.state) && v.it.decisions[f.spec.key] === 'later') || (!v.found && v.it.orphanDecision === 'later');
@@ -1274,7 +1433,7 @@ const ScanReview = (() => {
   /* ---- Ô chỉnh sửa tại chỗ (cả bên phiếu lẫn bên Sheet) ---- */
   function optionsFor(key, cur) {
     let list = null;
-    if (key === 'nguoiThucHien') list = assigneeList();
+    if (key === 'nguoiKiemPhieu') list = assigneeList();
     else if (key === 'tinhTrangCamKet' && typeof COMMITMENT_OPTIONS !== 'undefined') list = COMMITMENT_OPTIONS.slice();
     else if (key === 'trangThaiXe') list = statusList().slice();
     if (!list) return null;
@@ -1287,9 +1446,9 @@ const ScanReview = (() => {
     const attrs = `data-act="${side === 'scan' ? 'edit-scan' : 'edit-sheet'}" data-id="${escapeHtml(it.id)}" data-field="${key}"`;
     const list = optionsFor(key, val);
     if (list) {
-      return `<select class="row-inline-select rv-edit" ${attrs}><option value="">${key === 'nguoiThucHien' ? '— Chưa chọn —' : '— Chưa cập nhật —'}</option>` +
+      return `<select class="row-inline-select rv-edit" ${attrs}><option value="">${key === 'nguoiKiemPhieu' ? '— Chưa chọn —' : '— Chưa cập nhật —'}</option>` +
         list.map(o => `<option value="${escapeHtml(o)}" ${o === val ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('') +
-        (key === 'nguoiThucHien' ? `<option value="${ADD_NEW}">+ Thêm người mới...</option>` : '') +
+        (key === 'nguoiKiemPhieu' ? `<option value="${ADD_NEW}">+ Thêm người mới...</option>` : '') +
         (key === 'trangThaiXe' ? `<option value="${ADD_STATUS}">+ Thêm Trạng thái mới...</option>` : '') + '</select>';
     }
     if (key === 'ghiChu') return `<textarea class="rv-edit" rows="2" ${attrs}>${escapeHtml(val)}</textarea>`;
@@ -1344,7 +1503,7 @@ const ScanReview = (() => {
       if (isUnknownStatus(f.scanVal)) scanExtra += `<button type="button" class="btn btn-secondary btn-sm" data-act="add-status" data-id="${id}" data-field="${key}" title="Thêm vào danh sách Trạng thái xe ở trang chủ">➕ Thêm «${escapeHtml(f.scanVal)}» vào danh sách Trạng thái xe</button>`;
     }
     if (orphan) dec = `<span class="hint">${f.spec.meta ? 'Ghi kèm khi lưu phiếu lạ.' : 'Xe chưa có trong DS — sẽ ghi vào hàng mới: cột «Phiếu lạ» (AL–AP) + các cột liên quan khi cập nhật.'}</span>${btns}`;
-    else if (f.state === 'empty') dec = `<span class="hint">${key === 'nguoiThucHien' ? 'Chọn người thực hiện bên trái để ghi.' : 'Phiếu không có giá trị — nhập/chọn bên trái nếu nhìn ảnh thấy.'}</span>${btns}`;
+    else if (f.state === 'empty') dec = `<span class="hint">${key === 'nguoiKiemPhieu' ? 'Chọn người kiểm phiếu bên trái để ghi vào cột AQ.' : 'Phiếu không có giá trị — nhập/chọn bên trái nếu nhìn ảnh thấy.'}</span>${btns}`;
     else if (f.state === 'same') dec = '<span class="rv-same">✔ Khớp</span>' + (f.note ? `<div class="hint">${escapeHtml(f.note)}</div>` : '') + btns;
     else {
       const opts = ['apply', 'skip'].concat(f.spec.meta ? [] : ['later']).concat(f.sheetEdit != null ? ['sheetfix'] : []);
@@ -2081,8 +2240,8 @@ const ScanReview = (() => {
   // Sửa giá trị BÊN PHIẾU (đọc ảnh thấy khác máy đọc)
   async function onEditScan(it, key, raw) {
     let val = String(raw || '').trim();
-    if (val === ADD_NEW) { // chọn "+ Thêm người mới..." ở ô Người thực hiện
-      const added = typeof addAssigneeToList === 'function' ? addAssigneeToList(window.prompt('Nhập tên Người thực hiện mới:')) : '';
+    if (val === ADD_NEW) { // chọn "+ Thêm người mới..." ở ô Người kiểm phiếu
+      const added = typeof addAssigneeToList === 'function' ? addAssigneeToList(window.prompt('Nhập tên người kiểm phiếu mới:')) : '';
       val = added || '';
     }
     if (val === ADD_STATUS) {              // chọn "+ Thêm Trạng thái mới..." -> bổ sung vào danh sách Trạng thái xe
@@ -2090,7 +2249,7 @@ const ScanReview = (() => {
       if (!val) { scheduleRerender(it, 0); return; }
     }
     await track(it, `Sửa «${labelOf(key)}» bên phiếu`, async () => {
-      const base = key === 'nguoiThucHien' ? (prefs.assignee || '') : (PARTY_BY_KEY[key] ? userDefault(it, key) : (isCustomKey(key) ? ((customByKey(it, key) || {}).value || '') : (it.scanData[key] || '')));
+      const base = key === 'nguoiKiemPhieu' ? (prefs.assignee || '') : (PARTY_BY_KEY[key] ? userDefault(it, key) : (isCustomKey(key) ? ((customByKey(it, key) || {}).value || '') : (it.scanData[key] || '')));
       if (val === base) delete it.edits[key]; else it.edits[key] = val;
       // Sửa xong: còn khác Sheet -> chọn nguồn = phiếu (người dùng đã chủ động sửa); đã khớp -> bỏ quyết định cũ
       const f = computeView(it).fields.find(x => x.spec.key === key);
@@ -2185,8 +2344,9 @@ const ScanReview = (() => {
   async function onRotateClick(e) {
     const b = e.target.closest('[data-rot]'); if (!b || !window.ScanRotate) return;
     const [page, deg] = b.dataset.rot.split(':').map(Number), it = R.items.find(i => i.id === R.pane.id); if (!it) return;
+    if (!cancelBoxEdit()) return;
     const btns = document.querySelectorAll('#rvImgBody [data-rot]'); btns.forEach(x => { x.disabled = true; });
-    try { await ScanRotate.rotate(it.scanId, page, deg); resetTagPos(it.scanId); await renderPane(true); }   // nạp lại ảnh + khung xe (vùng đã quy đổi theo góc xoay)
+    try { await ScanRotate.rotate(it.scanId, page, deg); resetTagPos(it.scanId); await invalidateBoxOv(it.scanId, page); await renderPane(true); }   // nạp lại ảnh + khung xe (vùng đã quy đổi theo góc xoay)
     catch (err) { btns.forEach(x => { x.disabled = false; }); toast('Không xoay được ảnh: ' + (err.message || err), true); }
   }
   // Phiếu cũ chưa kiểm hướng: nhờ Gemini nhận hướng (nền, 1 lần / phiếu) rồi nạp lại ảnh nếu có xoay
@@ -2195,7 +2355,7 @@ const ScanReview = (() => {
     const info = $('#rvImgInfo'); if (info) info.insertAdjacentHTML('beforeend', ' <span id="rvRotNote" class="hint">⏳ Đang nhận hướng ảnh…</span>');
     const r = await ScanRotate.autoOrient(rec.id);
     const note = $('#rvRotNote'); if (note) note.remove();
-    if (r && r.changed && R.pane.open && R.pane.loadedScan === rec.id) { resetTagPos(rec.id); await renderPane(true); toast('Đã tự xoay ảnh phiếu cho đúng chiều (có thể chỉnh lại bằng nút xoay).'); }
+    if (r && r.changed && R.pane.open && R.pane.loadedScan === rec.id) { resetTagPos(rec.id); R.pane.edit = null; await invalidateBoxOv(rec.id); await renderPane(true); toast('Đã tự xoay ảnh phiếu cho đúng chiều (có thể chỉnh lại bằng nút xoay).'); }
   }
 
   /* ---- BẤM ẢNH ↔ XE ----
@@ -2214,24 +2374,29 @@ const ScanReview = (() => {
       if (y0 > y1) [y0, y1] = [y1, y0]; if (x0 > x1) [x0, x1] = [x1, x0];
       if (y1 - y0 < 15 || x1 - x0 < 30) return;                          // khung quá nhỏ = không đáng tin
       if ((y1 - y0) * (x1 - x0) > 0.85 * 1e6) return;                    // gần kín cả trang = vô nghĩa (phân biệt xe)
-      m.set(rec.id + '|' + key, { x0: x0 / 1000, y0: y0 / 1000, x1: x1 / 1000, y1: y1 / 1000 });
+      m.set(rec.id + '|' + key, { x0: x0 / 1000, y0: y0 / 1000, x1: x1 / 1000, y1: y1 / 1000, page: 1 });   // Gemini chỉ trả vùng trên MẶT 1
     });
     return m;
   }
   const itemsOfScan = (scanId) => slotInfo(scanId).items;
   const boxLabel = (it) => escapeHtml(it.bienSoRaw || ('Xe ' + (slotInfo(it.scanId).xOf.get(it.id) || '?')));
-  // Vẽ lại các khung xe (mặt 1) + đặt đúng vị trí lên ảnh
+  // Vẽ lại các khung xe (đúng MẶT của từng khung) + đặt đúng vị trí lên ảnh. Đang chỉnh khung: khung nháp thay cho khung đã lưu của xe đó.
   function drawBoxes() {
     const p = R.pane; if (!p.open) return;
+    const regs = boxRegions(), ov = overlapIds(regs);
     document.querySelectorAll('#rvImgBody .rv-pg').forEach(pg => {
       const layer = pg.querySelector('.rv-boxes'); if (!layer) return;
-      layer.innerHTML = pg.dataset.page === '1' ? [...p.regions].map(([id, r]) => {
+      const page = Number(pg.dataset.page) || 1;
+      layer.innerHTML = [...regs].filter(([id, r]) => (r.page || 1) === page).map(([id, r]) => {
         const it = R.items.find(i => i.id === id); if (!it) return '';
         const tp = p.tagPos.get(id);   // nhãn đã được người dùng kéo tới chỗ khác
-        return `<div class="rv-box ${id === p.id ? 'cur' : ''}" data-box="${escapeHtml(id)}" style="left:${r.x0 * 100}%;top:${r.y0 * 100}%;width:${(r.x1 - r.x0) * 100}%;height:${(r.y1 - r.y0) * 100}%" title="Bấm để chuyển tới xe ${escapeHtml(it.bienSoRaw || '')}"><span class="rv-box-tag${tp ? ' moved' : ''}"${tp ? ` style="left:${tp.l}%;top:${tp.t}%"` : ''} title="Kéo để dời nhãn tránh che chữ · nhấp đúp để về chỗ cũ">${boxLabel(it)}</span></div>`;
-      }).join('') : '';
+        const editing = !!(p.edit && p.edit.id === id);
+        const cls = `rv-box ${id === p.id ? 'cur' : ''}${editing ? ' editing' : ''}${ov.has(id) ? ' overlap' : ''}`;
+        const ttl = editing ? 'Đang chỉnh khung: kéo để dời · kéo góc/cạnh để đổi cỡ' : (ov.has(id) ? 'Khung này đang trùng đè lên khung xe khác — bấm «📐 Chỉnh khung xe này» để dời. ' : '') + 'Bấm để chuyển tới xe ' + (it.bienSoRaw || '');
+        return `<div class="${cls}" data-box="${escapeHtml(id)}" style="left:${r.x0 * 100}%;top:${r.y0 * 100}%;width:${(r.x1 - r.x0) * 100}%;height:${(r.y1 - r.y0) * 100}%" title="${escapeHtml(ttl)}"><span class="rv-box-tag${tp ? ' moved' : ''}"${tp ? ` style="left:${tp.l}%;top:${tp.t}%"` : ''} title="Kéo để dời nhãn tránh che chữ · nhấp đúp để về chỗ cũ">${boxLabel(it)}</span>${editing ? BOX_HANDLES : ''}</div>`;
+      }).join('');
     });
-    layoutBoxes();
+    layoutBoxes(); updateBoxBar();
   }
   // Lớp khung nằm đè đúng lên ảnh (ảnh đổi kích thước khi phóng to / đổi cỡ khung → gọi lại)
   function layoutBoxes() {
@@ -2248,14 +2413,272 @@ const ScanReview = (() => {
   }
   function markBoxes() {
     document.querySelectorAll('#rvImgBody .rv-box').forEach(b => b.classList.toggle('cur', b.dataset.box === R.pane.id));
-    followTag();
+    followTag(); updateBoxBar();
   }
+  /* ---- CHỈNH KHUNG BIỂN SỐ TRÊN ẢNH ----
+     Trước đây khung chỉ lấy từ vùng Gemini trả (luôn là MẶT 1) nên xe ở mặt 2 vẫn hiện khung ở mặt 1, và khung của nhiều xe có thể đè nhau.
+     Nay mỗi xe có thể có «khung đã xác nhận» it.boxOv = {page, x0,y0,x1,y1}: đúng mặt, đúng chỗ; khung này ƯU TIÊN hơn vùng Gemini.
+     Cách dùng: «📐 Chỉnh khung xe này» → kéo khung để dời · kéo góc/cạnh để đổi cỡ · kéo trên chỗ trống để VẼ LẠI (mặt nào được kéo thì khung chuyển sang mặt đó)
+     · phím mũi tên nhích nhẹ (Shift = nhanh) → «💾 Lưu vị trí». Chưa bấm Lưu thì chỉ là bản nháp trong bộ nhớ, đổi xe / đóng / tải lại là bỏ.
+     BẢO VỆ: (1) chỉ lưu khi bấm «Lưu vị trí» (có hỏi nếu còn đè khung khác), mỗi lần chỉ 1 xe; (2) phím: giữ phím chỉ nhích tối đa ~12 nhịp, nhích bằng phím
+     tối đa ±8% so với vị trí lúc bắt đầu, mất tiêu điểm cửa sổ là reset; (3) chuột: nhả nút ngoài cửa sổ / mất sự kiện thả → chốt ngay, không kéo theo con trỏ;
+     Esc / mất tiêu điểm khi đang kéo = trả khung về chỗ cũ; (4) khung quá nhỏ / gần kín trang bị từ chối; (5) «Khôi phục khung trước» + «Về khung tự động» hoàn tác được. */
+  const BOX_MINW = 0.03, BOX_MINH = 0.015, KEY_STEP = 0.002, KEY_STEP_BIG = 0.01, KEY_MAX_REPEAT = 12, KEY_MAX_DRIFT = 0.08;
+  const BOX_HANDLES = ['nw', 'n', 'ne', 'w', 'e', 'sw', 's', 'se'].map(h => `<span class="rv-h" data-h="${h}"></span>`).join('');
+  const clamp01 = (n, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, n));
+  // Chuẩn hóa + kiểm tra 1 khung; null nếu không hợp lệ (cùng ngưỡng với regionsFor)
+  function normBox(b) {
+    if (!b) return null;
+    let x0 = Number(b.x0), y0 = Number(b.y0), x1 = Number(b.x1), y1 = Number(b.y1);
+    if (![x0, y0, x1, y1].every(Number.isFinite)) return null;
+    x0 = clamp01(x0); y0 = clamp01(y0); x1 = clamp01(x1); y1 = clamp01(y1);
+    if (x0 > x1) [x0, x1] = [x1, x0]; if (y0 > y1) [y0, y1] = [y1, y0];
+    if (x1 - x0 < BOX_MINW || y1 - y0 < BOX_MINH || (x1 - x0) * (y1 - y0) > 0.85) return null;
+    const r4 = (n) => Math.round(n * 1e4) / 1e4;
+    return { page: Number(b.page) === 2 ? 2 : 1, x0: r4(x0), y0: r4(y0), x1: r4(x1), y1: r4(y1) };
+  }
+  // Vùng hiệu lực của 1 phiếu: vùng Gemini (mặt 1) rồi ĐÈ bằng khung người dùng đã lưu (đúng mặt)
+  function effectiveRegions(rec) {
+    const m = rec ? regionsFor(rec) : new Map();
+    (R.items || []).forEach(i => {
+      if (!rec || i.scanId !== rec.id) return;
+      const b = normBox(i.boxOv); if (b) m.set(i.id, { ...b, manual: true });
+    });
+    return m;
+  }
+  const boxRegions = () => { const p = R.pane, m = new Map(p.regions); if (p.edit) m.set(p.edit.id, { x0: p.edit.x0, y0: p.edit.y0, x1: p.edit.x1, y1: p.edit.y1, page: p.edit.page, draft: true }); return m; };
+  // Các khung trùng đè (cùng mặt, phần giao > 35% khung nhỏ hơn)
+  function overlapIds(m) {
+    const ids = new Set(), arr = [...m];
+    for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
+      const [ia, a] = arr[i], [ib, b] = arr[j];
+      if ((a.page || 1) !== (b.page || 1)) continue;
+      const w = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0), h = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+      if (w <= 0 || h <= 0) continue;
+      const small = Math.min((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
+      if (small > 0 && (w * h) / small > 0.35) { ids.add(ia); ids.add(ib); }
+    }
+    return ids;
+  }
+  // Ảnh vừa xoay (hoặc tự nhận hướng): tọa độ khung đã lưu không còn đúng → cất sang boxOvOld (KHÔNG xóa mất), quay về khung tự động
+  async function invalidateBoxOv(scanId, page) {
+    let n = 0;
+    for (const i of R.items.filter(x => x.scanId === scanId && x.boxOv && (!page || (Number(x.boxOv.page) || 1) === page))) {
+      i.boxOvOld = i.boxOv; i.boxOv = null; await saveItem(i); n++;
+    }
+    if (n) toast(`Ảnh vừa xoay nên ${n} khung đã chỉnh được cất lại — đang dùng khung tự động, hãy chỉnh lại nếu cần.`);
+  }
+  let _boxToastAt = 0;
+  const boxToastOnce = (msg) => { if (Date.now() - _boxToastAt > 2500) { _boxToastAt = Date.now(); toast(msg, true); } };
+  const hasPageImg = (n) => !!document.querySelector(`#rvImgBody .rv-pg[data-page="${n}"] .rv-pg-img`);
+
+  /* thanh công cụ chỉnh khung (tự chèn dưới #rvImgActions) */
+  function ensureBoxBar() {
+    let b = $('#rvBoxBar'); if (b) return b;
+    const a = $('#rvImgActions'); if (!a) return null;
+    if (!document.getElementById('rvBoxEditCss')) {
+      const st = document.createElement('style'); st.id = 'rvBoxEditCss';
+      st.textContent = `#rvBoxBar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:4px 8px;font-size:12px}
+#rvBoxBar .rv-bx-warn{color:#b71c1c;border-color:#e57373}
+#rvBoxBar .rv-bx-state{font-weight:600;color:#1565c0}
+.rv-box.overlap{outline:2px dashed #d32f2f}
+.rv-box.editing{outline:2px solid #1976d2;background:rgba(25,118,210,.14);cursor:move;pointer-events:auto;touch-action:none;z-index:6}
+.rv-h{position:absolute;width:12px;height:12px;box-sizing:border-box;background:#1976d2;border:2px solid #fff;border-radius:3px;pointer-events:auto;touch-action:none;z-index:7}
+.rv-h[data-h=nw]{left:-7px;top:-7px;cursor:nwse-resize}.rv-h[data-h=ne]{right:-7px;top:-7px;cursor:nesw-resize}
+.rv-h[data-h=sw]{left:-7px;bottom:-7px;cursor:nesw-resize}.rv-h[data-h=se]{right:-7px;bottom:-7px;cursor:nwse-resize}
+.rv-h[data-h=n]{left:50%;top:-7px;margin-left:-6px;cursor:ns-resize}.rv-h[data-h=s]{left:50%;bottom:-7px;margin-left:-6px;cursor:ns-resize}
+.rv-h[data-h=w]{left:-7px;top:50%;margin-top:-6px;cursor:ew-resize}.rv-h[data-h=e]{right:-7px;top:50%;margin-top:-6px;cursor:ew-resize}
+#rvImgBody[data-editing="1"] .rv-pg-wrap{cursor:crosshair}`;
+      document.head.appendChild(st);
+    }
+    b = document.createElement('div'); b.id = 'rvBoxBar';
+    a.insertAdjacentElement('afterend', b);
+    b.addEventListener('click', onBoxBarClick);
+    return b;
+  }
+  function updateBoxBar() {
+    const p = R.pane, bar = ensureBoxBar(), body = $('#rvImgBody');
+    if (p.edit && p.edit.id !== p.id) p.edit = null;                      // xe đang xem đã đổi (xóa / áp dụng xong tự sang xe khác) → bỏ nháp cũ
+    if (body) body.dataset.editing = p.edit ? '1' : '';
+    if (!bar) return;
+    if (!p.open || !p.id) { bar.innerHTML = ''; return; }
+    const it = R.items.find(i => i.id === p.id); if (!it) { bar.innerHTML = ''; return; }
+    const btn = (k, t, cls, ttl) => `<button type="button" class="btn ${cls || 'btn-secondary'} btn-sm" data-bx="${k}"${ttl ? ` title="${escapeHtml(ttl)}"` : ''}>${t}</button>`;
+    if (p.edit) {
+      const e = p.edit, ov = overlapIds(boxRegions());
+      bar.innerHTML = `<span class="rv-bx-state">📐 Đang chỉnh khung: ${escapeHtml(it.bienSoRaw || '(chưa có biển)')}${e.dirty ? ' · ⚠ chưa lưu' : ''}</span>`
+        + btn('page1', 'Mặt 1', e.page === 1 ? 'btn-primary' : 'btn-secondary', 'Đặt khung này lên Mặt 1') + btn('page2', 'Mặt 2', e.page === 2 ? 'btn-primary' : 'btn-secondary', 'Đặt khung này lên Mặt 2')
+        + btn('save', '💾 Lưu vị trí', 'btn-primary', 'Chỉ khi bấm nút này khung mới được lưu') + btn('cancel', '✖ Hủy', 'btn-secondary', 'Bỏ bản nháp (Esc)')
+        + (ov.has(e.id) ? '<span class="rv-bx-warn">⚠ đang đè khung xe khác</span>' : '')
+        + '<span class="hint">Kéo khung để dời · kéo góc/cạnh để đổi cỡ · kéo trên chỗ trống để vẽ lại · mũi tên = nhích nhẹ (Shift = nhanh)</span>';
+      return;
+    }
+    const regs = boxRegions(), ov = overlapIds(regs), mine = p.regions.get(it.id);
+    bar.innerHTML = btn('edit', '📐 Chỉnh khung xe này', 'btn-secondary', 'Dời / đổi cỡ / vẽ lại khung, chuyển sang mặt 2 nếu xe nằm ở mặt 2')
+      + (it.boxOv ? btn('auto', '↩ Về khung tự động', 'btn-ghost', 'Bỏ khung đã chỉnh, dùng lại vùng Gemini đọc') : '')
+      + (it.boxOvPrev ? btn('prev', '⏪ Khôi phục khung trước', 'btn-ghost', 'Quay lại khung đã lưu ở lần trước') : '')
+      + (ov.size ? `<button type="button" class="btn btn-secondary btn-sm rv-bx-warn" data-bx="overlap" title="Nhảy tới khung đầu tiên đang đè khung khác và mở chỉnh">⚠ ${ov.size} khung trùng đè — bấm để sửa</button>` : '')
+      + (!mine ? '<span class="hint">Xe này chưa có khung trên ảnh — bấm «Chỉnh khung» để đặt.</span>' : (mine.manual ? `<span class="hint">Khung đã chỉnh tay (mặt ${mine.page}).</span>` : ''));
+  }
+  async function onBoxBarClick(ev) {
+    const b = ev.target.closest('[data-bx]'); if (!b || b.disabled) return;
+    const p = R.pane, act = b.dataset.bx;
+    if (act === 'edit') enterBoxEdit(p.id);
+    else if (act === 'cancel') cancelBoxEdit();
+    else if (act === 'save') { b.disabled = true; try { await saveBoxEdit(); } finally { b.disabled = false; } }
+    else if (act === 'page1' || act === 'page2') setBoxEditPage(act === 'page2' ? 2 : 1);
+    else if (act === 'auto' || act === 'prev') await swapBoxOv(p.id, act);
+    else if (act === 'overlap') {
+      const ids = [...overlapIds(boxRegions())]; if (!ids.length) return;
+      const target = ids.find(i => i !== p.id) || ids[0];
+      if (target !== p.id) { await goToItem(target); if (R.pane.id !== target) return; }
+      enterBoxEdit(target);
+    }
+  }
+  function defaultBox(id) {
+    const it = R.items.find(i => i.id === id), x = (it && slotInfo(it.scanId).xOf.get(id)) || 1, y0 = Math.min(0.8, 0.08 + 0.14 * (x - 1));
+    return { page: 1, x0: 0.1, y0, x1: 0.6, y1: y0 + 0.12 };
+  }
+  function enterBoxEdit(id) {
+    const p = R.pane; if (!p.open || !id || p.id !== id) return;
+    if (p.edit) { if (p.edit.id === id) return; if (!cancelBoxEdit()) return; }
+    if (!hasPageImg(1) && !hasPageImg(2)) { toast('Phiếu này không có ảnh để đặt khung (PDF hoặc chưa tải ảnh).', true); return; }
+    const base = normBox(p.regions.get(id)) || normBox(defaultBox(id));
+    if (!hasPageImg(base.page)) base.page = hasPageImg(1) ? 1 : 2;
+    p.edit = { id, ...base, dirty: false, orig: { ...base }, keyOrigin: { x0: base.x0, y0: base.y0 } };
+    drawBoxes(); scrollImageToItem(id);
+  }
+  // Hủy nháp. Có thay đổi chưa lưu thì hỏi; trả false nếu người dùng chọn ở lại
+  function cancelBoxEdit() {
+    const p = R.pane; if (!p.edit) return true;
+    if (p.edit.dirty && !confirm('Khung đang chỉnh CHƯA LƯU. Bỏ thay đổi?')) return false;
+    p.edit = null; drawBoxes(); return true;
+  }
+  function setBoxEditPage(n) {
+    const e = R.pane.edit; if (!e || e.page === n) return;
+    if (!hasPageImg(n)) { toast('Phiếu không có ảnh ở Mặt ' + n + '.', true); return; }
+    e.page = n; e.dirty = true;
+    const p = R.pane; if ((n === 1 && p.mode === 'side2') || (n === 2 && p.mode === 'side1')) { p.mode = 'both'; applyPaneView(); }
+    drawBoxes(); scrollImageToItem(e.id);
+  }
+  async function saveBoxEdit() {
+    const p = R.pane, e = p.edit; if (!e) return;
+    if (!e.dirty) { p.edit = null; drawBoxes(); return; }
+    const it = R.items.find(i => i.id === e.id); if (!it) return;
+    const nb = normBox(e); if (!nb) { toast('Khung không hợp lệ (quá nhỏ hoặc gần kín cả trang) — chỉnh lại rồi lưu.', true); return; }
+    if (!hasPageImg(nb.page)) { toast('Phiếu không có ảnh ở Mặt ' + nb.page + '.', true); return; }
+    const regs = new Map(p.regions); regs.set(e.id, { ...nb });
+    if (overlapIds(regs).has(e.id) && !confirm('Khung này đang ĐÈ lên khung của xe khác. Vẫn lưu?')) return;
+    it.boxOvPrev = it.boxOv || null; it.boxOv = { ...nb, at: Date.now() };
+    await saveItem(it);                                     // lưu đúng 1 mục (đồng bộ online qua sự kiện itemsChanged)
+    p.edit = null; p.regions = effectiveRegions(p.recRef); drawBoxes();
+    toast('💾 Đã lưu vị trí khung cho xe ' + (it.bienSoRaw || '') + ' (Mặt ' + nb.page + ').');
+  }
+  // «Về khung tự động» / «Khôi phục khung trước» — đều cất bản hiện tại vào boxOvPrev nên đổi ý được
+  async function swapBoxOv(id, act) {
+    const it = R.items.find(i => i.id === id); if (!it) return;
+    if (!cancelBoxEdit()) return;
+    if (act === 'auto') { if (!it.boxOv || !confirm('Bỏ khung đã chỉnh tay và dùng lại khung tự động?')) return; it.boxOvPrev = it.boxOv; it.boxOv = null; }
+    else { if (!it.boxOvPrev) return; const cur = it.boxOv || null; it.boxOv = it.boxOvPrev; it.boxOvPrev = cur; }
+    await saveItem(it);
+    R.pane.regions = effectiveRegions(R.pane.recRef); drawBoxes();
+  }
+  // Cập nhật DOM khung nháp khi đang kéo (không vẽ lại cả lớp)
+  function paintDraft() {
+    const e = R.pane.edit; if (!e) return;
+    const el = document.querySelector('#rvImgBody .rv-box.editing'), pg = el && el.closest('.rv-pg');
+    if (!el || Number(pg.dataset.page) !== e.page) { drawBoxes(); return; }
+    el.style.left = e.x0 * 100 + '%'; el.style.top = e.y0 * 100 + '%'; el.style.width = (e.x1 - e.x0) * 100 + '%'; el.style.height = (e.y1 - e.y0) * 100 + '%';
+  }
+  function setDraft(b) {
+    const e = R.pane.edit; if (!e) return; const was = e.dirty;
+    Object.assign(e, b); e.dirty = true; paintDraft(); if (!was) updateBoxBar();
+  }
+  // Kéo / đổi cỡ / vẽ lại bằng chuột (bút, cảm ứng) — mọi thay đổi chỉ vào bản nháp
+  function enableBoxEdit(body) {
+    if (!body) return;
+    let st = null;
+    const fin = (commit) => {
+      if (!st) return; const s = st; st = null; R.pane.dragging = false;
+      try { body.releasePointerCapture(s.pid); } catch (err) { /* bỏ qua */ }
+      const e = R.pane.edit; if (!e) return;
+      if (!commit) { Object.assign(e, s.orig, { dirty: s.wasDirty }); }
+      else if (s.mode === 'draw' && s.moved && !normBox(e)) { Object.assign(e, s.orig, { dirty: s.wasDirty }); toast('Khung vẽ quá nhỏ — giữ nguyên khung cũ.', true); }
+      e.keyOrigin = { x0: e.x0, y0: e.y0 };                 // mốc mới cho giới hạn nhích bằng phím
+      drawBoxes();
+    };
+    body.addEventListener('pointerdown', (ev) => {
+      const p = R.pane; if (!p.edit || ev.button !== 0) return;
+      if (ev.target.closest('a,button,select,input,textarea,.rv-box-tag')) return;     // nhãn có cơ chế kéo riêng
+      const wrap = ev.target.closest('.rv-pg-wrap'); if (!wrap) return;
+      const layer = wrap.querySelector('.rv-boxes'), pgEl = wrap.closest('.rv-pg'); if (!layer || !pgEl) return;
+      const rect = layer.getBoundingClientRect(); if (!rect.width || !rect.height) return;
+      const h = ev.target.closest('.rv-h'), onBox = ev.target.closest('.rv-box.editing');
+      const e = p.edit, page = Number(pgEl.dataset.page) || 1;
+      st = { mode: h ? 'resize' : (onBox ? 'move' : 'draw'), h: h ? h.dataset.h : '', pid: ev.pointerId, rect, page, px: ev.clientX, py: ev.clientY,
+        sx: clamp01((ev.clientX - rect.left) / rect.width), sy: clamp01((ev.clientY - rect.top) / rect.height),
+        orig: { page: e.page, x0: e.x0, y0: e.y0, x1: e.x1, y1: e.y1 }, wasDirty: e.dirty, moved: false };
+      ev.stopPropagation(); ev.preventDefault();
+      p.dragging = true;
+      try { body.setPointerCapture(ev.pointerId); } catch (err) { /* bỏ qua */ }
+    }, true);
+    body.addEventListener('pointermove', (ev) => {
+      if (!st || ev.pointerId !== st.pid) return;
+      if (ev.pointerType === 'mouse' && ev.buttons === 0) { fin(true); return; }       // nút chuột đã nhả mà không có sự kiện thả (kẹt) → chốt tại chỗ
+      const dx = (ev.clientX - st.px) / st.rect.width, dy = (ev.clientY - st.py) / st.rect.height, o = st.orig;
+      if (!st.moved) { if (Math.hypot(ev.clientX - st.px, ev.clientY - st.py) < 4) return; st.moved = true; }
+      if (st.mode === 'move') {
+        const w = o.x1 - o.x0, hh = o.y1 - o.y0, x0 = clamp01(o.x0 + dx, 0, 1 - w), y0 = clamp01(o.y0 + dy, 0, 1 - hh);
+        setDraft({ x0, y0, x1: x0 + w, y1: y0 + hh });
+      } else if (st.mode === 'resize') {
+        let { x0, y0, x1, y1 } = o;
+        if (st.h.includes('w')) x0 = clamp01(o.x0 + dx, 0, o.x1 - BOX_MINW);
+        if (st.h.includes('e')) x1 = clamp01(o.x1 + dx, o.x0 + BOX_MINW, 1);
+        if (st.h.includes('n')) y0 = clamp01(o.y0 + dy, 0, o.y1 - BOX_MINH);
+        if (st.h.includes('s')) y1 = clamp01(o.y1 + dy, o.y0 + BOX_MINH, 1);
+        setDraft({ x0, y0, x1, y1 });
+      } else {                                                                          // vẽ lại: mặt được kéo = mặt của khung
+        const fx = clamp01((ev.clientX - st.rect.left) / st.rect.width), fy = clamp01((ev.clientY - st.rect.top) / st.rect.height);
+        setDraft({ page: st.page, x0: Math.min(st.sx, fx), y0: Math.min(st.sy, fy), x1: Math.max(st.sx, fx), y1: Math.max(st.sy, fy) });
+      }
+      ev.preventDefault();
+    });
+    body.addEventListener('pointerup', (ev) => { if (st && ev.pointerId === st.pid) fin(true); });
+    body.addEventListener('pointercancel', (ev) => { if (st && ev.pointerId === st.pid) fin(false); });
+    body.addEventListener('lostpointercapture', (ev) => { if (st && ev.pointerId === st.pid) fin(false); });
+    // Mất tiêu điểm cửa sổ / chuyển tab giữa lúc kéo → trả khung về chỗ cũ (không để kẹt)
+    const abort = () => { if (st) fin(false); };
+    window.addEventListener('blur', abort); document.addEventListener('visibilitychange', () => { if (document.hidden) abort(); });
+    body._boxAbort = abort;
+  }
+  // Phím mũi tên nhích khung nháp (chỉ khi đang chỉnh, chỉ khung đó) + Esc. Có chặn kẹt phím / giữ phím.
+  function bindBoxKeys() {
+    let repeat = 0;
+    const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    document.addEventListener('keydown', (ev) => {
+      const e = R.pane.edit; if (!e) return;
+      if (ev.target.closest && ev.target.closest('input,textarea,select,[contenteditable="true"]')) return;
+      if (ev.key === 'Escape') { const body = $('#rvImgBody'); if (body && body._boxAbort) body._boxAbort(); if (!R.pane.dragging) cancelBoxEdit(); return; }
+      const d = ARROWS[ev.key]; if (!d || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      ev.preventDefault();
+      if (ev.repeat) { if (++repeat > KEY_MAX_REPEAT) return; } else repeat = 0;       // giữ / kẹt phím: chỉ nhích tối đa KEY_MAX_REPEAT nhịp rồi bỏ qua đến khi nhả
+      const step = ev.shiftKey ? KEY_STEP_BIG : KEY_STEP, w = e.x1 - e.x0, h = e.y1 - e.y0;
+      const nx = clamp01(e.x0 + d[0] * step, 0, 1 - w), ny = clamp01(e.y0 + d[1] * step, 0, 1 - h);
+      if (Math.abs(nx - e.keyOrigin.x0) > KEY_MAX_DRIFT || Math.abs(ny - e.keyOrigin.y0) > KEY_MAX_DRIFT) { boxToastOnce('Đã đủ giới hạn nhích bằng phím (±8%). Muốn dời xa hơn hãy kéo bằng chuột.'); return; }
+      setDraft({ x0: nx, y0: ny, x1: nx + w, y1: ny + h });
+    });
+    document.addEventListener('keyup', () => { repeat = 0; });
+    window.addEventListener('blur', () => { repeat = 0; });
+    window.addEventListener('beforeunload', (ev) => { if (R.pane.edit && R.pane.edit.dirty) { ev.preventDefault(); ev.returnValue = ''; } });
+  }
+
   // Cuộn khung ảnh tới đúng vị trí xe (và nháy khung cho dễ thấy)
   function scrollImageToItem(id) {
     const p = R.pane, body = $('#rvImgBody'); if (!p.open || !body) return false;
-    if (!p.regions.has(id)) return false;                                // không có vùng (phiếu cũ) → để nguyên ảnh
-    if (p.mode === 'side2') { p.mode = 'both'; applyPaneView(); }          // đang chỉ xem mặt 2 → bật lại mặt 1
-    const img = body.querySelector('.rv-pg[data-page="1"] .rv-pg-img');
+    const reg = (p.edit && p.edit.id === id) ? p.edit : p.regions.get(id), pgNo = (reg && reg.page) || 1;
+    if (!reg) return false;                                              // không có vùng (phiếu cũ) → để nguyên ảnh
+    if ((pgNo === 1 && p.mode === 'side2') || (pgNo === 2 && p.mode === 'side1')) { p.mode = 'both'; applyPaneView(); }   // đang chỉ xem mặt kia → hiện lại mặt có khung
+    const img = body.querySelector(`.rv-pg[data-page="${pgNo}"] .rv-pg-img`);
     if (img && (!img.complete || !img.naturalWidth)) { p.pendingScroll = id; return false; }
     requestAnimationFrame(() => {
       const box = body.querySelector(`.rv-box[data-box="${CSS.escape(id)}"]`); if (!box) return;
@@ -2288,6 +2711,7 @@ const ScanReview = (() => {
     }, true);
     body.addEventListener('pointermove', (e) => {
       if (!st || e.pointerId !== st.pid) return;
+      if (e.pointerType === 'mouse' && e.buttons === 0) { end(e); return; }   // nút chuột đã nhả (mất sự kiện thả / kẹt) → chốt, không kéo nhãn theo con trỏ nữa
       if (!st.moved) {
         if (Math.hypot(e.clientX - st.x, e.clientY - st.y) < 4) return;   // chưa đủ xa = vẫn là cú bấm
         st.moved = true; R.pane.dragging = true;
@@ -2386,6 +2810,7 @@ const ScanReview = (() => {
   // Bấm lên ảnh → xe tương ứng: trúng khung xe nào → xe đó; trượt khung → khung gần nhất (theo chiều dọc) nếu MỌI xe đều có vùng; phiếu 1 xe → xe đó; còn lại → hỏi
   function onImageClick(e) {
     if (e.target.closest('a,button,.rv-chooser')) return;
+    if (R.pane.edit) return;                                             // đang chỉnh khung: bấm ảnh không được nhảy sang xe khác
     const pg = e.target.closest('.rv-pg'); if (!pg || !pg.querySelector('.rv-pg-img')) return;
     const p = R.pane, cur = R.items.find(i => i.id === p.id); if (!cur) return;
     const group = itemsOfScan(cur.scanId);
@@ -2393,10 +2818,11 @@ const ScanReview = (() => {
     const boxEl = e.target.closest('.rv-box');
     if (boxEl) target = boxEl.dataset.box;
     else if (group.length === 1) target = group[0].id;
-    else if (pg.dataset.page === '1' && p.regions.size && group.every(i => p.regions.has(i.id))) {
+    else if (p.regions.size && group.every(i => p.regions.has(i.id))) {
       const r = pg.querySelector('.rv-pg-img').getBoundingClientRect(), fy = (e.clientY - r.top) / r.height, fx = (e.clientX - r.left) / r.width;
       let best = null, bd = Infinity;
       p.regions.forEach((g, id) => {
+        if ((g.page || 1) !== (Number(pg.dataset.page) || 1)) return;   // chỉ xét khung nằm trên đúng mặt vừa bấm
         const dy = fy < g.y0 ? g.y0 - fy : (fy > g.y1 ? fy - g.y1 : 0), dx = fx < g.x0 ? g.x0 - fx : (fx > g.x1 ? fx - g.x1 : 0), d = dy * 10 + dx;
         if (d < bd) { bd = d; best = id; }
       });
@@ -2408,6 +2834,7 @@ const ScanReview = (() => {
   // Nhảy tới thẻ xe: nới bộ lọc nếu thẻ đang bị lọc ẩn, sang đúng trang, cuộn tới thẻ và nháy sáng
   async function goToItem(id, scrollImage = true) {
     const it = R.items.find(i => i.id === id); if (!it) return;
+    if (R.pane.edit && R.pane.edit.id !== id && !cancelBoxEdit()) return;   // đang chỉnh khung dở: hỏi trước khi chuyển xe
     R.pane.open = true; R.pane.id = id;
     if (!R.listIds.includes(id)) {
       R.filter = 'all'; R.checker = ''; R.search = '';
@@ -2438,7 +2865,7 @@ const ScanReview = (() => {
     $('#rvWork').classList.toggle('with-pane', p.open);
     if (!p.open) {   // đóng: dọn ảnh + đặt lại mức phóng
       p.urls.forEach(revoke); p.urls = []; p.loadedId = null; p.loadedScan = null; p.zoom = 100; p.regions = new Map(); p.pendingScroll = null;
-      p.userPanned = false; p.focusedId = null; p.dragging = false;
+      p.userPanned = false; p.focusedId = null; p.dragging = false; p.edit = null; p.recRef = null;
       if (p.ro) { p.ro.disconnect(); p.ro = null; }
       closeChooser(); $('#rvImgBody').innerHTML = ''; return;
     }
@@ -2455,7 +2882,8 @@ const ScanReview = (() => {
     }
     if (token !== p.token) return;                      // người dùng đã chuyển sang mục khác trong lúc nạp
     p.urls.forEach(revoke); p.urls = []; p.loadedId = it.id; p.loadedScan = it.scanId; p.pendingScroll = null;
-    p.regions = regionsFor(rec);
+    p.recRef = rec ? { id: rec.id, extracted: rec.extracted } : null;
+    p.regions = effectiveRegions(p.recRef);
     if (p.ro) { p.ro.disconnect(); p.ro = null; }
     if (!rec) { $('#rvImgInfo').textContent = 'Không tìm thấy ảnh phiếu trong máy này (có thể đã xóa hoặc quét ở máy khác).'; $('#rvImgBody').innerHTML = ''; return; }
     $('#rvImgInfo').innerHTML = `Nguồn: <b>${escapeHtml(rec.sheetLabel || rec.fileName || '')}</b> · quét ${new Date(rec.timestamp).toLocaleString('vi-VN')} · mã ${escapeHtml(rec.id.slice(0, 8))}`
@@ -2470,9 +2898,11 @@ const ScanReview = (() => {
     if (window.ResizeObserver) { p.ro = new ResizeObserver(layoutBoxes); document.querySelectorAll('#rvImgBody .rv-pg-img').forEach(i => p.ro.observe(i)); }
     scrollImageToItem(it.id);                           // mở ảnh là tới ngay chỗ xe đang xem
     maybeAutoOrient(rec);                               // phiếu cũ chưa kiểm hướng -> tự nhận hướng (nền)
+    updateBoxBar();
   }
   // scroll: true = cuộn thẻ vào vùng nhìn · 'center' = đưa thẻ ra giữa · imgScroll: cuộn khung ảnh tới đúng chỗ xe này
   async function setFocus(id, scroll, imgScroll = true) {
+    if (R.pane.edit && R.pane.edit.id !== id && !cancelBoxEdit()) return;   // đang chỉnh khung dở: hỏi trước khi chuyển xe (không tự lưu)
     const p = R.pane, changed = p.focusedId !== id;     // chuyển sang xe KHÁC so với lần focus trước?
     if (changed) p.userPanned = false;                  // xe mới → bỏ ghi nhận «người dùng đã tự kéo ảnh» của xe cũ
     p.focusedId = id;
@@ -2489,11 +2919,12 @@ const ScanReview = (() => {
     // Đưa ảnh về đúng xe — TRỪ khi vẫn là xe này, người dùng đã tự kéo ảnh để đọc thông tin xe đó và khung xe còn trong tầm nhìn
     if (imgScroll && (changed || !p.userPanned || !boxInView(id))) scrollImageToItem(id);
   }
-  function closePane() { R.pane.open = false; document.querySelectorAll('.rv-card.rv-focus').forEach(c => c.classList.remove('rv-focus')); renderPane(false); }
+  function closePane() { if (!cancelBoxEdit()) return; R.pane.open = false; document.querySelectorAll('.rv-card.rv-focus').forEach(c => c.classList.remove('rv-focus')); renderPane(false); }
   // Mục trước / sau trong danh sách đang lọc (tự sang trang nếu cần) — duyệt phiếu liên tục
   function stepFocus(d) {
     const i = R.listIds.indexOf(R.pane.id), j = i + d;
     if (i < 0 || j < 0 || j >= R.listIds.length) return;
+    if (!cancelBoxEdit()) return;                                         // đang chỉnh khung dở: hỏi trước khi chuyển xe
     const page = Math.floor(j / R.pageSize) + 1;
     if (page !== R.page) { R.page = page; R.pane.id = R.listIds[j]; renderReview(); setFocus(R.listIds[j], true); }
     else setFocus(R.listIds[j], true);
@@ -2526,6 +2957,7 @@ const ScanReview = (() => {
 
   function bindReviewUI() {
     enableTagDrag($('#rvImgBody'));                    // phải gắn TRƯỚC enablePan (kéo nhãn không được kéo cả ảnh)
+    enableBoxEdit($('#rvImgBody')); bindBoxKeys();     // chỉnh khung biển số (kéo / vẽ lại / phím mũi tên) — cũng phải trước enablePan
     enablePan($('#rvImgBody')); window.addEventListener('resize', syncStickyOffset);
     $('#rvImgBody').addEventListener('scroll', onImgScroll, { passive: true });   // nhãn chạy theo + nhận biết người dùng tự kéo ảnh
     window.addEventListener('resize', followTag);
@@ -2538,10 +2970,10 @@ const ScanReview = (() => {
     $('#rvFilter').addEventListener('change', (e) => { R.filter = e.target.value; R.page = 1; renderReview(); });
     $('#rvChecker').addEventListener('change', (e) => { R.checker = e.target.value; R.page = 1; renderReview(); });
     $('#rvSearch').addEventListener('input', (e) => { R.search = e.target.value.trim(); R.page = 1; renderReview(); });
-    // Thanh công cụ: người thực hiện mặc định + 2 tùy chọn
+    // Thanh công cụ: người kiểm phiếu mặc định (cột AQ) + 2 tùy chọn
     $('#rvAssignee').addEventListener('change', (e) => {
       let val = e.target.value;
-      if (val === ADD_NEW) val = (typeof addAssigneeToList === 'function' && addAssigneeToList(window.prompt('Nhập tên Người thực hiện mới:'))) || '';
+      if (val === ADD_NEW) val = (typeof addAssigneeToList === 'function' && addAssigneeToList(window.prompt('Nhập tên người kiểm phiếu mới:'))) || '';
       prefs.assignee = val; savePrefs(); buildAssigneeSelect(); renderReview();
     });
     $('#rvChkTag').addEventListener('change', (e) => { prefs.tag = e.target.checked; savePrefs(); renderReview(); });
@@ -2605,7 +3037,7 @@ const ScanReview = (() => {
       work.querySelectorAll('[data-cf="results"]:not([hidden])').forEach(r => { if (!r.parentNode.contains(e.target)) r.hidden = true; });
     });
     // nhấp đúp ảnh: phóng to / vừa khung (nhấp đơn dành cho kéo ảnh)
-    work.addEventListener('dblclick', (e) => { if (e.target.classList && (e.target.classList.contains('rv-pg-img') || e.target.classList.contains('rv-box'))) { R.pane.zoom = R.pane.zoom > 100 ? 100 : 200; applyPaneView(); } });
+    work.addEventListener('dblclick', (e) => { if (R.pane.edit) return; if (e.target.classList && (e.target.classList.contains('rv-pg-img') || e.target.classList.contains('rv-box'))) { R.pane.zoom = R.pane.zoom > 100 ? 100 : 200; applyPaneView(); } });
     // --- bấm nút ---
     work.addEventListener('click', async (e) => {
       const rb = e.target.closest('[data-rvrescan]');   // nút «Quét lại» trong khung ảnh phiếu

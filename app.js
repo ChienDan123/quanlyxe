@@ -49,7 +49,7 @@ const FIELD_MAP = [
   { key: 'phieuScan',    header: 'Phiếu scan' },
   { key: 'kiemPhieu',    header: 'Kiểm phiếu' },
   { key: 'ketQuaPhieu',  header: 'Kết quả đối chiếu phiếu' },
-  { key: 'nguoiKiemPhieu', header: 'Người kiểm phiếu' },   // cột AQ — đồng bộ với «Người thực hiện» ở màn So sánh phiếu scan
+  { key: 'nguoiKiemPhieu', header: 'Người kiểm phiếu' },   // cột AQ — CHỈ dùng cho màn đối chiếu phiếu scan; tách riêng với «Người thực hiện» (cột AA, Chi tiết chủ phương tiện / bảng chính)
 ];
 // Danh sách lựa chọn cho trường "Tình trạng cam kết" (giữa Ghi chú và Người
 // thực hiện) — dùng chung cho mọi nơi hiển thị/sửa trường này.
