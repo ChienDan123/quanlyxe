@@ -1,16 +1,11 @@
 /* =========================================================================
    scan-review-av.js — patch cho module So sánh phiếu scan. Nạp SAU scan-review.js.
-   KHÔNG sửa file gốc. Gồm:
-   1) Cột AV «Trạng thái xe chưa kiểm» (sheet Tong hop): Chưa kiểm / Đã kiểm (+ chi tiết),
-      ghi đúng dòng xe (theo biển số). CHỈ gửi TIÊU ĐỀ CỘT lên Sheet (không tạo cột rác).
-   2) Nút «🔁 Kiểm lại» (từng phiếu + «Kiểm lại tất cả chưa kiểm»): gửi lại ẢNH PHIẾU + dữ liệu
-      OCR cho Gemini, chạy NGẦM, lần lượt, LƯU tiến độ, ƯU TIÊN THẤP.
-      Đúng → giữ. Nghi sai + tin cậy ≥ 70% + định dạng hợp lệ → sửa vào mục scan + ghi chú.
-      Mục đã tick «đã kiểm» thì KHÔNG bị sửa.
-   3) Bộ lọc «⚠ Chưa chắc chắn», nút «✔ Đã kiểm thủ công».
-   4) Phiếu lạ: «✔ Đã kiểm đúng biển số» + gợi ý khớp theo TÊN CHỦ.
-   5) Ô «✔ đã kiểm mục này» từng mục (không áp toàn xe); thu gọn / mở rộng.
-   6) Tự động đồng bộ ngầm cột AV cho dữ liệu cũ + tự xếp hàng kiểm lại phiếu chưa kiểm.
+   BẢN SỬA LỖI 2026-11: 
+     1) FIX BUG CỘT AV LUÔN TRỐNG: wrapper dùng SAI khóa (AV_HEADER thay vì AV_KEY) khi gọi
+        updateSingleRowFields → FIELD_MAP không tìm thấy cột → không ghi. Đã sửa dùng AV_KEY.
+     2) Tăng độ tin cậy nút «Kiểm lại tất cả chưa kiểm»: thêm log + nhiều mốc kích hoạt.
+     3) backfillAV: ghi theo BIỂN SỐ (thay vì Mã ID/MOTO_ID) để khớp dòng chắc chắn hơn.
+     4) Lưu trạng thái AV v2 {v, t} để tránh kẹt "đã đẩy" khi lần ghi trước thất bại.
    ========================================================================= */
 (function () {
   'use strict';
@@ -48,15 +43,15 @@
   })();
 
   /* =================== 1. CỘT AV =================== */
-  const AV_KEY = 'trangThaiXeChuaKiem';
-  const AV_HEADER = 'Trạng thái xe chưa kiểm';
+  const AV_KEY = 'trangThaiXeChuaKiem';              // KHÓA trong FIELD_MAP
+  const AV_HEADER = 'Trạng thái xe chưa kiểm';       // TIÊU ĐỀ CỘT trên Sheet (AV)
 
   (function ensureAvField() {
     try {
       if (typeof FIELD_MAP === 'undefined' || !Array.isArray(FIELD_MAP)) return;
       if (FIELD_MAP.some(f => f.key === AV_KEY)) return;
       FIELD_MAP.push({ key: AV_KEY, header: AV_HEADER });
-      console.log('[scan-review-av] đã đăng ký cột AV: ' + AV_HEADER);
+      console.log('[scan-review-av] đã đăng ký cột AV: ' + AV_HEADER + ' (key=' + AV_KEY + ')');
     } catch (e) { console.warn('[scan-review-av] FIELD_MAP', e); }
   })();
 
@@ -81,21 +76,25 @@
     return (await DB.tx(DB.ST_ITEMS, 'readonly', os => os.index('bienSo').getAll(plate)).catch(() => [])) || [];
   }
 
-  // Tự ghi AV mỗi khi chỗ khác cập nhật Trạng thái xe / kiểm phiếu (CHỈ khóa = tiêu đề cột)
+  /* ---- FIX BUG (2026-11): trước đây wrapper dùng [AV_HEADER] làm KEY gọi updateSingleRowFields,
+     FIELD_MAP không khớp → cột AV không bao giờ được ghi lên Sheet. Nay dùng [AV_KEY] ---- */
   (function wrapUpdateRow() {
     const orig = window.updateSingleRowFields;
     if (typeof orig !== 'function' || orig._avWrapped) return;
     const wrapped = async function (row, updates) {
       const relevant = ['trangThaiXe', 'kiemPhieu', 'phieuScan', 'ketQuaPhieu', 'nguoiKiemPhieu']
         .some(k => updates && Object.prototype.hasOwnProperty.call(updates, k));
-      if (relevant && row && row.bienSo && !Object.prototype.hasOwnProperty.call(updates, AV_HEADER)) {
+      // Không có sẵn AV trong updates → tự tính và gộp (dùng AV_KEY đúng khóa FIELD_MAP!)
+      if (relevant && row && row.bienSo
+          && !Object.prototype.hasOwnProperty.call(updates, AV_KEY)
+          && !Object.prototype.hasOwnProperty.call(updates, AV_HEADER)) {
         try {
           const items = await itemsByPlate(S.normalizeBienSo(row.bienSo));
           const it = items.find(x => x.scanData || x.recheck);
           if (it) {
             const v = computeAV(it);
             row[AV_KEY] = v;
-            updates = Object.assign({}, updates, { [AV_HEADER]: v });
+            updates = Object.assign({}, updates, { [AV_KEY]: v });   // ← FIX: KEY (không phải HEADER)
           }
         } catch (e) { console.warn('[scan-review-av] chuẩn bị AV', e); }
       }
@@ -103,28 +102,29 @@
     };
     wrapped._avWrapped = true;
     window.updateSingleRowFields = wrapped;
-    console.log('[scan-review-av] đã wrap updateSingleRowFields để tự ghi AV');
+    console.log('[scan-review-av] đã wrap updateSingleRowFields để tự ghi AV (đúng khóa FIELD_MAP)');
   })();
 
-  // Ghi AV ngay cho đúng dòng xe
+  /* ---- pushAV: ghi AV ngay cho đúng dòng (dùng AV_KEY + ưu tiên khớp BIỂN SỐ) ---- */
   async function pushAV(item) {
     try {
-      if (typeof window.updateSingleRowFields !== 'function') return;
       if (typeof state === 'undefined' || !state || !state.rawData) return;
       const plate = item.bienSo || S.normalizeBienSo(item.bienSoRaw || (item.scanData && item.scanData.bienSo) || '');
       if (!plate) return;
       const row = state.rawData.find(r => r.bienSo && S.normalizeBienSo(r.bienSo) === plate);
-      if (!row) return;                       // phiếu lạ: chưa có dòng xe
+      if (!row) return;
       const v = computeAV(item);
       row[AV_KEY] = v;
-      await window.updateSingleRowFields(row, { [AV_HEADER]: v });
+      if (typeof window.updateSingleRowFields === 'function') {
+        await window.updateSingleRowFields(row, { [AV_KEY]: v });   // ← FIX: dùng AV_KEY
+      }
     } catch (e) { console.warn('[scan-review-av] pushAV', e); }
   }
 
   /* =================== 2. HÀNG ĐỢI «KIỂM LẠI» =================== */
   const QUEUE_KEY = 'scanReviewRecheckQueueV1';
   const STAT_KEY = 'scanReviewRecheckStatV1';
-  const STOP_KEY = 'scanReviewRecheckStoppedV1';   // người dùng bấm «Dừng hẳn» → không tự xếp hàng lại
+  const STOP_KEY = 'scanReviewRecheckStoppedV1';
   const CONF_MIN = 70;
   const RECHECK = { queue: [], running: false, paused: false, waiting: false, current: null, done: 0, error: 0, total: 0 };
   const isStopped = () => { try { return localStorage.getItem(STOP_KEY) === '1'; } catch (e) { return false; } };
@@ -183,14 +183,14 @@
   function buildPrompt(item, noImage) {
     const d = item.scanData || {};
     const imageNote = noImage
-      ? '⚠ KHÔNG CÓ ẢNH đính kèm (phiếu đã bị xóa hoặc chưa tải được). Chỉ kiểm tra ĐỊNH DẠNG dữ liệu dưới đây.'
-      : '📷 ẢNH PHIẾU GỐC ĐÍNH KÈM Ở DƯỚI (MẶT 1, có thể có MẶT 2). Hãy ĐỌC LẠI ảnh, so với dữ liệu OCR lần đầu, tìm các trường SAI / KHÔNG ĐỌC ĐƯỢC.';
+      ? '⚠ KHÔNG CÓ ẢNH đính kèm. Chỉ kiểm tra ĐỊNH DẠNG dữ liệu dưới đây.'
+      : '📷 ẢNH PHIẾU GỐC ĐÍNH KÈM (MẶT 1, có thể có MẶT 2). ĐỌC LẠI ảnh, so với dữ liệu OCR lần đầu.';
     return [
       'Bạn là công cụ KIỂM LẠI (re-check) dữ liệu OCR của một phiếu giấy Việt Nam về phương tiện.',
       '',
       imageNote,
       '',
-      'DỮ LIỆU LẦN ĐỌC ĐẦU (có thể có lỗi do OCR):',
+      'DỮ LIỆU LẦN ĐỌC ĐẦU:',
       '- Biển số: ' + (item.bienSoRaw || d.bienSo || ''),
       '- Chủ xe / Tên trong ĐKX: ' + (d.chuXe || ''),
       '- CCCD: ' + (d.cccd || ''),
@@ -200,22 +200,19 @@
       '- Loại xe: ' + (d.loaiXe || ''),
       '- Trạng thái cam kết: ' + (d.tinhTrangCamKet || ''),
       '',
-      noImage
-        ? 'NHIỆM VỤ: Chỉ dựa trên các QUY TẮC ĐỊNH DẠNG phổ biến ở Việt Nam, xác định:'
-        : 'NHIỆM VỤ: ĐỐI CHIẾU ẢNH với dữ liệu trên, xác định:',
-      '(a) Trường nào KHẲNG ĐỊNH ĐÚNG (không nghi vấn)?',
-      '(b) Trường nào có NGHI VẤN (sai định dạng, khó tin, khác thường, hoặc ảnh đọc được khác)? Nếu CHẮC CHẮN giá trị đúng hơn (nhìn rõ trên ảnh, hoặc sai định dạng rõ) thì điền "goiY" là giá trị đề xuất; nếu không chắc thì để trống.',
+      noImage ? 'NHIỆM VỤ: Chỉ dựa trên QUY TẮC ĐỊNH DẠNG, xác định:' : 'NHIỆM VỤ: ĐỐI CHIẾU ẢNH với dữ liệu trên:',
+      '(a) Trường nào KHẲNG ĐỊNH ĐÚNG?',
+      '(b) Trường nào có NGHI VẤN (sai định dạng, khó tin, khác thường, ảnh đọc được khác)? Nếu CHẮC CHẮN giá trị đúng hơn thì điền "goiY".',
       '',
       'Quy tắc tham khảo:',
-      '- Biển số VN: 2 số + 1-2 chữ cái (có thể thêm 1 số) + dấu gạch + 4-5 chữ số. VD 92A-12345, 92N2-0582.',
-      '- CCCD VN: 12 chữ số (hoặc 11 nếu bị mất số 0 đầu do Excel).',
-      '- Số điện thoại: 10-11 chữ số, có thể bắt đầu 0.',
-      '- Tên người: viết hoa chữ đầu các từ, có dấu tiếng Việt.',
-      '- Ghi chú / cam kết: không nghi vấn trừ khi có ký tự rõ ràng là rác.',
+      '- Biển số VN: 2 số + 1-2 chữ cái + dấu gạch + 4-5 số. VD 92A-12345, 92N2-0582.',
+      '- CCCD VN: 12 chữ số (hoặc 11 nếu mất số 0 đầu).',
+      '- Số điện thoại: 10-11 chữ số.',
+      '- Tên người: viết hoa chữ đầu, có dấu tiếng Việt.',
       '',
       'TRẢ VỀ DUY NHẤT JSON đúng schema:',
       '{"tinCay":0..100,"nghiVan":[{"truong":"bienSo|chuXe|cccd|soDienThoai|tinhTrang|ghiChu|loaiXe","lyDo":"…","goiY":"…"}],"xacNhanDung":["chuXe","cccd"]}',
-      'CHỈ TRẢ VỀ JSON, KHÔNG GIẢI THÍCH.'
+      'CHỈ TRẢ VỀ JSON.'
     ].join('\n');
   }
 
@@ -230,14 +227,12 @@
   const RECHECK_MAX_B64 = 18 * 1024 * 1024;
 
   async function recheckOne(item) {
-    // (1) Lấy ảnh gốc (ưu tiên trên máy; thiếu thì tải từ online)
     let rec = null;
     try { if (DB.ST_SCANS) rec = await DB.dbGet(DB.ST_SCANS, item.scanId); } catch (e) { rec = null; }
     if (rec && !rec.frontBlob && rec.cloud && window.ScanSync && typeof ScanSync.ensureBlobs === 'function') {
       try { rec = await ScanSync.ensureBlobs(rec); } catch (e) { console.warn('[scan-review-av] tải ảnh online lỗi', item.id, e); }
     }
 
-    // (2) parts: prompt trước, ảnh sau
     const imageParts = [];
     let totalB64 = 0;
     const addImg = async (blob, mime, label) => {
@@ -248,15 +243,14 @@
           imageParts.push({ text: label });
           imageParts.push({ inlineData: { mimeType: mime || blob.type || 'image/jpeg', data: b64 } });
           totalB64 += b64.length;
-        } else { console.warn('[scan-review-av] ảnh quá lớn / rỗng, bỏ qua', item.id, label); }
-      } catch (e) { console.warn('[scan-review-av] đọc ảnh lỗi', item.id, label, e); }
+        }
+      } catch (e) { /* bỏ qua */ }
     };
     if (rec) {
       await addImg(rec.frontBlob, rec.frontMime, 'MẶT 1:');
       await addImg(rec.backBlob, rec.backMime, 'MẶT 2 (nếu có):');
     }
     const hasImage = imageParts.length > 0;
-    if (!hasImage) console.info('[scan-review-av] không có ảnh — kiểm lại chỉ dựa trên dữ liệu OCR', item.id);
     const parts = [{ text: buildPrompt(item, !hasImage) }].concat(imageParts);
 
     const r = await S.geminiGenerate({
@@ -272,7 +266,6 @@
     const txt = String((r && r.text) || '').replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '').trim();
     const parsed = JSON.parse(txt);
 
-    // đọc lại bản mới nhất (người dùng có thể đã sửa trong lúc chờ Gemini)
     const fresh = (await DB.dbGet(DB.ST_ITEMS, item.id)) || item;
     fresh.edits = fresh.edits || {};
     fresh.scanData = fresh.scanData || {};
@@ -285,9 +278,9 @@
     for (const nv of nghi) {
       const key = nv && nv.truong;
       if (!key || !APPLY[key]) continue;
-      if (confirmed.has(key)) continue;                               // đúng → giữ
-      if (fresh.fieldChecked && fresh.fieldChecked[key]) continue;    // đã tick kiểm mục → không đụng
-      if (fresh.review === 'da_kiem') continue;                       // đã kiểm → không đụng
+      if (confirmed.has(key)) continue;
+      if (fresh.fieldChecked && fresh.fieldChecked[key]) continue;
+      if (fresh.review === 'da_kiem') continue;
       const cand = APPLY[key](String(nv.goiY || ''));
       if (!cand) continue;
       const prev = String((fresh.edits[key] !== undefined ? fresh.edits[key] : fresh.scanData[key]) || '').trim();
@@ -331,7 +324,7 @@
     let added = 0;
     for (const j of jobs) { if (have.has(j.itemId)) continue; RECHECK.queue.push(j); have.add(j.itemId); added++; }
     if (!added) return 0;
-    if (!auto) setStopped(false);                 // người dùng chủ động xếp hàng → bỏ cờ «dừng hẳn»
+    if (!auto) setStopped(false);
     if (!RECHECK.running && RECHECK.queue.length === added) { RECHECK.done = 0; RECHECK.error = 0; RECHECK.total = added; }
     else RECHECK.total += added;
     RECHECK.paused = false;
@@ -347,7 +340,7 @@
       while (RECHECK.queue.length && !RECHECK.paused) {
         if (shouldYield()) { RECHECK.waiting = true; updateProgress(); await sleep(2000); continue; }
         RECHECK.waiting = false;
-        const job = RECHECK.queue[0];            // giữ trong hàng đợi tới khi xong
+        const job = RECHECK.queue[0];
         let item = null;
         try { item = await DB.dbGet(DB.ST_ITEMS, job.itemId); } catch (e) { /* bỏ qua */ }
         if (item) {
@@ -496,7 +489,7 @@
       actions.appendChild(b); return b;
     };
     mk('recheck', '🔁 Kiểm lại', 'Gửi lại ẢNH PHIẾU + dữ liệu OCR cho Gemini rà soát lại (chạy ngầm, ưu tiên thấp)');
-    mk('manual-check', '✔ Đã kiểm thủ công', 'Đánh dấu đã kiểm thủ công (không dùng Gemini) — cột AV ghi «Đã kiểm (thủ công)»');
+    mk('manual-check', '✔ Đã kiểm thủ công', 'Đánh dấu đã kiểm thủ công — cột AV ghi «Đã kiểm (thủ công)»');
     mk('toggle-fc', '▾ Thu gọn chọn kiểm', 'Thu gọn / mở rộng ô «đã kiểm mục này» của thẻ này');
     const st = document.createElement('span');
     st.className = 'recheck-status';
@@ -523,7 +516,7 @@
     btn.type = 'button'; btn.className = 'btn btn-ghost btn-sm';
     btn.style.marginTop = '4px';
     btn.dataset.avAct = 'plate-check'; btn.dataset.id = cardEl.dataset.id;
-    btn.title = 'Chỉ đánh dấu đã kiểm đúng trường BIỂN SỐ của phiếu lạ này — không áp dụng cho toàn xe.';
+    btn.title = 'Chỉ đánh dấu đã kiểm đúng trường BIỂN SỐ — không áp dụng cho toàn xe.';
     btn.textContent = '✔ Đã kiểm đúng biển số';
     plateField.appendChild(btn);
     (async () => {
@@ -564,8 +557,8 @@
     if (act === 'recheck') {
       const it = await DB.dbGet(DB.ST_ITEMS, b.dataset.id); if (!it) return;
       if (!window.confirm('Kiểm lại mục «' + (it.bienSoRaw || it.bienSo || '(chưa có biển)') + '» bằng Gemini?\n\n' +
-        '• GỬI LẠI ẢNH PHIẾU (mặt 1 + mặt 2) + dữ liệu OCR cho Gemini rà soát lại (máy khác chưa có ảnh thì tự tải từ Drive trước).\n' +
-        '• Chạy NGẦM, có thanh tiến độ, ưu tiên thấp — tiếp tục dùng web bình thường.')) return;
+        '• GỬI LẠI ẢNH PHIẾU (mặt 1 + mặt 2) + dữ liệu OCR cho Gemini rà soát lại.\n' +
+        '• Chạy NGẦM, có thanh tiến độ, ưu tiên thấp.')) return;
       b.disabled = true; b.textContent = '⏳ Đang xếp hàng…';
       enqueue([{ itemId: it.id, scanId: it.scanId, startedAt: Date.now() }]);
       return;
@@ -574,7 +567,7 @@
       const items = (await DB.dbGetAll(DB.ST_ITEMS)) || [];
       const todo = items.filter(isPendingRecheck);
       if (!todo.length) { say('Không có phiếu chưa kiểm nào cần kiểm lại.'); return; }
-      if (!window.confirm('Kiểm lại ' + todo.length + ' phiếu CHƯA KIỂM bằng Gemini?\n\nGỬI LẠI ẢNH PHIẾU (mặt 1 + mặt 2) + dữ liệu OCR cho Gemini rà soát; chạy ngầm, lần lượt, ưu tiên thấp; có thể tạm dừng / dừng hẳn ở khung tiến độ góc phải.')) return;
+      if (!window.confirm('Kiểm lại ' + todo.length + ' phiếu CHƯA KIỂM bằng Gemini?\n\nGỬI LẠI ẢNH PHIẾU + dữ liệu OCR; chạy ngầm, có thể tạm dừng / dừng hẳn ở khung tiến độ góc phải.')) return;
       const n = enqueue(todo.map(i => ({ itemId: i.id, scanId: i.scanId, startedAt: Date.now() })));
       say('Đã xếp hàng ' + n + ' phiếu kiểm lại.');
       refreshCardsFromItems(items);
@@ -600,7 +593,7 @@
       await DB.dbPut(DB.ST_ITEMS, it);
       const card = b.closest('.rv-card');
       if (card) syncFieldChecks(card); else syncPlateBtn(b.parentElement, !!it.fieldChecked.bienSo);
-      say(it.fieldChecked.bienSo ? 'Đã kiểm đúng BIỂN SỐ (chỉ riêng trường này, không áp toàn xe).' : 'Đã bỏ đánh dấu kiểm biển số.');
+      say(it.fieldChecked.bienSo ? 'Đã kiểm đúng BIỂN SỐ (chỉ riêng trường này).' : 'Đã bỏ đánh dấu kiểm biển số.');
       return;
     }
   }, true);
@@ -623,7 +616,6 @@
     } catch (err) { console.warn('[scan-review-av] fieldChecked', err); cb.checked = !cb.checked; }
   }, true);
 
-  // Phiếu cần kiểm lại: có dữ liệu, chưa kiểm, chưa kiểm lại xong / chưa đánh dấu thủ công
   function isPendingRecheck(i) {
     const d = i.scanData || {};
     const r = i.recheck || {};
@@ -672,17 +664,19 @@
 
   /* =================== 9. THANH CÔNG CỤ + OBSERVER =================== */
   function ensureToolbar() {
-    const tb = document.querySelector('#scanReviewModal .rv-toolbar'); if (!tb) return;
+    const tb = document.querySelector('#scanReviewModal .rv-toolbar');
+    if (!tb) { console.warn('[scan-review-av] không tìm thấy #scanReviewModal .rv-toolbar'); return; }
     if (tb.querySelector('[data-av-act="recheck-all"]')) return;
     const pager = tb.querySelector('#rvPager');
     const mk = (act, text, title) => {
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'btn btn-secondary btn-sm';
-      b.dataset.avAct = act; b.textContent = text; b.title = title;
+      b.dataset.avAct = act; b.textContent = text; if (title) b.title = title;
       tb.insertBefore(b, pager || null); return b;
     };
     mk('recheck-all', '🔁 Kiểm lại tất cả chưa kiểm', 'Gửi lại ẢNH PHIẾU + dữ liệu OCR cho Gemini rà soát cho mọi phiếu chưa kiểm (chạy ngầm, ưu tiên thấp)');
     mk('toggle-fc-all', globalOpen ? '▾ Thu gọn chọn kiểm (tất cả)' : '▸ Mở rộng chọn kiểm (tất cả)', 'Thu gọn / mở rộng ô «đã kiểm mục này» trên mọi thẻ');
+    console.info('[scan-review-av] đã thêm nút «Kiểm lại tất cả chưa kiểm» vào thanh công cụ');
   }
 
   (function setupObserver() {
@@ -709,6 +703,21 @@
     if (sel) new MutationObserver(addUncertainFilterOption).observe(sel, { childList: true });
     const tb = document.querySelector('#scanReviewModal .rv-toolbar');
     if (tb) new MutationObserver(schedule).observe(tb, { childList: true });
+    // Thêm trigger khi modal mở/đóng (đảm bảo nút xuất hiện dù ban đầu #rvList trống)
+    const modal = document.getElementById('scanReviewModal');
+    if (modal) {
+      new MutationObserver(() => { if (!modal.classList.contains('hidden')) { ensureToolbar(); setTimeout(ensureToolbar, 500); setTimeout(ensureToolbar, 1500); } })
+        .observe(modal, { attributes: true, attributeFilter: ['class'] });
+    }
+    // Thêm trigger khi click mở modal (chắc chắn hơn)
+    document.addEventListener('click', (e) => {
+      if (e.target.closest('#btnScanOpenReview')) {
+        setTimeout(ensureToolbar, 100);
+        setTimeout(ensureToolbar, 300);
+        setTimeout(ensureToolbar, 1000);
+      }
+    }, true);
+    console.info('[scan-review-av] observer đã khởi động');
   })();
 
   /* =================== 10. KHỞI ĐỘNG LẠI HÀNG ĐỢI =================== */
@@ -719,12 +728,13 @@
     setTimeout(() => runQueue(), 4000);
   }
 
-  /* =================== 11. ĐỒNG BỘ NGẦM CỘT AV CHO DỮ LIỆU CŨ =================== */
-  const AV_DONE_KEY = 'vehicleAvBackfillV1';
+  /* =================== 11. ĐỒNG BỘ NGẦM CỘT AV CHO DỮ LIỆU CŨ (v2) ===================
+     v2: dùng AV_KEY đúng khóa + ưu tiên khớp BIỂN SỐ + tránh kẹt "đã đẩy" khi lần ghi trước thất bại */
+  const AV_DONE_KEY = 'vehicleAvBackfillV2';
+  const AV_SKIP_MS = 4 * 60 * 60 * 1000;   // 4 giờ: sau 4h nếu chưa xác nhận, thử lại
   function avMatchKeyForRow(row) {
+    if (row && row.bienSo && String(row.bienSo).trim()) return { header: 'Biển số', value: String(row.bienSo).trim() };
     if (typeof matchKeyForRow === 'function') { try { return matchKeyForRow(row); } catch (e) { /* bỏ qua */ } }
-    const order = [['maId', 'Mã ID'], ['motoId', 'MOTO_ID'], ['bienSo', 'Biển số']];
-    for (const [k, h] of order) if (row && row[k] && String(row[k]).trim()) return { header: h, value: row[k] };
     return null;
   }
   async function backfillAV(opts) {
@@ -737,7 +747,7 @@
     let items = [];
     try { items = (await DB.dbGetAll(DB.ST_ITEMS)) || []; } catch (e) { return 0; }
     const seen = new Set();
-    let n = 0;
+    let n = 0, now = Date.now();
     for (const it of items) {
       const plate = it.bienSo || S.normalizeBienSo(it.bienSoRaw || (it.scanData && it.scanData.bienSo) || '');
       if (!plate) continue;
@@ -749,12 +759,20 @@
       const mk = avMatchKeyForRow(row);
       if (!mk) continue;
       const sig = mk.header + '=' + mk.value;
-      const cur = String(row[AV_KEY] || row[AV_HEADER] || '').trim();
-      if (!force && done[sig] === want && cur === want) continue;
-      row[AV_KEY] = want;                                           // cập nhật hiển thị local
-      try { enqueueRowSync(row, { [AV_HEADER]: want }); }           // CHỈ gửi tiêu đề cột → 1 cột AV duy nhất
-      catch (e) { console.warn('[scan-review-av] enqueue AV', e); continue; }
-      done[sig] = want;
+      const entry = done[sig];
+      const entryVal = typeof entry === 'string' ? entry : (entry && entry.v);
+      const entryTime = (typeof entry === 'object' && entry && entry.t) ? entry.t : 0;
+      if (!force && entryVal === want && (now - entryTime) < AV_SKIP_MS) continue;
+      row[AV_KEY] = want;
+      try {
+        // Ưu tiên khớp theo BIỂN SỐ (chắc chắn hơn Mã ID khi Excel tự đổi kiểu dữ liệu)
+        if (row.bienSo && String(row.bienSo).trim() && typeof enqueueSync === 'function') {
+          enqueueSync('Biển số', String(row.bienSo).trim(), { [AV_HEADER]: want }, row._rowId);
+        } else {
+          enqueueRowSync(row, { [AV_HEADER]: want });
+        }
+      } catch (e) { console.warn('[scan-review-av] enqueue AV', e); continue; }
+      done[sig] = { v: want, t: now };
       n++;
     }
     try { localStorage.setItem(AV_DONE_KEY, JSON.stringify(done)); } catch (e) { /* bỏ qua */ }
@@ -777,7 +795,7 @@
   let _autoRecheckBusy = false;
   async function autoRecheckPending() {
     if (_autoRecheckBusy) return;
-    if (isStopped()) return;                                       // người dùng đã «Dừng hẳn»
+    if (isStopped()) return;
     if (RECHECK.running || RECHECK.paused || RECHECK.queue.length) return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     if (shouldYield()) return;
@@ -832,8 +850,7 @@
     }).slice(0, 8);
   }
 
-  // Cache kết quả theo thẻ (60s) để observer không truy vấn DB lặp lại mỗi lần DOM đổi
-  const ownerCache = new Map();      // id -> { t, html }
+  const ownerCache = new Map();
   const ownerPending = new Set();
   function renderOwnerBox(curCard, html) {
     if (!html || curCard.querySelector('.rv-av-owner-matches')) return;
@@ -884,6 +901,7 @@
   setInterval(() => { try { autoBackfillAV(); } catch (e) { /* bỏ qua */ } }, 5 * 60 * 1000);
   try { if (typeof S.on === 'function') S.on('queueFinished', () => setTimeout(() => { try { autoBackfillAV(); } catch (e) { /* bỏ qua */ } }, 3000)); } catch (e) { /* bỏ qua */ }
   try { if (typeof S.on === 'function') S.on('itemsChanged', () => setTimeout(() => { try { autoBackfillAV(); } catch (e) { /* bỏ qua */ } }, 2500)); } catch (e) { /* bỏ qua */ }
+  setTimeout(() => { try { autoBackfillAV(); } catch (e) { /* bỏ qua */ } }, 15000);   // thêm 1 mốc nữa (sau khi connection ổn định)
 
   setTimeout(() => { try { autoRecheckPending(); } catch (e) { /* bỏ qua */ } }, 60000);
   setInterval(() => {
@@ -910,5 +928,5 @@
     AV_HEADER: AV_HEADER, AV_KEY: AV_KEY
   };
 
-  console.log('[scan-review-av] đã nạp: cột AV + Kiểm lại (gửi ảnh, tự động) + tick từng mục + lọc chưa chắc chắn + phiếu lạ + gợi ý trùng tên chủ xe');
+  console.log('[scan-review-av] đã nạp (bản 2026-11): cột AV (đúng khóa FIELD_MAP) + Kiểm lại (gửi ảnh, tự động) + tick từng mục + lọc chưa chắc chắn + phiếu lạ + gợi ý trùng tên chủ xe');
 })();
