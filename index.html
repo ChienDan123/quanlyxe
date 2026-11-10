@@ -6,25 +6,19 @@
 <title>Quản lý Phương tiện &amp; Bản cam kết</title>
 <link rel="stylesheet" href="style.css?v=20261013">
 <link rel="stylesheet" href="scan-review.css?v=20261028">
-<link rel="stylesheet" href="sync-issues.css?v=20261013"><!-- bảng chi tiết lỗi đồng bộ lên Sheet -->
+<link rel="stylesheet" href="sync-issues.css?v=20261013">
 <link rel="stylesheet" href="scan-store.css?v=20261013">
-<link rel="stylesheet" href="thu-hoi.css?v=20261026b"><!-- giao diện Giấy khai thu hồi đăng ký xe -->
-<link rel="stylesheet" href="scan-review-ui.css?v=20261013"><!-- bố cục đối chiếu: 2 cột màu theo nguồn + khung «CẢ XE» --><!-- giao diện cài đặt nơi lưu + kho ảnh --><!-- giao diện màn so sánh & xem phiếu scan -->
+<link rel="stylesheet" href="thu-hoi.css?v=20261026b">
+<link rel="stylesheet" href="scan-review-ui.css?v=20261013">
 </head>
 <body>
 
-<!-- ============ HEADER ============ -->
 <header class="app-header">
   <div class="header-left">
     <h1>🏍️ Quản lý Phương tiện &amp; Bản cam kết</h1>
     <span id="recordCount" class="badge">0 bản ghi</span>
     <span id="modeBadge" class="badge badge-mode hidden"></span>
-    <!-- Yêu cầu (đồng bộ ngầm + trạng thái rõ ràng): hiện trạng thái hàng đợi
-         đồng bộ nền lên Google Sheet (đang đồng bộ / đang chờ thử lại / đã
-         xong). Ẩn hoàn toàn khi không có gì cần đồng bộ. Xem updateSyncStatusBadge()
-         trong app.js. -->
     <span id="syncStatusBadge" class="badge badge-mode hidden"></span>
-    <!-- Chip tiến độ quét chạy NGẦM (hiện khi hàng đợi quét đang chạy/tạm dừng; bấm để mở lại cửa sổ Quét phiếu) -->
     <button id="scanBgChip" type="button" class="badge badge-mode scan-bg-chip hidden" title="Bấm để mở cửa sổ Quét phiếu"></button>
   </div>
   <div class="header-right">
@@ -35,7 +29,6 @@
   </div>
 </header>
 
-<!-- ============ MODAL KẾT NỐI SHEET ============ -->
 <div id="connectModal" class="modal-overlay hidden">
   <div class="modal modal-sm">
     <div class="modal-header">
@@ -48,7 +41,6 @@
         <button class="tab-btn" data-tab="csv">👁️ CSV công khai (Chỉ đọc)</button>
       </div>
 
-      <!-- TAB: APPS SCRIPT (2 chiều) -->
       <div class="tab-pane" data-pane="gas">
         <p class="hint">Dán URL Web App của Google Apps Script (đã Deploy) để có thể <b>đọc và ghi ngược</b> dữ liệu (Trạng thái xe, Ghi chú, Ngày xuất cam kết...) về đúng Google Sheet.</p>
         <input id="gasUrlInput" type="text" placeholder="https://script.google.com/macros/s/XXXXXXXX/exec">
@@ -66,7 +58,6 @@
         </details>
       </div>
 
-      <!-- TAB: CSV (chỉ đọc) -->
       <div class="tab-pane hidden" data-pane="csv">
         <p class="hint">Dán URL Google Sheet (dạng thường, dạng "Xuất bản lên web" CSV, hoặc URL CSV bất kỳ). Chế độ này <b>chỉ đọc</b>, không ghi ngược được về Sheet.</p>
         <input id="sheetUrlInput" type="text" placeholder="https://docs.google.com/spreadsheets/d/....">
@@ -91,7 +82,6 @@
   </div>
 </div>
 
-<!-- ============ MODAL CÀI ĐẶT MẪU BẢN CAM KẾT ============ -->
 <div id="settingsModal" class="modal-overlay hidden">
   <div class="modal modal-lg">
     <div class="modal-header">
@@ -120,7 +110,6 @@
         <div><label class="hint-label" for="geminiMaxWait">Số lần chờ quota tối đa</label>
           <input id="geminiMaxWait" type="number" min="0" class="tpl-input"></div>
       </div>
-      <!-- Model dự phòng + bảng trạng thái model (scan.js điền nội dung). Khi gặp 503 quá tải / 429 hết quota, tự thử lần lượt các model này. -->
       <div id="geminiModelExtra" style="margin:10px 0 18px;">
         <label class="hint-label" for="geminiFallback">Model dự phòng <span class="hint">(thử lần lượt khi model chính bị 503/429, cách nhau bằng dấu phẩy)</span></label>
         <input id="geminiFallback" type="text" class="tpl-input" style="width:100%;" autocomplete="off" spellcheck="false" placeholder="gemini-3.6-flash, gemini-3.5-flash-lite, gemini-2.5-flash">
@@ -204,7 +193,6 @@
   </div>
 </div>
 
-<!-- ============ MODAL QUÉT PHIẾU (Sprint 2: upload PDF/ảnh → hàng đợi tuần tự → Gemini) ============ -->
 <div id="scanModal" class="modal-overlay hidden">
   <div class="modal modal-xl">
     <div class="modal-header">
@@ -281,17 +269,14 @@
   </div>
 </div>
 
-<!-- ============ MAIN LAYOUT ============ -->
 <main class="app-main">
 
-  <!-- ---- FILTER BAR ---- -->
   <section class="filter-bar" id="filterBar">
     <div class="filter-section-title include-title">🔎 Lọc theo <span>(chỉ giữ lại các dòng khớp)</span></div>
     <div class="filter-field" data-field="bienSo">
       <label>Biển số</label>
       <div class="ms-control" data-field="bienSo"></div>
     </div>
-    <!-- Lọc theo DANH SÁCH BIỂN SỐ: dán cột biển số copy từ Excel (xem 6b-3 trong app.js). -->
     <div class="filter-field plate-filter-wrap" id="plateFilterWrap">
       <label for="plateFilterInput">Lọc theo danh sách biển số <span class="plate-hint">(dán từ Excel)</span></label>
       <textarea id="plateFilterInput" class="plate-filter-input" rows="2" spellcheck="false" autocomplete="off"
@@ -311,14 +296,6 @@
     </div>
     <div class="filter-field" data-field="diaChi">
       <label>Địa chỉ / Phường-Xã</label>
-      <!-- Yêu cầu (Cách khớp khi tìm địa chỉ): địa chỉ có nhiều cấp (thôn, xã...)
-           ngăn cách bởi dấu phẩy, có nơi thiếu cấp thôn -> kiểu "chứa chuỗi" dễ
-           khớp nhầm địa chỉ dài hơn. Chỉ còn 2 cách khớp: "Chứa chuỗi" và
-           "Bắt đầu bằng". Lưu lại cho lần sau (xem ADDR_MATCH_MODES +
-           persistFilterState/restoreFilterState trong app.js).
-           Đặt TRÊN ô tìm kiếm (không phải dưới) để không bị danh sách kết quả
-           (dropdown) che mất khi đang mở. Ô tìm kiếm bên dưới có thể kéo rộng/
-           thu hẹp (resizable) — xem .ms-input-box trong style.css. -->
       <div class="addr-match-row">
         <label for="addrMatchMode" class="addr-match-label">Cách khớp</label>
         <select id="addrMatchMode" class="addr-match-select" title="Chọn cách so khớp khi gõ tìm địa chỉ/phường-xã">
@@ -344,13 +321,11 @@
       <label>Người thực hiện</label>
       <div class="ms-control" data-field="nguoiThucHien"></div>
     </div>
-    <!-- Lọc theo Chuyên đề (cột G sheet «Tong hop») — chọn 1 hoặc nhiều giá trị. Chỉ có ở «Lọc theo». -->
     <div class="filter-field" data-field="chuyenDe">
       <label>Chuyên đề</label>
       <div class="ms-control" data-field="chuyenDe"></div>
     </div>
     <div class="filter-actions">
-      <!-- Lọc theo phiếu scan (xử lý bởi scan-review.js -> ScanHooks.rowPassesFilter) -->
       <label class="chk-inline" title="Chỉ hiện xe đã có phiếu scan"><input type="checkbox" id="chkHasScan"> 📷 Có phiếu scan</label>
       <select id="selScanReview" class="row-inline-select" title="Lọc theo trạng thái kiểm phiếu">
         <option value="">Kiểm phiếu: tất cả</option>
@@ -362,9 +337,6 @@
     </div>
   </section>
 
-  <!-- ---- LOẠI TRỪ: Kết quả = (Lọc theo) TRỪ (Loại trừ). Ô được dựng bằng
-       buildExcludeBar() trong app.js từ FILTER_FIELDS; mỗi trường có công tắc
-       bật/tắt riêng. ---- -->
   <section class="filter-bar exclude-bar" id="excludeBar">
     <div class="filter-section-title exclude-title">🚫 Loại trừ <span>(ẩn các dòng khớp khỏi kết quả — thắng cả "Lọc theo")</span>
       <span id="excludeSummary" class="exclude-summary">Chưa loại trừ gì</span>
@@ -375,7 +347,6 @@
     </div>
   </section>
 
-  <!-- ---- SẮP XẾP + LỌC BỔ SUNG + XUẤT EXCEL (Yêu cầu #2) ---- -->
   <section class="filter-bar sort-bar" id="sortBar">
     <div class="filter-section-title sort-title">↕️ Sắp xếp theo <span>(có thể kết hợp nhiều tiêu chí)</span></div>
     <div class="filter-field sort-field-wrap">
@@ -387,7 +358,6 @@
       <label>Lọc bổ sung</label>
       <label class="chk-inline"><input type="checkbox" id="chkHasPhone"> Người có số điện thoại</label>
       <label class="chk-inline"><input type="checkbox" id="chkMultiVehicle"> Người/gia đình có nhiều xe (nhiều → ít)</label>
-      <!-- Yêu cầu #6: mặc định BẬT (checked) - tự động loại khỏi danh sách khi mở trang -->
       <label class="chk-inline"><input type="checkbox" id="chkExcludeDone" checked> Loại bỏ đã thực hiện</label>
       <label class="chk-inline"><input type="checkbox" id="chkExcludeRecontact" checked> Cần liên hệ lại (ẩn khỏi danh sách)</label>
       <label class="chk-inline"><input type="checkbox" id="chkExcludeSigned"> Loại bỏ đã ký cam kết</label>
@@ -395,23 +365,18 @@
     <div class="filter-actions">
       <button id="btnClearSort" class="btn btn-ghost">Xóa sắp xếp</button>
       <button id="btnExportXlsx" class="btn btn-secondary">📊 Xuất Excel (.xlsx)</button>
-      <!-- Xuất báo cáo C08 (hậu kiểm xe 100 ngày đợt 1): chọn phạm vi + đơn vị rà soát trong hộp thoại c08Modal bên dưới. Xem mục 7b trong app.js. -->
       <button id="btnExportC08" class="btn btn-secondary" title="Xuất báo cáo C08 (hậu kiểm xe 100 ngày đợt 1) theo đúng file mẫu">📑 Xuất báo cáo C08</button>
+      <button id="btnDailyReport" class="btn btn-secondary" title="Xuất báo cáo hàng ngày «Kết quả công tác làm sạch dữ liệu đăng ký xe» theo đúng file mẫu">📊 Báo cáo hàng ngày</button>
       <button id="btnPrintList" class="btn btn-secondary" title="In danh sách đang lọc + sắp xếp (chọn cột, A4 ngang/dọc)">🖨️ Xuất trang in</button>
     </div>
   </section>
 
-  <!-- ---- TOOLBAR (export / paging size) ---- -->
   <section class="toolbar">
     <div class="toolbar-left">
       <label class="chk-all"><input type="checkbox" id="chkSelectAllPage"> Chọn tất cả (trang này)</label>
       <span id="selectedCount" class="selected-count">0 xe đã chọn để xuất</span>
       <button id="btnDeselectAll" class="btn btn-ghost btn-sm" disabled title="Bỏ chọn tất cả xe đang chọn (mọi trang / mọi bộ lọc)">🗑️ Bỏ chọn tất cả</button>
       <button id="btnBulkUpdate" class="btn btn-secondary btn-sm" disabled title="Chọn ít nhất 1 xe để cập nhật hàng loạt">🔄 Cập nhật hàng loạt</button>
-      <!-- Yêu cầu (Nâng cấp chức năng In — Đánh dấu đã in): đánh dấu/bỏ đánh dấu
-           "Đã in" cho các xe đang tích chọn (checkbox), để lần in sau có thể
-           loại trừ (xem tuỳ chọn "Loại trừ dòng đã in" trong hộp thoại Xuất trang in).
-           Đánh dấu chỉ lưu ở trình duyệt này (localStorage), không ghi lên Sheet. -->
       <button id="btnMarkPrinted" class="btn btn-ghost btn-sm" disabled title="Đánh dấu các xe đang chọn là 'Đã in'">🖨️✅ Đánh dấu đã in</button>
       <button id="btnUnmarkPrinted" class="btn btn-ghost btn-sm" disabled title="Bỏ đánh dấu 'Đã in' cho các xe đang chọn">↺ Bỏ đánh dấu đã in</button>
     </div>
@@ -425,12 +390,10 @@
         </select>
       </label>
       <button id="btnCreateCommitment" class="btn btn-primary">📄 Tạo Bản cam kết</button>
-      <!-- Giấy khai thu hồi chứng nhận đăng ký xe, biển số xe (xuất PDF) cho các xe đã tích chọn — xem thu-hoi-ui.js -->
       <button id="btnThuHoi" class="btn btn-secondary" title="Lập Giấy khai thu hồi đăng ký xe, biển số xe (PDF) cho các xe đã tích chọn">🗒️ Giấy khai thu hồi</button>
     </div>
   </section>
 
-  <!-- ---- DATA TABLE ---- -->
   <section class="table-wrap">
     <table id="dataTable">
       <thead>
@@ -460,21 +423,15 @@
     </table>
   </section>
 
-  <!-- ---- THANH TRƯỢT NGANG DÍNH CỐ ĐỊNH DƯỚI CHÂN TRANG (sticky bottom) ----
-       Luôn hiện rõ để kéo xem các cột bị che khuất bên phải, kể cả khi danh
-       sách xe rất dài (không cần kéo hết trang xuống mới thấy). Chỉ hiện khi
-       bảng thực sự tràn ngang (xem setupMainHScrollSync() trong app.js). -->
   <div class="hscroll-track hscroll-track-sticky hidden" id="mainHScrollTrack">
     <span class="hscroll-icon">↔️</span>
     <input type="range" id="mainHScrollRange" min="0" max="0" value="0" aria-label="Kéo để xem các cột bị che bên phải">
   </div>
 
-  <!-- ---- PAGINATION ---- -->
   <section class="pagination" id="pagination"></section>
 
 </main>
 
-<!-- ============ DETAIL PANEL (SLIDE-OVER) ============ -->
 <div id="detailOverlay" class="modal-overlay hidden">
   <aside id="detailPanel" class="detail-panel">
     <div class="detail-resize-handle" id="detailResizeHandle" title="Kéo để thay đổi độ rộng"></div>
@@ -482,12 +439,8 @@
       <h2>Chi tiết chủ phương tiện</h2>
       <button class="modal-close" data-close="detailOverlay">✕</button>
     </div>
-    <div class="modal-body" id="detailBody"><!-- filled by JS --></div>
+    <div class="modal-body" id="detailBody"></div>
 
-    <!-- ---- CHÂN TRANG DÍNH CỐ ĐỊNH (sticky bottom) CỦA PANEL ----
-         Nằm NGOÀI vùng cuộn (#detailBody) nên luôn hiện rõ ở đáy panel: thanh
-         trượt ngang dùng chung cho mọi bảng xe (Mục I-V) + 2 nút Lưu, không
-         bao giờ bị khuất dù danh sách xe của chủ phương tiện rất dài. -->
     <div class="detail-sticky-footer" id="detailStickyFooter">
       <div class="hscroll-track hidden" id="detailHScrollTrack">
         <span class="hscroll-icon">↔️</span>
@@ -502,9 +455,6 @@
   </aside>
 </div>
 
-<!-- ============ MODAL XUẤT TRANG IN ============
-     Chọn cột sẽ in + khổ giấy. Lựa chọn được lưu (localStorage) để lần sau không
-     phải chọn lại. Danh sách cột được vẽ bằng JS (PRINT_COLUMNS trong app.js). -->
 <div id="printModal" class="modal-overlay hidden">
   <div class="modal">
     <div class="modal-header">
@@ -532,9 +482,6 @@
         <option value="portrait">A4 dọc</option>
       </select>
 
-      <!-- Yêu cầu (Nâng cấp chức năng In): đánh dấu đã in + mở rộng danh sách in
-           theo CCCD trùng / cùng xã khác thôn trùng tên (in theo thôn, in lẻ từng
-           người). Xem computePrintRows()/expandPrintRows() trong app.js. -->
       <div class="section-title" style="margin-top:14px;">🖨️ Đã in / Mở rộng danh sách in</div>
       <label class="chk-inline" style="display:flex;margin-bottom:6px;">
         <input type="checkbox" id="chkPrintExcludePrinted"> Loại trừ các dòng đã đánh dấu "Đã in" (chỉ in phần chưa in)
@@ -560,8 +507,6 @@
   </div>
 </div>
 
-<!-- ============ MODAL XUẤT BÁO CÁO C08 ============
-     Chọn phạm vi dữ liệu + đơn vị rà soát mặc định. Logic ở mục 7b trong app.js (exportC08). -->
 <div id="c08Modal" class="modal-overlay hidden">
   <div class="modal modal-sm">
     <div class="modal-header">
@@ -588,7 +533,32 @@
   </div>
 </div>
 
-<!-- ============ MODAL CẬP NHẬT HÀNG LOẠT ============ -->
+<!-- ============ MODAL BÁO CÁO HÀNG NGÀY (theo mẫu «Báo cáo hàng ngày kết quả LSDL.xlsx») ============ -->
+<div id="dailyReportModal" class="modal-overlay hidden">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2>📊 Báo cáo hàng ngày — Kết quả LSDL</h2>
+      <button class="modal-close" data-close="dailyReportModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Xuất file .xlsx theo mẫu «Báo cáo hàng ngày kết quả LSDL»: 3 hàng tiêu đề (gộp ô) + 4 hàng dữ liệu
+        (<b>Xã Chiên Đàn (tổng)</b>, <b>trong đó: Có phiếu scan</b>, <b>trong đó: Không có phiếu scan</b>, <b>TỔNG</b>) + ghi chú.</p>
+      <p class="hint">Cột «trong ngày» (Số cài đặt mới / Số rà soát trong ngày / Số thu hồi trong ngày…) cần <b>nhập tay</b> sau khi tải — không có nguồn tự động. Các cột «Tổng số đã rà soát / Tổng số đã thu hồi / phân loại đối tượng» tự tính từ dữ liệu <code>Tong hop</code> (cột Trạng thái xe + Chuyên đề).</p>
+      <label class="hint-label" for="drDate">Ngày báo cáo</label>
+      <input id="drDate" type="date" class="tpl-input">
+      <label class="hint-label" for="drUnit">Tên đơn vị</label>
+      <input id="drUnit" type="text" class="tpl-input" placeholder="VD: Xã Chiên Đàn" autocomplete="off">
+      <p class="hint" style="margin-top:8px;">Dòng «Có phiếu scan / Không có phiếu scan» giúp tách bạch nguồn số liệu: xe đã có phiếu scan (do quét) vs xe chỉ có trong danh sách <code>Tong hop</code>.</p>
+    </div>
+    <div class="modal-footer">
+      <span class="hint">Định dạng giống file mẫu (Times New Roman 10, tiêu đề nền xanh 1F497D, có viền).</span>
+      <div class="footer-btns">
+        <button type="button" class="btn btn-primary" id="btnDrExport">⬇️ Tải báo cáo (.xlsx)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="bulkUpdateModal" class="modal-overlay hidden">
   <div class="modal modal-sm">
     <div class="modal-header">
@@ -637,7 +607,6 @@
   </div>
 </div>
 
-<!-- ============ COMMITMENT (BẢN CAM KẾT) MODAL ============ -->
 <div id="commitmentOverlay" class="modal-overlay hidden">
   <div class="modal modal-lg">
     <div class="modal-header">
@@ -662,7 +631,6 @@
   </div>
 </div>
 
-<!-- ============ MODAL SO SÁNH & XÁC NHẬN CẬP NHẬT TỪ PHIẾU SCAN (scan-review.js) ============ -->
 <div id="scanReviewModal" class="modal-overlay hidden">
   <div class="modal modal-xl rv-modal">
     <div class="modal-header">
@@ -696,19 +664,15 @@
           <option value="dead">⚰ Chủ xe đã chết</option>
           <option value="all">Tất cả</option>
         </select>
-        <!-- Lọc theo tên người kiểm (= Người thực hiện); danh sách được script nạp -->
         <select id="rvChecker" class="tpl-input" style="width:auto" title="Lọc theo người kiểm"></select>
         <input id="rvSearch" class="tpl-input" type="search" placeholder="Tìm biển số / chủ xe…" style="max-width:220px">
-        <!-- Người thực hiện: cùng danh sách với cột «Người thực hiện» ở bảng chính; ghi kèm khi áp dụng -->
         <label class="rv-tool-lbl" title="Ghi vào cột «Người thực hiện» của mỗi xe khi áp dụng (Sheet đã có người khác thì giữ nguyên)">👤 Người thực hiện:
           <select id="rvAssignee" class="row-inline-select"></select></label>
         <label class="chk-inline" title="Khi lấy dữ liệu từ phiếu, nối dấu «📷Phiếu dd/mm: CCCD, SĐT» vào cột Ghi Chú để sau này biết nguồn"><input type="checkbox" id="rvChkTag" checked> Ghi dấu 📷 nguồn phiếu</label>
         <label class="chk-inline" title="Bấm nút ở khung «CẢ XE» (Cả xe: giữ hết Google Sheet / lấy hết từ phiếu scan) là áp dụng luôn cho xe đó"><input type="checkbox" id="rvChkQuick" checked> Xác nhận nhanh = áp dụng luôn</label>
-        <!-- Nút ghi phiếu lạ: dính trên thanh công cụ (thanh này sticky) -->
-        <button type="button" id="rvOrphanBtn" class="btn btn-primary btn-sm rv-orphan-sticky" disabled title="Ghi dữ liệu phiếu (đã chỉnh sửa) của xe chưa có trong danh sách vào cột «Phiếu lạ» AL–AP — áp dụng cho thẻ đang chọn">📷 Dữ liệu từ phiếu scan đúng → ghi phiếu lạ (AL–AP)</button>
+        <button type="button" id="rvOrphanBtn" class="btn btn-primary btn-sm rv-orphan-sticky" disabled title="Ghi dữ liệu phiếu (đã chỉnh sửa) của xe chưa có trong danh sách vào cột «Phiếu lạ» AL–AP">📷 Dữ liệu từ phiếu scan đúng → ghi phiếu lạ (AL–AP)</button>
         <span id="rvPager" class="rv-pager"></span>
       </div>
-      <!-- Vùng làm việc: [ảnh phiếu] cạnh [bảng so sánh] — ảnh chỉ hiện khi bấm «Xem ảnh phiếu» -->
       <div id="rvWork" class="rv-work">
         <aside id="rvImgPane" class="rv-imgpane hidden">
           <div class="rv-imgpane-head">
@@ -748,7 +712,6 @@
   </div>
 </div>
 
-<!-- ============ MODAL KHO ẢNH PHIẾU SCAN (scan-store.js): kiểm tra, sửa, xóa ============ -->
 <div id="scanStoreModal" class="modal-overlay hidden">
   <div class="modal modal-xl">
     <div class="modal-header">
@@ -781,7 +744,6 @@
   </div>
 </div>
 
-<!-- ============ MODAL XEM ẢNH / PDF PHIẾU SCAN (mặt 1 + mặt 2 = trọn 1 phiếu đến chữ ký xác nhận) ============ -->
 <div id="scanViewerModal" class="modal-overlay hidden">
   <div class="modal modal-xl">
     <div class="modal-header">
@@ -800,7 +762,6 @@
   </div>
 </div>
 
-<!-- ============ MODAL CHI TIẾT LỖI ĐỒNG BỘ (bấm vào dòng «thay đổi lỗi…» ở đầu trang) — nội dung do sync-issues.js vẽ ============ -->
 <div id="syncIssuesModal" class="modal-overlay hidden">
   <div class="modal">
     <div class="modal-header">
@@ -819,21 +780,23 @@
 <div id="toast" class="toast hidden"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-<!-- Thư viện docx (xuất Word) được nạp theo yêu cầu bởi ensureDocxLib() trong app.js: ưu tiên lib/docx.umd.js, dự phòng CDN. -->
 <script src="app.js?v=20261020"></script>
-<script src="thu-hoi.js?v=20261026b"></script><!-- lõi tạo PDF Giấy khai thu hồi (bố cục theo file mẫu) -->
-<script src="thu-hoi-ui.js?v=20261026b"></script><!-- hộp thoại sửa thông tin + xem trước + xuất PDF / in bồi -->
-<script src="sync-issues.js?v=20261013"></script><!-- phân loại lỗi đồng bộ + bảng chi tiết (nạp ngay sau app.js) -->
+<script src="thu-hoi.js?v=20261026b"></script>
+<script src="thu-hoi-ui.js?v=20261026b"></script>
+<script src="sync-issues.js?v=20261013"></script>
 <script src="scan.js?v=20261013"></script>
-<script src="scan-compare.js?v=20261013"></script><!-- hàm so sánh thuần (phải nạp trước scan-review.js) -->
-<script src="scan-review.js?v=20261028"></script><!-- THÊM MỚI: patch bổ sung cho màn So sánh phiếu (cột AV, nút Kiểm lại, Đã kiểm đúng biển số, lọc Chưa chắc chắn). KHÔNG sửa file gốc, chỉ móc (patch). --><script src="scan-review-av.js?v=20261103"></script>
-<script src="scan-files.js?v=20261013"></script><!-- đặt tên file theo biển số + PDF đầy đủ 2 mặt -->
-<script src="scan-sync.js?v=20261013"></script><!-- lưu ảnh / trạng thái phiếu online (Drive) -->
-<script src="scan-rotate.js?v=20261013"></script><!-- xoay ảnh phiếu từng mặt + tự nhận hướng + lưu hướng đã chỉnh -->
-<script src="scan-hub.js?v=20261013"></script><!-- đồng bộ cấu hình đa thiết bị (nơi lưu, cài đặt Gemini, tùy chọn) -->
-<script src="scan-store.js?v=20261013"></script><!-- cài đặt nơi lưu + kho ảnh + kho khóa -->
-<script src="scan-disk.js?v=20261013"></script><!-- chọn thư mục lưu ảnh trên máy tính (ổ C/D/…) -->
-<script src="scan-sheet.js?v=20261021"></script><!-- đồng bộ dữ liệu «Từ phiếu scan» sang sheet Dulieuscan -->
-<script src="layout.js?v=20261013"></script><!-- THÊM MỚI: module Biên bản làm việc (tự chèn nút vào toolbar, panel Chi tiết, Cài đặt). --><script src="bien-ban.js?v=20261103"></script>
+<script src="scan-compare.js?v=20261013"></script>
+<script src="scan-review.js?v=20261028"></script>
+<script src="scan-review-av.js?v=20261110"></script>
+<script src="scan-files.js?v=20261013"></script>
+<script src="scan-sync.js?v=20261013"></script>
+<script src="scan-rotate.js?v=20261013"></script>
+<script src="scan-hub.js?v=20261013"></script>
+<script src="scan-store.js?v=20261013"></script>
+<script src="scan-disk.js?v=20261013"></script>
+<script src="scan-sheet.js?v=20261021"></script>
+<script src="layout.js?v=20261013"></script>
+<script src="bien-ban.js?v=20261103"></script>
+<script src="daily-report.js?v=20261110"></script>
 </body>
 </html>
