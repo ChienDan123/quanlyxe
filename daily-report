@@ -1,0 +1,402 @@
+/* =========================================================================
+   daily-report.js — BÁO CÁO HÀNG NGÀY «KẾT QUẢ CÔNG TÁC LÀM SẠCH DỮ LIỆU ĐĂNG KÝ XE»
+   Nạp SAU app.js (dùng state.rawData, toast, escapeHtml…).
+
+   - Xuất file .xlsx theo mẫu «Báo cáo hàng ngày kết quả LSDL.xlsx»:
+     3 hàng tiêu đề (gộp ô), 4 hàng dữ liệu: Xã Chiên Đàn (tổng), Có phiếu scan, Không có phiếu scan, TỔNG.
+   - Số liệu: lấy từ dữ liệu đang có trên hệ thống (state.rawData + cột «Chuyên đề» nếu có).
+     Các cột «trong ngày» (C, F, H, J, P, V, AB, AI, AO) — không có sẵn nguồn => để trống/0, cần nhập tay.
+     Các cột «Tổng số đã rà soát / Tổng số đã thu hồi / phân loại đối tượng» — TỰ TÍNH từ dữ liệu.
+   - Thêm 2 dòng «Có phiếu scan» / «Không có phiếu scan» (theo yêu cầu #4) để tách bạch nguồn số liệu.
+   - Nạp thư viện xlsx-js-style (định dạng như C08) hoặc fallback SheetJS thường.
+   ========================================================================= */
+const DailyReport = (() => {
+  'use strict';
+  const DATE_KEY = 'dailyReportDateV1';
+  const UNIT_KEY = 'dailyReportUnitV1';
+  const DEFAULT_UNIT = 'Xã Chiên Đàn';
+  const COLS = 48;
+
+  // ---------- 3 hàng tiêu đề (mỗi hàng 48 ô) ----------
+  const HDR_3 = [
+    'STT', 'TÊN ĐƠN VỊ',
+    'Kết quả hướng dẫn cài đặt VNeTraffic khi tiếp nhận giải quyết đăng ký xe', '', '',
+    'Kết quả rà soát xe một chủ nhiều phương tiện', '',
+    'Số phương tiện chuyển nhượng quá 30 ngày mới thực hiện sang tên (có xử phạt)', '',
+    'Kết quả rà soát xe hết niên hạn sử dụng', '', '', '', '', '',
+    'Số PT đã thu hồi ĐK, BS xe (hết niên hạn)', '', '', '', '', '',
+    'Kết quả rà soát xe ô tô chưa thực hiện kiểm định từ 30/6/2024', '', '', '', '', '', '', '', '', '', '', '',
+    'Số PT đã đăng kiểm lại',
+    'Kết quả rà soát phương tiện có nhãn hiệu không còn tồn tại hoặc đã đăng ký trên 20 năm', '', '', '', '', '', '', '', '', '', '', '',
+    'KẾT QUẢ LSDL CHUNG', ''
+  ];
+  const HDR_4 = [
+    '', '',
+    'Số liệu hướng dẫn cài đặt thành công trong ngày', '', 'Tổng số đã hướng dẫn cài đặt thành công',
+    'Số PT đã rà soát', '',
+    'Số TH đã hoàn thành thủ tục đăng ký sang tên', '',
+    'Phân loại đối tượng (hết niên hạn)', '', '', '', '', '',
+    'Phân loại thu hồi', '', '', '', '', '',
+    'Phân loại đối tượng (ô tô)', '', '', '', '', '', '', '', '', '', '', '',
+    '',
+    'Phân loại đối tượng (nhãn hiệu lạ)', '', '', '', '', '', '', '', '', '', '',
+    'Kết quả cập nhật lại trạng thái PT trên hệ thống ĐKX', 'Tổng kết quả'
+  ];
+  const HDR_5 = [
+    '', '',
+    'Số cài đặt mới trong ngày', 'Số đến làm thủ tục ĐKX nhưng đã cài đặt VNeTraffic', '',
+    'Số rà soát trong ngày', 'Tổng số đã rà soát',
+    'Số TH hoàn thành sang tên trong ngày', 'Tổng số TH đã hoàn thành thủ tục',
+    'Số rà soát trong ngày', 'Tổng số đã rà soát',
+    'Có chủ, có xe tại địa bàn', 'Có chủ, không có xe tại địa bàn', 'Không chủ, có xe tại địa bàn', 'Không chủ, không xe tại địa bàn',
+    'Số thu hồi trong ngày', 'Tổng số đã thu hồi', 'Số PT thu được ĐK&BS', 'Số PT chỉ thu được ĐK', 'Số PT chỉ thu được BS', 'Số PT không thu được ĐK&BS',
+    'Số rà soát trong ngày', 'Tổng số đã rà soát',
+    'Có chủ, có xe tại địa bàn', 'Có chủ, không có xe tại địa bàn', 'Không chủ, có xe tại địa bàn', 'Không chủ, không xe tại địa bàn',
+    'Số thu hồi trong ngày', 'Tổng số đã thu hồi', 'Số PT thu hồi được ĐK&BS', 'Số PT chỉ thu được ĐK', 'Số PT chỉ thu được BS', 'Số PT không thu được ĐK&BS',
+    '',
+    'Số rà soát trong ngày', 'Tổng số đã rà soát',
+    'Có chủ, có xe tại địa bàn', 'Có chủ, không có xe tại địa bàn', 'Không chủ, có xe tại địa bàn', 'Không chủ, không xe tại địa bàn',
+    'Số thu hồi trong ngày', 'Tổng số đã thu hồi', 'Số PT thu hồi được ĐK&BS', 'Số PT chỉ thu được ĐK', 'Số PT chỉ thu được BS', 'Số PT không thu được ĐK&BS',
+    '', ''
+  ];
+
+  // Merges [r1, c1, r2, c2] — 0-based
+  const MERGES = [
+    [2, 0, 4, 0],    // A3:A5
+    [2, 1, 4, 1],    // B3:B5
+    [2, 2, 2, 4],    // C3:E3
+    [3, 2, 3, 3],    // C4:D4
+    [3, 4, 4, 4],    // E4:E5
+    [2, 5, 2, 6],    // F3:G3
+    [3, 5, 3, 6],    // F4:G4
+    [2, 7, 2, 8],    // H3:I3
+    [3, 7, 3, 8],    // H4:I4
+    [2, 9, 2, 14],   // J3:O3
+    [3, 9, 3, 14],   // J4:O4
+    [2, 15, 2, 20],  // P3:U3
+    [3, 15, 3, 20],  // P4:U4
+    [2, 21, 2, 32],  // V3:AG3
+    [3, 21, 3, 32],  // V4:AG4
+    [2, 33, 4, 33],  // AH3:AH5 (vertical)
+    [2, 34, 2, 45],  // AI3:AT3
+    [3, 34, 3, 45],  // AI4:AT4
+    [2, 46, 2, 47],  // AU3:AV3
+    [3, 46, 4, 46],  // AU4:AU5 (vertical)
+    [3, 47, 4, 47]   // AV4:AV5 (vertical)
+  ];
+
+  /* ---------- Tiện ích ---------- */
+  const safe = (s) => (s || '').toString().trim();
+  const isHasScan = (row) => {
+    if (safe(row.phieuScan)) return true;
+    if (safe(row.kiemPhieu) === 'Đã kiểm') return true;
+    try {
+      const app = window.ScanApp;
+      const l = app && window.ScanReview && ScanReview.linkMap && ScanReview.linkMap.get(app.normalizeBienSo(row.bienSo));
+      if (l && !l.orphan) return true;
+    } catch (e) { /* bỏ qua */ }
+    return false;
+  };
+  const getChuyenDe = (row) => {
+    if (row.chuyenDe) return row.chuyenDe;
+    const ex = row._extra;
+    if (ex) for (const k of Object.keys(ex)) { if (/chuyen de/i.test(k.replace(/[^a-z]/gi, ' '))) return ex[k]; }
+    return '';
+  };
+  const hasChu = (row) => !!safe(row.chuXe);
+  const hasXe = (row) => !!(safe(row.bienSo) || safe(row.soKhung) || safe(row.soMay));
+  const ownerCat = (row) => {
+    const c = hasChu(row), x = hasXe(row);
+    if (c && x) return 'cx';
+    if (c && !x) return 'c0';
+    if (!c && x) return '0x';
+    return '00';
+  };
+  const STATUS_THUHOI = 'Đã thực hiện thu hồi';
+  const STATUS_SANGTEN = 'Đã hoàn thành sang tên';
+
+  /* ---------- Tính 1 hàng dữ liệu từ tập xe ---------- */
+  function computeRow(rows) {
+    const r = { C: 0, D: 0, E: 0, F: 0, G: 0, H: 0, I: 0, J: 0, K: 0, L: 0, M: 0, N: 0, O: 0,
+      P: 0, Q: 0, R: 0, S: 0, T: 0, U: 0, V: 0, W: 0, X: 0, Y: 0, Z: 0, AA: 0, AB: 0, AC: 0, AD: 0, AE: 0, AF: 0, AG: 0, AH: 0,
+      AI: 0, AJ: 0, AK: 0, AL: 0, AM: 0, AN: 0, AO: 0, AP: 0, AQ: 0, AR: 0, AS: 0, AT: 0, AU: 0, AV: 0 };
+    // Đếm số xe theo chủ (cho cột G — một chủ nhiều PT)
+    const ownerCount = new Map();
+    rows.forEach(rw => {
+      const k = safe(rw.cccd) || ('n:' + safe(rw.chuXe).toLowerCase());
+      if (k && k !== 'n:') ownerCount.set(k, (ownerCount.get(k) || 0) + 1);
+    });
+    rows.forEach(rw => {
+      const tt = safe(rw.trangThaiXe), cd = getChuyenDe(rw);
+      const cat = ownerCat(rw);
+      // Một chủ nhiều PT (G)
+      const k = safe(rw.cccd) || ('n:' + safe(rw.chuXe).toLowerCase());
+      if (k && k !== 'n:' && (ownerCount.get(k) || 0) > 1) r.G++;
+      // Sang tên (I)
+      if (tt === STATUS_SANGTEN) r.I++;
+      // Hết niên hạn (K + L,M,N,O)
+      if (/niên hạn|nien han/i.test(tt) || /niên hạn|nien han/i.test(cd)) {
+        r.K++;
+        if (cat === 'cx') r.L++; else if (cat === 'c0') r.M++; else if (cat === '0x') r.N++; else r.O++;
+      }
+      // Thu hồi (Q): tính những xe đã thực hiện thu hồi
+      if (tt === STATUS_THUHOI) {
+        r.Q++;
+        // Phân loại thu hồi chỉ đếm cho nhóm "hết niên hạn" (theo cấu trúc mẫu)
+        if (/niên hạn|nien han/i.test(tt) || /niên hạn|nien han/i.test(cd)) r.Q++;
+      }
+      // Ô tô chưa kiểm định (W + X,Y,Z,AA)
+      if (/kiểm định|kiem dinh/i.test(cd)) {
+        r.W++;
+        if (cat === 'cx') r.X++; else if (cat === 'c0') r.Y++; else if (cat === '0x') r.Z++; else r.AA++;
+      }
+      // Nhãn hiệu lạ (AJ + AK,AL,AM,AN)
+      if (/nhãn hiệu|nhan hieu/i.test(cd)) {
+        r.AJ++;
+        if (cat === 'cx') r.AK++; else if (cat === 'c0') r.AL++; else if (cat === '0x') r.AM++; else r.AN++;
+      }
+      // Kết quả cập nhật trạng thái (AU): đếm mọi xe đã có trạng thái
+      if (tt) r.AU++;
+    });
+    // AV = G + K + W + AJ
+    r.AV = r.G + r.K + r.W + r.AJ;
+    return r;
+  }
+
+  /* ---------- Dựng mảng 2 chiều (AoA) ---------- */
+  function buildAoa(unitName, allRows, scanRows) {
+    const noScanRows = allRows.filter(r => !scanRows.includes(r));
+    const vAll = computeRow(allRows);
+    const vScan = computeRow(scanRows);
+    const vNoScan = computeRow(noScanRows);
+
+    const title = 'KẾT QUẢ CÔNG TÁC LÀM SẠCH DỮ LIỆU ĐĂNG KÝ XE';
+    const dateStr = new Date().toLocaleDateString('vi-VN');
+    const sub = `Ngày báo cáo: ${dateStr} — Đơn vị: ${unitName} — Tổng ${allRows.length} xe (có phiếu scan: ${scanRows.length}, không có: ${noScanRows.length})`;
+    const aoa = [];
+    // Row 1: title
+    const r1 = new Array(COLS).fill(''); r1[0] = title; aoa.push(r1);
+    // Row 2: subtitle
+    const r2 = new Array(COLS).fill(''); r2[0] = sub; aoa.push(r2);
+    // Row 3-5: headers
+    aoa.push(HDR_3.slice());
+    aoa.push(HDR_4.slice());
+    aoa.push(HDR_5.slice());
+    // Row 6: Tổng (all)
+    const rowAll = new Array(COLS).fill('');
+    rowAll[0] = 1; rowAll[1] = `${unitName} (tổng)`;
+    Object.keys(vAll).forEach(k => {
+      // Map key -> column index
+      const idx = COL_INDEX[k];
+      if (idx != null) rowAll[idx] = vAll[k];
+    });
+    aoa.push(rowAll);
+    // Row 7: Có phiếu scan
+    const rowScan = new Array(COLS).fill('');
+    rowScan[0] = 2; rowScan[1] = `└ trong đó: Có phiếu scan`;
+    Object.keys(vScan).forEach(k => { const idx = COL_INDEX[k]; if (idx != null) rowScan[idx] = vScan[k]; });
+    aoa.push(rowScan);
+    // Row 8: Không có phiếu scan
+    const rowNoScan = new Array(COLS).fill('');
+    rowNoScan[0] = 3; rowNoScan[1] = `└ trong đó: Không có phiếu scan`;
+    Object.keys(vNoScan).forEach(k => { const idx = COL_INDEX[k]; if (idx != null) rowNoScan[idx] = vNoScan[k]; });
+    aoa.push(rowNoScan);
+    // Row 9: TỔNG
+    const rowTotal = new Array(COLS).fill('');
+    rowTotal[0] = ''; rowTotal[1] = 'TỔNG';
+    Object.keys(vAll).forEach(k => { const idx = COL_INDEX[k]; if (idx != null) rowTotal[idx] = vAll[k]; });
+    aoa.push(rowTotal);
+    // Row 11+: notes
+    aoa.push(new Array(COLS).fill(''));
+    const notes = [
+      'Ghi chú:',
+      '1. Số liệu «trong ngày» (cột C, F, H, J, P, V, AB, AI, AO) cần nhập tay — không có nguồn tự động.',
+      '2. Cột «Tổng số đã rà soát / Tổng số đã thu hồi / phân loại đối tượng» tự tính từ dữ liệu Tong hop (cột Trạng thái xe + Chuyên đề).',
+      '3. Hai dòng «Có phiếu scan» / «Không có phiếu scan» tách bạch nguồn số liệu (theo yêu cầu).',
+      '4. Dòng «TỔNG» = Tổng dòng Xã Chiên Đàn (dòng có phiếu scan + không có phiếu scan).',
+      '5. Cột AV «Tổng kết quả LSDL» = G + K + W + AJ (theo đúng công thức file mẫu).',
+    ];
+    notes.forEach(n => { const row = new Array(COLS).fill(''); row[0] = n; aoa.push(row); });
+    return aoa;
+  }
+
+  // Map khoá ngắn -> chỉ số cột (0-based)
+  const COL_INDEX = {
+    C: 2, D: 3, E: 4,
+    F: 5, G: 6,
+    H: 7, I: 8,
+    J: 9, K: 10, L: 11, M: 12, N: 13, O: 14,
+    P: 15, Q: 16, R: 17, S: 18, T: 19, U: 20,
+    V: 21, W: 22, X: 23, Y: 24, Z: 25, AA: 26,
+    AB: 27, AC: 28, AD: 29, AE: 30, AF: 31, AG: 32, AH: 33,
+    AI: 34, AJ: 35, AK: 36, AL: 37, AM: 38, AN: 39,
+    AO: 40, AP: 41, AQ: 42, AR: 43, AS: 44, AT: 45,
+    AU: 46, AV: 47,
+  };
+
+  /* ---------- Tải thư viện xlsx ---------- */
+  const LIB_STYLE = 'https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js';
+  const LIB_PLAIN = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+  function loadScript(url) {
+    return new Promise((res) => {
+      const s = document.createElement('script');
+      s.src = url;
+      s.onload = () => res(true);
+      s.onerror = () => res(false);
+      document.head.appendChild(s);
+    });
+  }
+  let _libPromise = null;
+  function loadXlsxLib() {
+    if (_libPromise) return _libPromise;
+    _libPromise = (async () => {
+      if (window.__xlsxStyleReady) return { XLSX: window.XLSX, styled: true };
+      if (await loadScript(LIB_STYLE) && window.XLSX) {
+        window.__xlsxStyleReady = true;
+        return { XLSX: window.XLSX, styled: true };
+      }
+      if (window.XLSX || (await loadScript(LIB_PLAIN) && window.XLSX)) return { XLSX: window.XLSX, styled: false };
+      return null;
+    })();
+    _libPromise.then(r => { if (!r) _libPromise = null; });
+    return _libPromise;
+  }
+
+  /* ---------- Tạo workbook với style như C08 ---------- */
+  function buildWorkbook(XLSX, aoa, styled) {
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [
+      { wch: 6 }, { wch: 26 },
+      { wch: 12 }, { wch: 16 }, { wch: 12 },
+      { wch: 12 }, { wch: 12 },
+      { wch: 14 }, { wch: 14 },
+      { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 20 }, { wch: 14 }
+    ];
+    ws['!merges'] = MERGES.map(m => ({ s: { r: m[0], c: m[1] }, e: { r: m[2], c: m[3] } }));
+    ws['!rows'] = [{ hpt: 30 }, { hpt: 20 }, { hpt: 60 }, { hpt: 36 }, { hpt: 48 }];
+    if (!styled) return finishWb(XLSX, ws);
+    const thin = { style: 'thin', color: { rgb: '000000' } };
+    const border = { top: thin, bottom: thin, left: thin, right: thin };
+    const titleStyle = {
+      font: { name: 'Times New Roman', sz: 14, bold: true },
+      alignment: { horizontal: 'center', vertical: 'center' }
+    };
+    const subTitleStyle = {
+      font: { name: 'Times New Roman', sz: 10, italic: true },
+      alignment: { horizontal: 'center', vertical: 'center' }
+    };
+    const headStyle = {
+      font: { name: 'Times New Roman', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
+      fill: { patternType: 'solid', fgColor: { rgb: '1F497D' } },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+      border
+    };
+    const dataStyle = {
+      font: { name: 'Times New Roman', sz: 10 },
+      alignment: { horizontal: 'left', vertical: 'top', wrapText: true },
+      border
+    };
+    const dataCenterStyle = { ...dataStyle, alignment: { horizontal: 'center', vertical: 'center', wrapText: true } };
+    const totalStyle = {
+      font: { name: 'Times New Roman', sz: 10, bold: true },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+      border,
+      fill: { patternType: 'solid', fgColor: { rgb: 'DDEBF7' } }
+    };
+    const noteStyle = { font: { name: 'Times New Roman', sz: 9, italic: true }, alignment: { horizontal: 'left', vertical: 'top', wrapText: true } };
+    const rows = aoa.length;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        if (!ws[addr]) ws[addr] = { t: 's', v: '' };
+        let s;
+        if (r === 0) s = titleStyle;
+        else if (r === 1) s = subTitleStyle;
+        else if (r >= 2 && r <= 4) s = headStyle;
+        else if (r === 8) s = totalStyle;
+        else if (r >= rows - 6) s = noteStyle;
+        else s = (c <= 1 || (c >= 2 && c <= 47)) ? (c <= 1 ? dataCenterStyle : dataCenterStyle) : dataStyle;
+        ws[addr].s = s;
+      }
+    }
+    return finishWb(XLSX, ws);
+  }
+  function finishWb(XLSX, ws) {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'BaoCao');
+    return wb;
+  }
+
+  /* ---------- Thực hiện xuất ---------- */
+  async function exportReport(unitName) {
+    if (!state.rawData || !state.rawData.length) { toast('Chưa có dữ liệu để xuất báo cáo.', true); return false; }
+    const allRows = state.rawData.slice();
+    const scanRows = allRows.filter(isHasScan);
+    const aoa = buildAoa(unitName, allRows, scanRows);
+    const lib = await loadXlsxLib();
+    if (!lib) { toast('Không tải được thư viện Excel. Kiểm tra kết nối mạng.', true); return false; }
+    const wb = buildWorkbook(lib.XLSX, aoa, lib.styled);
+    const stamp = new Date().toISOString().slice(0, 10);
+    lib.XLSX.writeFile(wb, `BaoCaoHangNgay_LSDL_${stamp}.xlsx`);
+    toast(`Đã xuất báo cáo: ${allRows.length} xe (có phiếu scan: ${scanRows.length}, không có: ${allRows.length - scanRows.length}).` + (lib.styled ? '' : ' (không có màu do thiếu thư viện style)'));
+    return true;
+  }
+
+  /* ---------- Modal UI ---------- */
+  function openModalUI() {
+    if (!state.rawData || !state.rawData.length) { toast('Chưa có dữ liệu để xuất báo cáo.', true); return; }
+    const md = document.getElementById('dailyReportModal');
+    if (!md) { console.warn('[DailyReport] không tìm thấy #dailyReportModal'); return; }
+    // Nạp giá trị đã lưu
+    const dt = document.getElementById('drDate');
+    if (dt) { try { dt.value = localStorage.getItem(DATE_KEY) || new Date().toISOString().slice(0, 10); } catch (e) { dt.value = new Date().toISOString().slice(0, 10); } }
+    const un = document.getElementById('drUnit');
+    if (un) { try { un.value = localStorage.getItem(UNIT_KEY) || DEFAULT_UNIT; } catch (e) { un.value = DEFAULT_UNIT; } }
+    md.classList.remove('hidden');
+  }
+
+  async function doExport() {
+    const dt = document.getElementById('drDate');
+    const un = document.getElementById('drUnit');
+    const unitName = (un && un.value.trim()) || DEFAULT_UNIT;
+    try {
+      if (dt) localStorage.setItem(DATE_KEY, dt.value);
+      localStorage.setItem(UNIT_KEY, unitName);
+    } catch (e) { /* bỏ qua */ }
+    const btn = document.getElementById('btnDrExport');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang xuất...'; }
+    try {
+      const ok = await exportReport(unitName);
+      if (ok) {
+        const md = document.getElementById('dailyReportModal');
+        if (md) md.classList.add('hidden');
+      }
+    } catch (e) { toast('Lỗi xuất báo cáo: ' + (e && e.message || e), true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '⬇️ Tải báo cáo (.xlsx)'; } }
+  }
+
+  function bind() {
+    const btn = document.getElementById('btnDailyReport');
+    if (btn && !btn._drBound) { btn._drBound = true; btn.addEventListener('click', openModalUI); }
+    const exp = document.getElementById('btnDrExport');
+    if (exp && !exp._drBound) { exp._drBound = true; exp.addEventListener('click', doExport); }
+    const close = document.querySelector('#dailyReportModal [data-close]');
+    if (close && !close._drBound) {
+      close._drBound = true;
+      close.addEventListener('click', () => document.getElementById('dailyReportModal').classList.add('hidden'));
+    }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+  else setTimeout(bind, 0);
+  // Thêm script được nạp bất đồng bộ (sau khi DOM đã có) -> thử gắn lại sau 1s
+  setTimeout(bind, 1000);
+
+  return { open: openModalUI, export: exportReport };
+})();
+window.DailyReport = DailyReport;
