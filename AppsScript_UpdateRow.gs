@@ -14,6 +14,25 @@
 const UR_VERSION = 10;
 const UR_SETTINGS_SHEET = 'Settings';                                  // trùng SETTINGS_SHEET_NAME của Code.gs
 const UR_SYSTEM_TABS = ['GeminiConfig', 'Settings', 'PhieuLa'];        // tab hệ thống: không bao giờ dò làm tab dữ liệu
+const UR_AV_HEADER = 'Trạng thái xe chưa kiểm';                        // cột AV
+const UR_AV_COL = 48;                                                  // AV = cột số 48
+
+/** Xác định cột cho tiêu đề AV. headers: mảng tiêu đề đã chuẩn hóa (hàm sẽ nới dài nếu cần).
+ *  Trả { col } | { col, warn } | { error }. KHÔNG bao giờ ghi đè tiêu đề khác ở AV1. */
+function ur_resolveAvCol_(sh, headers) {
+  var idx = headers.indexOf(ur_norm_(UR_AV_HEADER));
+  if (idx >= 0) {
+    return idx + 1 === UR_AV_COL ? { col: UR_AV_COL }
+      : { col: idx + 1, warn: 'Tiêu đề «' + UR_AV_HEADER + '» đang ở cột số ' + (idx + 1) + ' (không phải AV, số 48) — vẫn ghi vào cột đó.' };
+  }
+  var cur = sh.getMaxColumns() >= UR_AV_COL ? String(sh.getRange(1, UR_AV_COL).getValue() || '').trim() : '';
+  if (cur) return { error: 'Ô AV1 đang có tiêu đề khác («' + cur + '») nên không ghi đè. Hãy xóa/đổi tiêu đề đó hoặc đặt «' + UR_AV_HEADER + '» vào AV1.' };
+  if (sh.getMaxColumns() < UR_AV_COL) sh.insertColumnsAfter(sh.getMaxColumns(), UR_AV_COL - sh.getMaxColumns());
+  sh.getRange(1, UR_AV_COL).setValue(UR_AV_HEADER);
+  while (headers.length < UR_AV_COL) headers.push('');
+  headers[UR_AV_COL - 1] = ur_norm_(UR_AV_HEADER);
+  return { col: UR_AV_COL };
+}
 
 /* ------------------------------ tiện ích ------------------------------ */
 function ur_json_(obj) {
@@ -82,11 +101,27 @@ function updateRowAction_(data) {
       if (lastRow < 2) continue;
       // getDisplayValues: giữ nguyên số 0 đầu (CCCD / SĐT) như người dùng thấy trên Sheet
       var vals = sh.getRange(2, mCol, lastRow - 1, 1).getDisplayValues(), row = 0;
-      for (var i = 0; i < vals.length; i++) { if (ur_key_(matchHeader, vals[i][0]) === key) { row = i + 2; break; } }
+      // Trùng khóa (vd. 2 xe cùng biển số): nếu web gửi thêm extraHeader/extraValue thì ưu tiên dòng khớp luôn cột phụ đó
+      var eCol = data.extraHeader ? colOf(data.extraHeader) : 0, eKey = String(data.extraValue == null ? '' : data.extraValue).trim().toLowerCase();
+      var eVals = (eCol && eKey) ? sh.getRange(2, eCol, lastRow - 1, 1).getDisplayValues() : null;
+      for (var i = 0; i < vals.length; i++) {
+        if (ur_key_(matchHeader, vals[i][0]) !== key) continue;
+        if (!row) row = i + 2;                                   // dòng khớp đầu tiên làm mặc định
+        if (!eVals) break;
+        if (String(eVals[i][0]).trim().toLowerCase() === eKey) { row = i + 2; break; }
+      }
       if (!row) continue;
-      var created = [], width = lastCol;
-      Object.keys(updates).forEach(function (h) {
+      var created = [], width = lastCol, errors = [], warnings = [];
+      var keys = Object.keys(updates).sort(function (a, b) { return (ur_norm_(b) === ur_norm_(UR_AV_HEADER)) - (ur_norm_(a) === ur_norm_(UR_AV_HEADER)); });   // AV xử lý trước
+      keys.forEach(function (h) {
         var c = colOf(h);
+        if (ur_norm_(h) === ur_norm_(UR_AV_HEADER)) {                   // AV: luôn đúng cột 48, không thêm cuối
+          var r = ur_resolveAvCol_(sh, headers);
+          if (r.error) { errors.push(r.error); return; }
+          if (r.warn) warnings.push(r.warn);
+          c = r.col; if (headers.length > width) width = headers.length;
+          if (!colOf(h)) created.push(h);
+        }
         if (!c) {                                                       // cột chưa có -> tạo ở cuối hàng tiêu đề
           width++;
           if (width > sh.getMaxColumns()) sh.insertColumnsAfter(sh.getMaxColumns(), width - sh.getMaxColumns());
@@ -96,7 +131,8 @@ function updateRowAction_(data) {
         ur_setCell_(sh.getRange(row, c), updates[h]);
       });
       SpreadsheetApp.flush();
-      return { ok: true, row: row, created: created, sheet: sh.getName() };
+      if (errors.length) return { ok: false, error: errors.join(' '), row: row, sheet: sh.getName() };   // web hiện lỗi này cho người dùng
+      return { ok: true, row: row, created: created, warnings: warnings, sheet: sh.getName() };
     }
     return { ok: false, error: sawHeader
       ? 'Không tìm thấy dòng có ' + matchHeader + ' = ' + matchValue + ' (row not found).'

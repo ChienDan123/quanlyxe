@@ -11,8 +11,9 @@
   'use strict';
   if (window.ScanReviewAV) return;
 
-  const S = window.ScanApp;
-  const R = window.ScanReview;
+  // ScanApp/ScanReview khai báo bằng const ở cấp script nên có thể KHÔNG nằm trên window → thử cả hai nơi
+  const S = window.ScanApp || (typeof ScanApp !== 'undefined' ? ScanApp : undefined);
+  const R = window.ScanReview || (typeof ScanReview !== 'undefined' ? ScanReview : undefined);
   const DB = S && S.db;
   if (!DB || !R) { console.warn('[scan-review-av] thiếu ScanApp / ScanReview — bỏ qua patch'); return; }
 
@@ -43,6 +44,7 @@
   })();
 
   /* =================== 1. CỘT AV =================== */
+  let avFilterMode = 'all';                          // phải khai báo TRƯỚC setupObserver (tránh lỗi TDZ làm script dừng giữa chừng)
   const AV_KEY = 'trangThaiXeChuaKiem';              // KHÓA trong FIELD_MAP
   const AV_HEADER = 'Trạng thái xe chưa kiểm';       // TIÊU ĐỀ CỘT trên Sheet (AV)
 
@@ -805,7 +807,7 @@
   }
   let _avBusy = false;
   /* =================== MỚI: lọc AV, đồng bộ dữ liệu cũ → cột AV, bootstrap giao diện =================== */
-  let avFilterMode = 'all';
+  // (avFilterMode đã khai báo ở đầu file)
   // scan-review.js (passesFilter) gọi hàm này cho từng mục: kết hợp được với #rvFilter
   window.ScanReviewAVFilter = function (it) {
     if (avFilterMode === 'all') return true;
