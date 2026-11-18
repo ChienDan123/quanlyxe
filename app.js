@@ -50,6 +50,8 @@ const FIELD_MAP = [
   { key: 'kiemPhieu',    header: 'Kiểm phiếu' },
   { key: 'ketQuaPhieu',  header: 'Kết quả đối chiếu phiếu' },
   { key: 'nguoiKiemPhieu', header: 'Người kiểm phiếu' },   // cột AQ — CHỈ dùng cho màn đối chiếu phiếu scan; tách riêng với «Người thực hiện» (cột AA, Chi tiết chủ phương tiện / bảng chính)
+  // Cột AV (số 48): trạng thái kiểm của xe (do scan-review-av.js tính). Apps Script đặt đúng vị trí AV.
+  { key: 'trangThaiXeChuaKiem', header: 'Trạng thái xe chưa kiểm' },
 ];
 // Danh sách lựa chọn cho trường "Tình trạng cam kết" (giữa Ghi chú và Người
 // thực hiện) — dùng chung cho mọi nơi hiển thị/sửa trường này.

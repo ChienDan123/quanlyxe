@@ -1409,6 +1409,8 @@ const ScanReview = (() => {
   }
   function passesFilter(v) {
     if (!passesChecker(v)) return false;
+    // Bộ lọc riêng #rvAvFilter của scan-review-av.js (chưa chắc chắn / đã kiểm thủ công), kết hợp với bộ lọc dưới
+    if (typeof window.ScanReviewAVFilter === 'function' && !window.ScanReviewAVFilter(v.it)) return false;
     const cat = viewCategory(v), it = v.it;
     switch (R.filter) {
       case 'later': return hasLater(v);                                   // có trường «Để kiểm sau»

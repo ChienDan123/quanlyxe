@@ -55,21 +55,24 @@
     } catch (e) { console.warn('[scan-review-av] FIELD_MAP', e); }
   })();
 
-  function computeAV(item) {
+  // AV = trạng thái kiểm + «Trạng thái xe» hiện có (row tùy chọn)
+  function computeAV(item, row) {
     if (!item) return '';
     const d = item.scanData || {};
     const hasScan = !!(d.bienSo || d.chuXe || d.cccd || item.bienSoRaw);
     if (!hasScan) return 'Chưa có dữ liệu phiếu';
     const r = item.recheck || {};
     const checked = item.review === 'da_kiem' || r.status === 'manual';
-    const base = checked ? 'Đã kiểm' : 'Chưa kiểm';
-    if (r.status === 'manual') return base + ' (thủ công)';
-    if (r.status === 'error') return base + ' — lỗi kiểm lại';
-    if (r.status === 'done') {
+    let out;
+    if (r.status === 'manual') out = 'Đã kiểm thủ công';
+    else if (r.status === 'error') out = (checked ? 'Đã kiểm' : 'Chưa kiểm') + ' — lỗi kiểm lại';
+    else if (r.status === 'done') {
       const n = (r.nghiVan || []).length;
-      return n ? base + ' — chưa chắc chắn (' + n + ' nghi vấn)' : base + ' — Gemini xác nhận đúng';
-    }
-    return base;
+      out = n ? 'Có nghi vấn (' + n + ') — đã kiểm lại lần ' + (r.count || 1)
+              : 'Đã kiểm lại lần ' + (r.count || 1) + ' – đúng';
+    } else out = checked ? 'Đã kiểm' : 'Chưa kiểm';
+    const st = row ? String(row.trangThaiXe || '').trim() : '';
+    return st ? out + ' · Trạng thái xe: ' + st : out;
   }
 
   async function itemsByPlate(plate) {
@@ -92,7 +95,7 @@
           const items = await itemsByPlate(S.normalizeBienSo(row.bienSo));
           const it = items.find(x => x.scanData || x.recheck);
           if (it) {
-            const v = computeAV(it);
+            const v = computeAV(it, row);
             row[AV_KEY] = v;
             updates = Object.assign({}, updates, { [AV_KEY]: v });   // ← FIX: KEY (không phải HEADER)
           }
@@ -113,7 +116,7 @@
       if (!plate) return;
       const row = state.rawData.find(r => r.bienSo && S.normalizeBienSo(r.bienSo) === plate);
       if (!row) return;
-      const v = computeAV(item);
+      const v = computeAV(item, row);
       row[AV_KEY] = v;
       if (typeof window.updateSingleRowFields === 'function') {
         await window.updateSingleRowFields(row, { [AV_KEY]: v });   // ← FIX: dùng AV_KEY
@@ -139,10 +142,12 @@
     if (RECHECK.total < RECHECK.queue.length + RECHECK.done + RECHECK.error) RECHECK.total = RECHECK.queue.length + RECHECK.done + RECHECK.error;
   }
   function saveQueue() {
+    // Hàng đợi (có thể hàng nghìn id) lưu IndexedDB; localStorage chỉ giữ số liệu nhỏ
     try {
-      localStorage.setItem(QUEUE_KEY, JSON.stringify(RECHECK.queue));
       localStorage.setItem(STAT_KEY, JSON.stringify({ done: RECHECK.done, error: RECHECK.error, total: RECHECK.total }));
+      localStorage.removeItem(QUEUE_KEY);
     } catch (e) { /* bỏ qua */ }
+    try { if (typeof idbSet === 'function') idbSet('avRecheckQueueV1', { queue: RECHECK.queue, at: Date.now() }); } catch (e) { /* bỏ qua */ }
   }
 
   // Ưu tiên thấp: nhường khi người dùng thao tác / đang quét / đang đồng bộ
@@ -154,6 +159,8 @@
   function shouldYield() {
     if (RECHECK.paused) return true;
     if (Date.now() - lastAct < 2500) return true;
+    // Người dùng đang mở bảng «Quét lại phiếu» (yêu cầu Gemini của người dùng) -> nhường
+    try { const m = document.getElementById('rvRescanModal'); if (m && !m.classList.contains('hidden')) return true; } catch (e) { /* bỏ qua */ }
     try { const chip = document.getElementById('scanBgChip'); if (chip && !chip.classList.contains('hidden')) return true; } catch (e) { /* bỏ qua */ }
     try {
       if (window.SyncQueueAPI && typeof SyncQueueAPI.list === 'function') {
@@ -249,6 +256,7 @@
     if (rec) {
       await addImg(rec.frontBlob, rec.frontMime, 'MẶT 1:');
       await addImg(rec.backBlob, rec.backMime, 'MẶT 2 (nếu có):');
+      for (let k = 0; k < (rec.extraBlobs || []).length; k++) { const x = rec.extraBlobs[k]; if (x) await addImg(x.blob, x.mime, 'MẶT ' + (k + 3) + ':'); }
     }
     const hasImage = imageParts.length > 0;
     const parts = [{ text: buildPrompt(item, !hasImage) }].concat(imageParts);
@@ -299,14 +307,15 @@
       fresh.review = 'chua_kiem';
     }
     fresh.recheck = {
-      status: 'done', lastAt: Date.now(), tinCay: conf, hasImage,
+      status: 'done', lastAt: Date.now(), count: ((fresh.recheck && fresh.recheck.count) || 0) + 1, tinCay: conf, hasImage,
       nghiVan: nghi, xacNhanDung: Array.from(confirmed), changes,
       note: (changes.length ? 'Đã sửa ' + changes.length + ' trường, còn ' + nghi.length + ' nghi vấn' : 'Không có thay đổi')
         + (hasImage ? '' : ' (không có ảnh — chỉ kiểm định dạng)')
     };
     fresh.updatedAt = Date.now();
     await DB.dbPut(DB.ST_ITEMS, fresh);
-    if (changes.length) { try { S.emit('itemsChanged', { scanId: fresh.scanId }); } catch (e) { /* bỏ qua */ } }
+    // Luôn báo đổi (kể cả không sửa trường nào) để scan-sync đẩy «đã kiểm lại lần n» lên kho online
+    try { S.emit('itemsChanged', { scanId: fresh.scanId }); } catch (e) { /* bỏ qua */ }
     await pushAV(fresh);
   }
 
@@ -372,11 +381,14 @@
       el.style.cssText = 'position:fixed;bottom:14px;right:14px;z-index:99999;background:#fff;padding:8px 12px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.2);font-size:12px;display:none;';
       document.body.appendChild(el);
     }
-    if (!RECHECK.running && !RECHECK.queue.length) { el.style.display = 'none'; return; }
-    el.style.display = 'block';
     const total = RECHECK.total || (RECHECK.queue.length + RECHECK.done + RECHECK.error);
     const fin = RECHECK.done + RECHECK.error;
     const pct = total ? Math.round(fin / total * 100) : 0;
+    const chip = document.getElementById('rvAvChip');   // chip trạng thái trên thanh công cụ So sánh phiếu
+    if (chip) chip.textContent = (RECHECK.running || RECHECK.queue.length)
+      ? '🔁 Kiểm lại ' + fin + '/' + total + ' (' + pct + '%)' + (RECHECK.paused ? ' · tạm dừng' : (RECHECK.waiting ? ' · chờ' : '')) : '';
+    if (!RECHECK.running && !RECHECK.queue.length) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
     el.innerHTML = '<b>🔁 Kiểm lại:</b> ' + fin + '/' + total + ' (' + pct + '%)' +
       (RECHECK.error ? ' · <span style="color:#b00">' + RECHECK.error + ' lỗi</span>' : '') +
       (RECHECK.paused ? ' · <i>tạm dừng</i>' : (RECHECK.waiting ? ' · <i>chờ (đang dùng mục khác)</i>' : '')) +
@@ -625,11 +637,8 @@
   /* =================== 8. BỘ LỌC «CHƯA CHẮC CHẮN» =================== */
   function addUncertainFilterOption() {
     const sel = document.getElementById('rvFilter');
-    if (!sel || sel.querySelector('option[value="av_uncertain"]')) return;
-    const opt = document.createElement('option');
-    opt.value = 'av_uncertain';
-    opt.textContent = '⚠ Chưa chắc chắn (chưa kiểm lại / có nghi vấn)';
-    sel.appendChild(opt);
+    const o = sel && sel.querySelector('option[value="av_uncertain"]');
+    if (o) { if (sel.value === 'av_uncertain') sel.value = 'review'; o.remove(); }   // bộ lọc AV nay là #rvAvFilter riêng
   }
   let filterBusy = false;
   async function applyUncertainFilter() {
@@ -666,17 +675,32 @@
   function ensureToolbar() {
     const tb = document.querySelector('#scanReviewModal .rv-toolbar');
     if (!tb) { console.warn('[scan-review-av] không tìm thấy #scanReviewModal .rv-toolbar'); return; }
-    if (tb.querySelector('[data-av-act="recheck-all"]')) return;
+    if (document.getElementById('btnRecheckAll') || tb.querySelector('[data-av-act="recheck-all"]')) return;
     const pager = tb.querySelector('#rvPager');
     const mk = (act, text, title) => {
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'btn btn-secondary btn-sm';
       b.dataset.avAct = act; b.textContent = text; if (title) b.title = title;
+      if (act === 'recheck-all') b.id = 'btnRecheckAll';
       tb.insertBefore(b, pager || null); return b;
     };
     mk('recheck-all', '🔁 Kiểm lại tất cả chưa kiểm', 'Gửi lại ẢNH PHIẾU + dữ liệu OCR cho Gemini rà soát cho mọi phiếu chưa kiểm (chạy ngầm, ưu tiên thấp)');
     mk('toggle-fc-all', globalOpen ? '▾ Thu gọn chọn kiểm (tất cả)' : '▸ Mở rộng chọn kiểm (tất cả)', 'Thu gọn / mở rộng ô «đã kiểm mục này» trên mọi thẻ');
-    console.info('[scan-review-av] đã thêm nút «Kiểm lại tất cả chưa kiểm» vào thanh công cụ');
+    // Chip tiến độ
+    const chip = document.createElement('span'); chip.id = 'rvAvChip'; chip.className = 'hint'; chip.style.margin = '0 6px';
+    tb.insertBefore(chip, pager || null);
+    // Bộ lọc riêng (KHÔNG đụng #rvFilter)
+    const sel = document.createElement('select');
+    sel.id = 'rvAvFilter'; sel.className = 'row-inline-select'; sel.title = 'Lọc theo kết quả kiểm lại (kết hợp được với các bộ lọc khác)';
+    sel.innerHTML = '<option value="all">Kiểm lại: tất cả</option><option value="uncertain">⚠ Chưa chắc chắn</option><option value="manual">✔ Đã kiểm thủ công</option>';
+    sel.value = avFilterMode;
+    sel.addEventListener('change', () => {
+      avFilterMode = sel.value;
+      const f = document.getElementById('rvFilter');
+      if (f) f.dispatchEvent(new Event('change'));   // dùng lại listener sẵn có của scan-review.js: vẽ lại danh sách, về trang 1
+    });
+    tb.insertBefore(sel, pager || null);
+    updateProgress();
   }
 
   (function setupObserver() {
@@ -754,7 +778,7 @@
       const row = state.rawData.find(r => r.bienSo && S.normalizeBienSo(r.bienSo) === plate);
       if (!row || seen.has(row._rowId)) continue;
       seen.add(row._rowId);
-      const want = computeAV(it);
+      const want = computeAV(it, row);
       if (!want || /^Chưa có dữ liệu/.test(want)) continue;
       const mk = avMatchKeyForRow(row);
       if (!mk) continue;
@@ -780,6 +804,112 @@
     return n;
   }
   let _avBusy = false;
+  /* =================== MỚI: lọc AV, đồng bộ dữ liệu cũ → cột AV, bootstrap giao diện =================== */
+  let avFilterMode = 'all';
+  // scan-review.js (passesFilter) gọi hàm này cho từng mục: kết hợp được với #rvFilter
+  window.ScanReviewAVFilter = function (it) {
+    if (avFilterMode === 'all') return true;
+    const r = (it && it.recheck) || {};
+    if (avFilterMode === 'manual') return r.status === 'manual';
+    return r.status !== 'manual' && (r.status !== 'done' || (r.nghiVan || []).length > 0);   // chưa chắc chắn
+  };
+
+  // Nạp hàng đợi kiểm lại từ IndexedDB (sau khi tải lại trang -> chạy tiếp từ chỗ dở)
+  async function avLoadQueueFromIdb() {
+    try {
+      if (typeof idbGet !== 'function') return;
+      const s = await idbGet('avRecheckQueueV1');
+      if (!s || !Array.isArray(s.queue) || !s.queue.length) return;
+      const have = new Set(RECHECK.queue.map(j => j.itemId));
+      s.queue.forEach(j => { if (j && j.itemId && !have.has(j.itemId)) RECHECK.queue.push(j); });
+      if (RECHECK.total < RECHECK.queue.length + RECHECK.done + RECHECK.error) RECHECK.total = RECHECK.queue.length + RECHECK.done + RECHECK.error;
+      updateProgress();
+      if (!isStopped()) runQueue();
+    } catch (e) { console.warn('[scan-review-av] nạp hàng đợi IndexedDB', e); }
+  }
+
+  // ---- A: «Đồng bộ dữ liệu cũ → cột AV» (lô ≤50, tiến độ lưu IndexedDB, chạy tiếp được sau khi tải lại trang) ----
+  const AVB_HEADER = 'Trạng thái xe chưa kiểm', AVB_KEY = 'trangThaiXeChuaKiem', AVB_STORE = 'avBulkDoneV1', AVB_BATCH = 50;
+  let avBulkBusy = false;
+  async function backfillAllToAV(reset) {
+    const msg = (t) => { const m = document.getElementById('avBulkMsg'); if (m) m.textContent = t; };
+    const bar = (p) => { const b = document.getElementById('avBulkBar'); if (b) b.style.width = p + '%'; };
+    if (avBulkBusy) return;
+    if (typeof AV_KEY !== 'undefined' && AV_KEY !== AVB_KEY) console.warn('[scan-review-av] AV_KEY (' + AV_KEY + ') khác ' + AVB_KEY + ' — cần khớp FIELD_MAP');
+    if (!state.rawData || !state.rawData.length) { msg('Chưa tải danh sách xe từ Google Sheet.'); return; }
+    if (typeof isWriteConnected === 'function' && !isWriteConnected()) { msg('Chưa kết nối Apps Script 2 chiều — không ghi được lên Sheet.'); return; }
+    avBulkBusy = true;
+    try {
+      const saved = reset ? {} : ((await idbGet(AVB_STORE)) || {});
+      const items = (await DB.dbGetAll(DB.ST_ITEMS)) || [];
+      const byPlate = new Map();                                    // mỗi biển lấy mục phiếu MỚI NHẤT
+      for (const it of items) { const p = it.bienSo; if (!p) continue; const c = byPlate.get(p); if (!c || (it.updatedAt || 0) > (c.updatedAt || 0)) byPlate.set(p, it); }
+      const rowsBy = new Map();
+      for (const r of state.rawData) { const p = S.normalizeBienSo(r.bienSo || ''); if (!p) continue; if (!rowsBy.has(p)) rowsBy.set(p, []); rowsBy.get(p).push(r); }
+      const jobs = []; let dup = 0;
+      for (const [p, it] of byPlate) {
+        const rs = rowsBy.get(p); if (!rs) continue;
+        if (rs.length > 1) dup++;
+        const row = rs[0];                                          // giống scan-review.js: ghi dòng đầu; khóa khớp ưu tiên Mã ID/MOTO_ID (matchKeyForRow)
+        const v = computeAV(it, row);
+        if (!v || /^Chưa có dữ liệu/.test(v)) continue;
+        const mk = (typeof matchKeyForRow === 'function') ? matchKeyForRow(row) : null; if (!mk) continue;
+        const sig = mk.header + '=' + mk.value;
+        if (saved[sig] === v) continue;                             // dòng đã đúng -> không gửi lại
+        jobs.push({ row, v, sig });
+      }
+      if (!jobs.length) { msg('✅ Không có dòng nào cần đồng bộ thêm.' + (dup ? ' (' + dup + ' biển trùng chỉ ghi dòng đầu)' : '')); bar(100); return; }
+      for (let i = 0; i < jobs.length; i += AVB_BATCH) {
+        const b = jobs.slice(i, i + AVB_BATCH);
+        b.forEach(j => { j.row[AVB_KEY] = j.v; });
+        enqueueRowSyncBulk(b.map(j => ({ row: j.row, updates: { [AVB_HEADER]: j.v } })));   // vào hàng đợi đồng bộ bền sẵn có
+        b.forEach(j => { saved[j.sig] = j.v; });
+        await idbSet(AVB_STORE, saved);                             // lưu vị trí đã chạy
+        const done = Math.min(jobs.length, i + AVB_BATCH);
+        bar(Math.round(done / jobs.length * 100)); msg('Đã đưa ' + done + '/' + jobs.length + ' dòng vào hàng đợi đồng bộ…');
+        await sleep(400);
+      }
+      try { persistRawDataToCache(); } catch (e) { /* bỏ qua */ }
+      msg('✅ Đã đưa ' + jobs.length + ' dòng vào hàng đợi ghi cột AV.' + (dup ? ' ' + dup + ' biển trùng: chỉ ghi dòng đầu.' : ''));
+    } catch (e) { msg('Lỗi: ' + (e && e.message || e)); console.warn('[scan-review-av] backfillAllToAV', e); }
+    finally { avBulkBusy = false; }
+  }
+  function injectAVSettings() {
+    const body = document.querySelector('#settingsModal .modal-body');
+    if (!body || body.querySelector('#avBulkSettings')) return;
+    const d = document.createElement('div'); d.id = 'avBulkSettings';
+    d.innerHTML = '<div class="section-title">🔁 Cột AV «Trạng thái xe chưa kiểm»</div>' +
+      '<p class="hint">Điền cột AV cho mọi xe đã có phiếu scan (lô 50 dòng, nhớ vị trí, tải lại trang vẫn chạy tiếp).</p>' +
+      '<button type="button" class="btn btn-secondary btn-sm" id="btnAvBulk">Đồng bộ dữ liệu cũ → cột AV</button> ' +
+      '<button type="button" class="btn btn-ghost btn-sm" id="btnAvBulkReset" title="Bỏ nhớ tiến độ và gửi lại toàn bộ">↺ Chạy lại từ đầu</button>' +
+      '<div style="height:8px;background:#ddd;border-radius:4px;margin-top:6px;overflow:hidden"><div id="avBulkBar" style="height:100%;width:0;background:#2e7d32"></div></div>' +
+      '<div id="avBulkMsg" class="hint" style="margin-top:4px;"></div>';
+    body.appendChild(d);
+    d.querySelector('#btnAvBulk').addEventListener('click', () => backfillAllToAV(false));
+    d.querySelector('#btnAvBulkReset').addEventListener('click', () => { if (confirm('Gửi lại TOÀN BỘ cột AV từ đầu?')) backfillAllToAV(true); });
+  }
+
+  // ---- Bootstrap giao diện: idempotent (ensureToolbar / injectActions / injectFieldChecks đều có cờ chống chèn trùng) ----
+  function avEnsureUi() {
+    try {
+      ensureToolbar();
+      document.querySelectorAll('#rvList .rv-card').forEach(c => { injectActions(c); injectFieldChecks(c); });
+    } catch (e) { console.warn('[scan-review-av] avEnsureUi', e); }
+  }
+  function avBootstrap() {
+    if (window.__avBoot) return; window.__avBoot = true;
+    const openBtn = document.getElementById('btnScanOpenReview');
+    if (openBtn) openBtn.addEventListener('click', () => [400, 1200, 2500].forEach(ms => setTimeout(avEnsureUi, ms)));
+    const list = document.getElementById('rvList');
+    if (list) { let t = 0; new MutationObserver(() => { clearTimeout(t); t = setTimeout(avEnsureUi, 150); }).observe(list, { childList: true }); }
+    const bs = document.getElementById('btnSettings');
+    if (bs) bs.addEventListener('click', () => setTimeout(injectAVSettings, 0));
+    const sm = document.getElementById('settingsModal');
+    if (sm && !sm.classList.contains('hidden')) injectAVSettings();
+    avLoadQueueFromIdb();
+    console.info('[scan-review-av] bootstrap xong');
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', avBootstrap); else avBootstrap();
   async function autoBackfillAV() {
     if (_avBusy) return;
     if (typeof state === 'undefined' || !state || !state.rawData || !state.rawData.length) return;

@@ -109,6 +109,23 @@ function updateRow_(body) {
   }
 
   const updates = body.updates || {};
+  // ---- Cột AV «Trạng thái xe chưa kiểm» luôn nằm ĐÚNG cột AV (số 48) ----
+  const AV_HEADER = 'Trạng thái xe chưa kiểm', AV_COL = 48;
+  const warns = [];
+  if (Object.prototype.hasOwnProperty.call(updates, AV_HEADER)) {
+    const at = headers.indexOf(AV_HEADER);
+    if (at === -1) {
+      const cur = String(headers[AV_COL - 1] == null ? '' : headers[AV_COL - 1]).trim();
+      // AV1 đang là tiêu đề KHÁC -> không ghi đè, báo lỗi rõ để web hiện cho người dùng
+      if (cur) return jsonResponse_({ ok: false, error: 'Ô AV1 đang là tiêu đề khác («' + cur + '») — không ghi đè. Đổi/xóa tiêu đề đó rồi thử lại.' });
+      if (sh.getMaxColumns() < AV_COL) sh.insertColumnsAfter(sh.getMaxColumns(), AV_COL - sh.getMaxColumns());
+      sh.getRange(1, AV_COL).setValue(AV_HEADER);
+      while (headers.length < AV_COL) headers.push('');
+      headers[AV_COL - 1] = AV_HEADER;
+    } else if (at !== AV_COL - 1) {
+      warns.push('Cột «' + AV_HEADER + '» đang ở cột số ' + (at + 1) + ', không phải AV — vẫn ghi vào cột đó.');
+    }
+  }
   Object.keys(updates).forEach(function (colName) {
     let colIdx = headers.indexOf(colName);
     if (colIdx === -1) {
@@ -120,7 +137,7 @@ function updateRow_(body) {
     sh.getRange(rowIndex + 1, colIdx + 1).setValue(updates[colName]);
   });
 
-  return jsonResponse_({ ok: true, rowIndex: rowIndex + 1 });
+  return jsonResponse_({ ok: true, rowIndex: rowIndex + 1, warning: warns.join('; ') });
 }
 
 /** Thêm 1 dòng mới vào cuối Sheet. body: { row: { 'Biển số': '...', ... } } */
