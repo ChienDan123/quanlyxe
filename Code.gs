@@ -32,6 +32,8 @@ const SETTINGS_SHEET_NAME = 'Settings'; // Tab lưu mẫu Bản cam kết (tự 
 function doGet(e) {
   try {
     const action = (e && e.parameter && e.parameter.action) || 'read';
+    // Báo cáo C08: đọc nguyên 1 sheet theo tên (vd 'DL PC08 do'). Chỉ đọc, không ghi.
+    if (action === 'readSheet') return c08ReadSheetResponse_(e.parameter.sheet);
     if (action === 'read') return readData_();
     if (action === 'settings') return readSettings_();
     // ĐƯỜNG GHI DỰ PHÒNG QUA GET: web gửi ?action=updateRow&data=<JSON>. doGet là hàm DUY NHẤT nên không bị doPost trùng tên che mất.
@@ -160,4 +162,43 @@ function getDataSheet_() {
 
 function jsonResponse_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/* =========================================================================
+   AppsScript_C08Patch.gs — thêm action «readSheet» cho báo cáo C08.
+   Cho phép web đọc NGUYÊN 1 sheet bất kỳ theo tên (dùng để đọc "DL PC08 do").
+   Chỉ ĐỌC, không ghi gì. Web tự dò dòng tiêu đề + ghép cột nên không cần sửa gì thêm.
+
+   CÁCH GẮN (1 lần):
+   1) Dán toàn bộ file này vào cuối dự án Apps Script (không trùng tên hàm nào đang có).
+   2) Trong hàm doGet(e) HIỆN CÓ, thêm 1 dòng ĐẦU TIÊN (trước khi xử lý action 'read'):
+        if (e && e.parameter && e.parameter.action === 'readSheet') return c08ReadSheetResponse_(e.parameter.sheet);
+   3) Triển khai → Quản lý bản triển khai → ✏️ → Phiên bản mới → Triển khai.
+   ========================================================================= */
+
+// Chuẩn hoá tên sheet để tìm "gần đúng" (bỏ dấu, viết thường, bỏ khoảng trắng thừa):
+// "DL PC08 do" khớp cả "DL PC08 đỏ", "dl pc08 do ".
+function c08NormName_(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// Trả về ContentService JSON: { ok:true, values:[[...],...] } hoặc { ok:false, error }.
+// values = toàn bộ vùng dữ liệu, dạng chữ hiển thị (giữ nguyên số 0 đầu của CCCD, số khung...).
+function c08ReadSheetResponse_(sheetName) {
+  var out;
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sh = ss.getSheetByName(sheetName);
+    if (!sh) {
+      var want = c08NormName_(sheetName);
+      var all = ss.getSheets();
+      for (var i = 0; i < all.length; i++) { if (c08NormName_(all[i].getName()) === want) { sh = all[i]; break; } }
+    }
+    out = sh ? { ok: true, sheet: sh.getName(), values: sh.getDataRange().getDisplayValues() }
+             : { ok: false, error: 'Không thấy sheet: ' + sheetName };
+  } catch (err) {
+    out = { ok: false, error: String(err) };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
 }
