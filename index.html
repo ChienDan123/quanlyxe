@@ -666,6 +666,18 @@
         </select>
         <select id="rvChecker" class="tpl-input" style="width:auto" title="Lọc theo người kiểm"></select>
         <input id="rvSearch" class="tpl-input" type="search" placeholder="Tìm biển số / chủ xe…" style="max-width:220px">
+        <label class="rv-filter-av" title="Bộ lọc AI (kết hợp AND với bộ lọc bên cạnh)">
+          🤖 AI:
+          <select id="rvAvFilter">
+            <option value="all">Tất cả</option>
+            <option value="uncertain">Còn nghi vấn</option>
+            <option value="certain">AI đã chắc chắn</option>
+            <option value="locked">Đã khoá (bạn xác nhận)</option>
+            <option value="none">Không còn nghi vấn</option>
+          </select>
+        </label>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnNextUncertain" title="Đi tới mục nghi vấn kế tiếp và cuộn tới trường nghi vấn đầu tiên">⚖ Kiểm thủ công mục nghi vấn</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnRecheckAll" title="Gọi Gemini đối chiếu ảnh phiếu với Sheet cho tất cả mục chưa kiểm (chạy ngầm)">🔁 Kiểm lại tất cả chưa kiểm (AI)</button>
         <label class="rv-tool-lbl" title="Ghi vào cột «Người thực hiện» của mỗi xe khi áp dụng (Sheet đã có người khác thì giữ nguyên)">👤 Người thực hiện:
           <select id="rvAssignee" class="row-inline-select"></select></label>
         <label class="chk-inline" title="Khi lấy dữ liệu từ phiếu, nối dấu «📷Phiếu dd/mm: CCCD, SĐT» vào cột Ghi Chú để sau này biết nguồn"><input type="checkbox" id="rvChkTag" checked> Ghi dấu 📷 nguồn phiếu</label>
@@ -787,6 +799,8 @@
 <script src="scan.js?v=20261013"></script>
 <script src="scan-compare.js?v=20261013"></script>
 <script src="scan-review.js?v=20261028"></script>
+<script src="scan-recheck.js"></script>
+<script src="scan-review-ai.js?v=20261119"></script>
 <script src="scan-review-av.js?v=20261118"></script>
 <script src="scan-files.js?v=20261013"></script>
 <script src="scan-sync.js?v=20261013"></script>

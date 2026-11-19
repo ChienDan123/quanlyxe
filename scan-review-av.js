@@ -57,14 +57,27 @@
     } catch (e) { console.warn('[scan-review-av] FIELD_MAP', e); }
   })();
 
-  // AV = trạng thái kiểm + «Trạng thái xe» hiện có (row tùy chọn)
+  // AV = trạng thái kiểm AI + «Trạng thái xe» hiện có (row tùy chọn)
+  // MODEL MỚI (scan-recheck.js): it.recheck = { uncertain: {key:{...}}, locked: {key:{...}}, lan: n, status?: 'manual'|'error' }
+  // MODEL CŨ (đọc được cho mục cũ): it.recheck = { status:'done'|'manual'|'error', count, nghiVan:[] }
   function computeAV(item, row) {
     if (!item) return '';
     const d = item.scanData || {};
     const hasScan = !!(d.bienSo || d.chuXe || d.cccd || item.bienSoRaw);
     if (!hasScan) return 'Chưa có dữ liệu phiếu';
     const r = item.recheck || {};
-    const checked = item.review === 'da_kiem' || r.status === 'manual';
+    const lan = Math.max(Number(r.lan) || 0, Number(r.count) || 0);
+    const uncNew = Object.keys(r.uncertain || {}).filter(k => !k.startsWith('_')).length;
+    const uncOld = Array.isArray(r.nghiVan) ? r.nghiVan.length : 0;
+    const unc = Math.max(uncNew, uncOld);
+    let out;
+    if (r.status === 'manual') out = 'Đã kiểm thủ công';
+    else if (r.status === 'error') out = (item.review === 'da_kiem' ? 'Đã kiểm' : 'Chưa kiểm') + ' — lỗi kiểm lại';
+    else if (lan > 0) out = unc ? ('AI kiểm lần ' + lan + ': còn nghi vấn (' + unc + ')') : ('AI kiểm lần ' + lan + ': xác định đúng');
+    else out = item.review === 'da_kiem' ? 'Đã kiểm' : 'Chưa kiểm';
+    const st = row ? String(row.trangThaiXe || '').trim() : '';
+    return st ? out + ' · Trạng thái xe: ' + st : out;
+  }
     let out;
     if (r.status === 'manual') out = 'Đã kiểm thủ công';
     else if (r.status === 'error') out = (checked ? 'Đã kiểm' : 'Chưa kiểm') + ' — lỗi kiểm lại';
@@ -569,6 +582,26 @@
       return;
     }
     if (act === 'recheck') {
+      // Ưu tiên NEW SYSTEM (scan-recheck.js): gửi ẢNH + dữ liệu Sheet + dữ liệu phiếu, ghi qua applyFoundItem
+      if (window.ScanRecheck && typeof window.ScanRecheck.aiCompareItem === 'function') {
+        const it = await DB.dbGet(DB.ST_ITEMS, b.dataset.id); if (!it) return;
+        if (!window.confirm('AI kiểm lại mục «' + (it.bienSoRaw || it.bienSo || '(chưa có biển)') + '»?\n\n' +
+          '• Gửi ẢNH các mặt phiếu + dữ liệu Sheet + dữ liệu phiếu đã đọc cho Gemini.\n' +
+          '• Trường chắc chắn (2 lần đọc khớp, tin cậy ≥ 90) → tự ghi như bạn làm tay, đóng dấu «AI kiểm lần n».\n' +
+          '• Trường nghi vấn → đánh dấu, không tự ghi.\n' +
+          '• Trường đã khoá (bạn xác nhận) → AI không đụng.')) return;
+        b.disabled = true; b.textContent = '⏳ Đang kiểm…';
+        try {
+          const cmp = await window.ScanRecheck.aiCompareItem(it, {});
+          const lan = ((it.recheck && it.recheck.lan) || 0) + 1;
+          const r = await window.ScanRecheck.aiApplyCertain(it, cmp, lan);
+          say('AI kiểm lần ' + lan + ': ' + (r.certain || 0) + ' trường chắc chắn đã ghi · ' + (r.uncertain || 0) + ' nghi vấn.');
+          try { if (typeof refreshMainTable === 'function') refreshMainTable(); } catch (e) { /* bỏ qua */ }
+        } catch (e) { say('Lỗi kiểm: ' + (e && e.message || e), true); }
+        finally { b.disabled = false; b.textContent = '🔁 Kiểm lại'; }
+        return;
+      }
+      // Fallback (chỉ khi chưa có scan-recheck.js): OLD path
       const it = await DB.dbGet(DB.ST_ITEMS, b.dataset.id); if (!it) return;
       if (!window.confirm('Kiểm lại mục «' + (it.bienSoRaw || it.bienSo || '(chưa có biển)') + '» bằng Gemini?\n\n' +
         '• GỬI LẠI ẢNH PHIẾU (mặt 1 + mặt 2) + dữ liệu OCR cho Gemini rà soát lại.\n' +
@@ -633,7 +666,12 @@
   function isPendingRecheck(i) {
     const d = i.scanData || {};
     const r = i.recheck || {};
-    return !!(d.bienSo || d.chuXe || d.cccd) && i.review !== 'da_kiem' && r.status !== 'manual' && r.status !== 'done';
+    if (!(d.bienSo || d.chuXe || d.cccd)) return false;
+    if (i.review === 'da_kiem') return false;
+    if (r.status === 'manual') return false;
+    // Đã chạy AI (model mới: lan>0) hoặc old status 'done' → coi như đã kiểm, không tự xếp hàng lại
+    if ((Number(r.lan) || 0) > 0 || r.status === 'done') return false;
+    return true;
   }
 
   /* =================== 8. BỘ LỌC «CHƯA CHẮC CHẮN» =================== */
@@ -748,8 +786,9 @@
 
   /* =================== 10. KHỞI ĐỘNG LẠI HÀNG ĐỢI =================== */
   loadQueue();
-  if (RECHECK.queue.length) {
-    console.log('[scan-review-av] tự chạy tiếp', RECHECK.queue.length, 'job kiểm lại');
+  // KHÔNG tự chạy lại hàng đợi cũ khi scan-recheck.js đã có (tránh 2 hệ tranh Gemini)
+  if (!(window.ScanRecheck && typeof window.ScanRecheck.runRecheckQueue === 'function') && RECHECK.queue.length) {
+    console.log('[scan-review-av] tự chạy tiếp', RECHECK.queue.length, 'job kiểm lại (OLD path)');
     updateProgress();
     setTimeout(() => runQueue(), 4000);
   }
@@ -807,13 +846,21 @@
   }
   let _avBusy = false;
   /* =================== MỚI: lọc AV, đồng bộ dữ liệu cũ → cột AV, bootstrap giao diện =================== */
-  // (avFilterMode đã khai báo ở đầu file)
   // scan-review.js (passesFilter) gọi hàm này cho từng mục: kết hợp được với #rvFilter
+  // CHUỖI: nếu scan-recheck.js đã cài filter thì chain — không ghi đè
+  const _prevAVFilter = (typeof window.ScanReviewAVFilter === 'function') ? window.ScanReviewAVFilter : null;
   window.ScanReviewAVFilter = function (it) {
+    // 1) Filter mới của scan-recheck.js chạy trước (đọc #rvAvFilter mỗi lần → luôn đúng)
+    if (_prevAVFilter) { try { if (!_prevAVFilter(it)) return false; } catch (e) { /* bỏ qua */ } }
+    // 2) Bộ lọc cũ — chỉ áp dụng nếu #rvAvFilter chưa có (tránh trùng khi HTML mới đã có select riêng)
+    if (document.getElementById('rvAvFilter')) return true;
     if (avFilterMode === 'all') return true;
     const r = (it && it.recheck) || {};
     if (avFilterMode === 'manual') return r.status === 'manual';
-    return r.status !== 'manual' && (r.status !== 'done' || (r.nghiVan || []).length > 0);   // chưa chắc chắn
+    const uncNew = Object.keys(r.uncertain || {}).filter(k => !k.startsWith('_')).length;
+    const uncOld = Array.isArray(r.nghiVan) ? r.nghiVan.length : 0;
+    const done = r.status === 'done' || (Number(r.lan) || 0) > 0;
+    return r.status !== 'manual' && (!done || Math.max(uncNew, uncOld) > 0);
   };
 
   // Nạp hàng đợi kiểm lại từ IndexedDB (sau khi tải lại trang -> chạy tiếp từ chỗ dở)
@@ -908,7 +955,8 @@
     if (bs) bs.addEventListener('click', () => setTimeout(injectAVSettings, 0));
     const sm = document.getElementById('settingsModal');
     if (sm && !sm.classList.contains('hidden')) injectAVSettings();
-    avLoadQueueFromIdb();
+    // KHÔNG nạp hàng đợi cũ (avRecheckQueueV1) khi scan-recheck.js đã có — để tránh chạy trùng
+    if (!(window.ScanRecheck && typeof window.ScanRecheck.runRecheckQueue === 'function')) avLoadQueueFromIdb();
     console.info('[scan-review-av] bootstrap xong');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', avBootstrap); else avBootstrap();
@@ -928,6 +976,20 @@
   async function autoRecheckPending() {
     if (_autoRecheckBusy) return;
     if (isStopped()) return;
+    // NEW SYSTEM (scan-recheck.js): chỉ tự chạy tiếp khi có tiến độ bị gián đoạn, KHÔNG tự quét mới
+    if (window.ScanRecheck && typeof window.ScanRecheck.runRecheckQueue === 'function') {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem('scanRecheckProgress_v1') || 'null'); } catch (e) { saved = null; }
+      if (!saved || !saved.total || (saved.next || 0) >= (saved.total || 0)) return;   // không có việc dở → không tự chạy
+      _autoRecheckBusy = true;
+      try {
+        console.info('[scan-review-av] tự chạy tiếp recheck AI từ tiến độ đã lưu (' + saved.next + '/' + saved.total + ')');
+        await window.ScanRecheck.runRecheckQueue({ onlyUnchecked: true });
+      } catch (e) { console.warn('[scan-review-av] autoRecheckPending (new)', e); }
+      finally { _autoRecheckBusy = false; }
+      return;
+    }
+    // OLD fallback: giữ nguyên nếu chưa có scan-recheck.js — không dùng thường xuyên
     if (RECHECK.running || RECHECK.paused || RECHECK.queue.length) return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     if (shouldYield()) return;
@@ -938,7 +1000,7 @@
     _autoRecheckBusy = true;
     try {
       const n = enqueue(todo.map(i => ({ itemId: i.id, scanId: i.scanId, startedAt: Date.now() })), true);
-      if (n) console.info('[scan-review-av] tự xếp hàng kiểm lại ' + n + ' phiếu chưa kiểm');
+      if (n) console.info('[scan-review-av] tự xếp hàng kiểm lại ' + n + ' phiếu chưa kiểm (old path)');
     } finally { _autoRecheckBusy = false; }
   }
 

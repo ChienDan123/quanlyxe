@@ -354,6 +354,11 @@ const ScanReview = (() => {
     it.partyMoved = Array.isArray(it.partyMoved) ? it.partyMoved : null;
     it.userSkip = !!it.userSkip;   // true = người dùng chọn «Không có người sử dụng» (tắt tự động đưa vào bảng đối chiếu)
     it.customFields = Array.isArray(it.customFields) ? it.customFields : [];   // trường thông tin mới do người dùng thêm: [{id, key, name, value, doneAt}]
+    // AI recheck state: uncertain = trường nghi vấn; locked = trường người dùng đã xác nhận, AI tuyệt đối không đọc lại
+    it.recheck = it.recheck || {};
+    it.recheck.uncertain = it.recheck.uncertain || {};
+    it.recheck.locked = it.recheck.locked || {};
+    it.recheck.lan = it.recheck.lan || 0;
     // Phiếu nhiều xe: X = thứ tự xe này trên ảnh (Xe 1, Xe 2…), Y = TỔNG số xe ghi trên phiếu. null = chưa có (mục cũ) → tự suy ra, xem slotInfo()
     // Khung biển số người dùng ĐÃ XÁC NHẬN LƯU: {page:1|2, x0,y0,x1,y1 (0..1), at}. boxOvPrev = bản lưu trước (khôi phục); boxOvOld = bản bị bỏ khi ảnh xoay
     it.boxOv = it.boxOv || null; it.boxOvPrev = it.boxOvPrev || null; it.boxOvOld = it.boxOvOld || null;
@@ -541,7 +546,7 @@ const ScanReview = (() => {
   async function saveItem(it) { it.updatedAt = Date.now(); await DB.dbPut(ST_ITEMS, it); S.emit('itemsChanged', { scanId: it.scanId }); }
 
   // Áp dụng 1 mục có trên DS. onlyKeys (tùy chọn) = chỉ áp dụng các trường này (áp dụng RIÊNG LẺ từng trường).
-  async function applyFoundItem(v, onlyKeys) {
+  async function applyFoundItem(v, onlyKeys, opts) {
     const it = v.it, row = v.row;
     const toWrite = {}, wrote = [], fromScan = [];
     for (const f of v.fields) {
@@ -574,10 +579,17 @@ const ScanReview = (() => {
     it.result = buildResultText(v, fromScan);
     // Metadata luôn ghi (kể cả "để kiểm sau") -> phần \"ghi vào cột trống tương ứng, tạo cột mới nếu cần\":
     // updateRow_() trong Apps Script tự tạo cột chưa có.
+    // AI tag: chỉ append khi opts.aiTag có — KHÔNG đổi cú pháp ghi hiện tại
+    if (opts && opts.aiTag) {
+      const noteCurrent = (toWrite.ghiChu != null) ? toWrite.ghiChu : row.ghiChu;
+      const sep = noteCurrent && String(noteCurrent).trim() ? ' | ' : '';
+      toWrite.ghiChu = String(noteCurrent || '') + sep + opts.aiTag;
+      it.aiTag = opts.aiTag;
+    }
     const meta = {
       phieuScan: `Có — ${it.sheetLabel} (mã ${it.scanId.slice(0, 8)})`,
       kiemPhieu: it.review === 'da_kiem' ? 'Đã kiểm' : 'Chưa kiểm',
-      ketQuaPhieu: it.result,
+      ketQuaPhieu: it.result + (opts && opts.aiTag ? ' · ' + opts.aiTag : ''),
       // Cột AQ «Người kiểm phiếu»: giá trị vừa ghi > người đang chọn ở thanh công cụ > đã có trên Sheet. KHÔNG còn lấy / ghi cột AA «Người thực hiện».
       nguoiKiemPhieu: String(toWrite.nguoiKiemPhieu || prefs.assignee || row.nguoiKiemPhieu || '').trim(),
     };
@@ -1488,6 +1500,9 @@ const ScanReview = (() => {
 
   function fieldRowHtml(it, f, v) {
     const key = f.spec.key, col = hdr(key), id = escapeHtml(it.id), orphan = !v.found;
+    // AI ghi chú trường nghi vấn: hiện ngay cạnh ô bên trái để người dùng đối chiếu nhanh
+    const aiUnc = (it.recheck && it.recheck.uncertain && it.recheck.uncertain[key]) || null;
+    const aiBadge = aiUnc ? `<div class="rv-ai-unc" title="${escapeHtml(aiUnc.reason || '')}">🤖 AI nghi vấn (tin cậy ${escapeHtml(String(aiUnc.confidence == null ? '?' : aiUnc.confidence))}/100): đọc «${escapeHtml(aiUnc.imageValue || '')}» — ${escapeHtml(aiUnc.reason || '')}</div>` : '';
     const leftCls = f.state === 'diff' ? 'diff' : (f.state === 'fill' ? 'fill' : (f.state === 'same' ? 'same' : (f.state === 'sheetedit' ? 'fill' : '')));
     const svT = String(f.scanVal || '').trim(), dsT = String(f.dsVal || '').trim();
     const canSheet = !f.spec.meta && isActionable(f.state);
@@ -1525,7 +1540,7 @@ const ScanReview = (() => {
     const right = orphan ? '<div class="rv-cell right na"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>— Không có trên Google Sheet —</div>'
       : `<div class="rv-cell right ${f.sheetEdit != null ? 'edited' : ''} ${src === 'sheet' ? 'picked' : ''}"><span class="rv-src-tag sheet">📋 GOOGLE SHEET</span>${editorHtml(it, f, 'sheet')}${deadHtml(it, f)}${pick.sheet ? `<div class="rv-pick-row">${pick.sheet}</div>` : ''}</div>`;
     return `<div class="rv-row ${f.spec.meta ? 'rv-meta' : ''}" data-field="${key}"><div class="rv-field"><b>${escapeHtml(f.spec.label)}</b><div class="hint">cột «${escapeHtml(col)}»</div>${pick.tick}${partyMoveHtml(it, key)}${f.spec.custom ? `<button type="button" class="btn btn-ghost btn-sm rv-cf-del" data-act="cf-del" data-id="${id}" data-field="${escapeHtml(f.spec.cfid)}" title="Bỏ trường này khỏi phiếu (không xóa dữ liệu đã ghi trên Sheet)">🗑 Bỏ trường</button>` : ''}</div>
-      <div class="rv-cell left ${leftCls} ${f.edited ? 'edited' : ''} ${src === 'scan' ? 'picked' : ''}"><span class="rv-src-tag scan">📷 PHIẾU SCAN</span>${editorHtml(it, f, 'scan')}${revert}${scanExtra}${pick.scan ? `<div class="rv-pick-row">${pick.scan}</div>` : ''}</div>
+      <div class="rv-cell left ${leftCls} ${f.edited ? 'edited' : ''} ${src === 'scan' ? 'picked' : ''}"><span class="rv-src-tag scan">📷 PHIẾU SCAN</span>${editorHtml(it, f, 'scan')}${revert}${scanExtra}${aiBadge}${pick.scan ? `<div class="rv-pick-row">${pick.scan}</div>` : ''}</div>
       ${right}
       <div class="rv-dec-cell"><span class="rv-src-tag dec">⚙ QUYẾT ĐỊNH</span>${dec}</div></div>`;
   }
@@ -2182,7 +2197,7 @@ const ScanReview = (() => {
   }
 
   // pre (tùy chọn) = { [itemId]: bản chụp mục TRƯỚC thao tác chọn nguồn } để gộp "chọn + áp dụng" thành 1 bước lịch sử
-  async function applyViews(vs, label, onlyKeys, pre) {
+  async function applyViews(vs, label, onlyKeys, pre, opts) {
     R.busy = true; renderFooter(); updateHistoryButtons();
     let ok = 0, writes = 0, orphanRes = null;
     const orphans = vs.filter(v => !v.found);
@@ -2191,7 +2206,7 @@ const ScanReview = (() => {
     try {
       for (const v of founds) {
         const before = (pre && pre[v.it.id]) || clone(v.it), rowBefore = rowSnap(v.row, v.fields.map(f => f.spec.key));
-        const r = await applyFoundItem(v, onlyKeys);
+        const r = await applyFoundItem(v, onlyKeys, opts);
         changes.push({ id: v.it.id, before, after: clone(v.it), rowId: v.row._rowId, rowBefore, rowAfter: rowSnap(v.row, v.fields.map(f => f.spec.key)) });
         writes += r.writes; ok++;
         if (ok % 10 === 0) { $('#rvFooterSummary').textContent = `${label}… ${ok}/${founds.length}`; await S.yieldToUi(); } // chạy ngầm, nhường UI
@@ -2294,6 +2309,12 @@ const ScanReview = (() => {
       if (mode === 'sheet') it.decisions[key] = f.sheetEdit != null ? 'sheetfix' : 'skip';
       else { delete it.sheetEdits[key]; it.decisions[key] = 'apply'; }
       markFieldsChecked(it, [key]);          // xác nhận = đã đối chiếu với ảnh
+      // KHÓA trường — AI tuyệt đối không đọc lại/sửa
+      it.recheck = it.recheck || { uncertain: {}, locked: {}, lan: 0 };
+      it.recheck.uncertain = it.recheck.uncertain || {};
+      it.recheck.locked = it.recheck.locked || {};
+      delete it.recheck.uncertain[key];
+      it.recheck.locked[key] = { by: 'user', at: Date.now() };
     });
   }
 
@@ -2314,6 +2335,11 @@ const ScanReview = (() => {
       }
       markFieldsChecked(it, keys);
       it.imgChecked = true; it.imgCheckedAt = Date.now();   // xác nhận cả xe = đã đối chiếu xong với ảnh
+      // KHÓA mọi trường đã xác nhận — AI không đụng tới ở các lần recheck sau
+      it.recheck = it.recheck || { uncertain: {}, locked: {}, lan: 0 };
+      it.recheck.uncertain = it.recheck.uncertain || {};
+      it.recheck.locked = it.recheck.locked || {};
+      for (const k of keys) { delete it.recheck.uncertain[k]; it.recheck.locked[k] = { by: 'user', at: Date.now() }; }
     });
   }
 
