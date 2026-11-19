@@ -2082,7 +2082,7 @@ function c08IsNegated(norm, index) {
 // Dùng để nhận biết công dân đã được cập nhật mã định danh; KHÔNG chép nguyên văn ra báo cáo.
 const C08_TRACE_RE = /Trước cập nhật[^;\n|]*/gi;
 const C08_TRACE_DETECT = /truoc cap nhat[^;|]*cccd\s*[=:]/;
-function c08StripTrace(text) { return (text || '').toString().normalize('NFC').replace(C08_TRACE_RE, ' '); }
+function c08StripTrace(text) { return (text || '').toString().normalize('NFC').replace(C08_TRACE_RE, ' ').replace(/AI kiểm lần \d+:[^;\n|·]*/g, ' '); }
 
 // Số CCCD 12 số. Excel hay cắt mất số 0 đầu nên 11 số toàn chữ số cũng được coi là CCCD (thiếu 1 số 0).
 // MST (10/13 số) hoặc có chữ -> không phải.

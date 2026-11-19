@@ -543,7 +543,7 @@ const ScanApp = (() => {
     if (major === 2 && minor >= 5) return { thinkingBudget: 1024 };
     return null;
   }
-  async function geminiGenerate({ parts, schema, onStatus, signal, systemInstruction }) {
+  async function geminiGenerate({ parts, schema, onStatus, signal, systemInstruction, priority }) {
     const st = await loadSettings();
     const chain = modelChain(st);
     const say = (m, level) => { if (onStatus) onStatus(m, level || 'info'); };
@@ -553,9 +553,15 @@ const ScanApp = (() => {
     const baseCfg = { temperature: 0 };
     if (schema) { baseCfg.responseMimeType = 'application/json'; baseCfg.responseSchema = schema; }
     const bodyFor = (model) => { const t = thinkingCfg(model); return { ...baseBody, generationConfig: t ? { ...baseCfg, thinkingConfig: t } : baseCfg }; };
-    let waitRound = 0;
+    let waitRound = 0, yielded = false;
     for (;;) {
       if (signal && signal.aborted) throw new GeminiError('cancelled', 'Đã hủy');
+      // Ưu tiên thấp (AI kiểm lại ngầm): nhường khi hàng đợi quét của người dùng đang chạy
+      if (priority === 'low' && Q.running) {
+        if (!yielded) { yielded = true; say('Nhường hàng đợi quét của người dùng — AI kiểm lại chờ…'); }
+        await sleep(2000); continue;
+      }
+      yielded = false;
       const usable = (await listKeys()).filter(k => k.enabled && k.status !== 'invalid');
       if (!usable.length) throw new GeminiError('nokey', 'Chưa có API key Gemini nào dùng được. Thêm key trong ⚙️ Cài đặt.');
       const now = Date.now();
@@ -1629,5 +1635,6 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     models: { resetState: resetModelState, renderStatus: renderModelStatus },
     prepareImageFile, openPdf, renderPdfPage, analyzeSheet, geminiGenerate, normalizeBienSo, normalizeCccd, sha256Hex, uid,
     TINH_TRANG_LABEL,
+    isBusy: () => !!Q.running,   // hàng đợi quét của người dùng đang chạy? (AI kiểm lại dùng để nhường)
   };
 })();

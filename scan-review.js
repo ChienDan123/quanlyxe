@@ -585,17 +585,20 @@ const ScanReview = (() => {
       const sep = noteCurrent && String(noteCurrent).trim() ? ' | ' : '';
       toWrite.ghiChu = String(noteCurrent || '') + sep + opts.aiTag;
       it.aiTag = opts.aiTag;
+      // Đưa tag vào it.result để _writeUncertainMeta (nếu chạy sau) nối tiếp không làm mất tag này
+      it.result = (it.result ? it.result + ' · ' : '') + opts.aiTag;
     }
     const meta = {
       phieuScan: `Có — ${it.sheetLabel} (mã ${it.scanId.slice(0, 8)})`,
       kiemPhieu: it.review === 'da_kiem' ? 'Đã kiểm' : 'Chưa kiểm',
-      ketQuaPhieu: it.result + (opts && opts.aiTag ? ' · ' + opts.aiTag : ''),
+      ketQuaPhieu: it.result,   // đã bao gồm aiTag nếu có → _writeUncertainMeta nối thêm uncertainTag
       // Cột AQ «Người kiểm phiếu»: giá trị vừa ghi > người đang chọn ở thanh công cụ > đã có trên Sheet. KHÔNG còn lấy / ghi cột AA «Người thực hiện».
       nguoiKiemPhieu: String(toWrite.nguoiKiemPhieu || prefs.assignee || row.nguoiKiemPhieu || '').trim(),
     };
     // updateSingleRowFields = local-first + hàng đợi đồng bộ ngầm sẵn có của app
     await updateSingleRowFields(row, { ...toWrite, ...meta });
-    it.done = true; it.orphan = false;
+    it.done = unresolved.length === 0;
+    it.orphan = false;
     await saveItem(it);
     await recomputeLink(it.bienSo);
     return { writes: wrote.length };
@@ -2150,7 +2153,7 @@ const ScanReview = (() => {
      => quay lại sẽ khôi phục luôn giá trị trên Sheet (qua updateSingleRowFields nên vẫn đồng bộ ngầm). Chỉ giữ trong phiên. */
   const HIST = { undo: [], redo: [], max: 100 };
   const clone = (o) => JSON.parse(JSON.stringify(o));
-  const ROW_KEYS = ['trangThaiXe', 'chuXe', 'cccd', 'soDienThoai', 'ghiChu', 'tinhTrangCamKet', 'nguoiThucHien', 'nguoiKiemPhieu', 'phieuScan', 'kiemPhieu', 'ketQuaPhieu', ...PARTY_ALL_SPECS.map(sp => sp.key)];   // gồm 4 cột Người sử dụng (AH–AK) + 4 cột Người mua để hoàn tác
+  const ROW_KEYS = ['trangThaiXe', 'chuXe', 'cccd', 'soDienThoai', 'ghiChu', 'tinhTrangCamKet', 'nguoiThucHien', 'nguoiKiemPhieu', 'phieuScan', 'kiemPhieu', 'ketQuaPhieu', 'trangThaiXeChuaKiem', ...PARTY_ALL_SPECS.map(sp => sp.key)];   // gồm 4 cột Người sử dụng (AH–AK) + 4 cột Người mua để hoàn tác
   // extra = các khóa cột phụ (vd. cột Người mua / Người sử dụng) cần chụp thêm để hoàn tác được
   const rowSnap = (row, extra = []) => row ? Object.fromEntries(ROW_KEYS.concat(extra).map(k => [k, row[k] || ''])) : null;
   const findRow = (rowId) => state.rawData.find(r => r._rowId === rowId);
@@ -3134,7 +3137,12 @@ const ScanReview = (() => {
       else if (act === 'slot-del') await onSlotDelete(it);
       else if (act === 'revert') { // hoàn tác chỉnh sửa của 1 trường
         const k = b.dataset.field;
-        await track(it, `Hoàn tác chỉnh sửa «${labelOf(k)}»`, async () => { delete it.edits[k]; delete it.sheetEdits[k]; delete it.decisions[k]; delete it.source[k]; delete it.fieldChecked[k]; it.imgChecked = false; await persistEdit(it); });
+        await track(it, `Hoàn tác chỉnh sửa «${labelOf(k)}»`, async () => {
+          delete it.edits[k]; delete it.sheetEdits[k]; delete it.decisions[k]; delete it.source[k]; delete it.fieldChecked[k];
+          if (it.recheck && it.recheck.locked) delete it.recheck.locked[k];   // mở khóa AI cho trường này
+          it.imgChecked = false;
+          await persistEdit(it);
+        });
         rerenderCard(it);
       }
     });
@@ -3587,6 +3595,8 @@ const ScanReview = (() => {
 
   // Nạp lại tùy chọn từ localStorage (scan-hub.js gọi khi nhận cài đặt mới từ máy khác)
   function reloadPrefs() { try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) { /* bỏ qua */ } }
-  return { backfillChecker, reloadPrefs, open, openForPlate, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge };
+  return { backfillChecker, reloadPrefs, open, openForPlate, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge,
+    // Mở thêm cho scan-recheck.js dùng (trước đây thiếu → scan-recheck không chạy được):
+    applyFoundItem, applyViews, saveItem, normItem, goToItem, setFocus, renderReview, record, clone, markFieldsChecked };
 })();
 window.ScanReview = ScanReview;

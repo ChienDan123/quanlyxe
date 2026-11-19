@@ -414,7 +414,40 @@ function scanSelfTest() {
     var diag = syncAvStatusDiagnose_({ sheetName: AV_SHEET_DEFAULT });
     if (diag && diag.ok) {
       say(true, 'AV: cột ' + diag.avColLetter + ' (index ' + diag.avCol + '), tiêu đề = "' + (diag.avHeader || '(trống)') + '", plateCol = "' + diag.plateHeader + '".');
-      var validHeader = !diag.avHeader || /^(trang thai kiem|trang thai kiem phieu|trang thai kiem tra|av)$/i
+      var validHeader = !diag.avHeader || /^(trang thai xe chua kiem|trang thai kiem|trang thai kiem phieu|trang thai kiem tra|av)$/i
+(1) Hàm đã sửa/thêm theo file
+File	Hàm
+index.html	bỏ scan-review-ai.js, thêm ?v cho scan-recheck.js
+scan-review-av.js	computeAV (xóa đoạn thừa), handler recheck (sửa cú pháp, gọi recheckOne), autoRecheckPending
+scan.js	geminiGenerate (thêm priority:'low'), return (thêm isBusy)
+scan-review.js	HÀM MỚI stripAiTag, lockUser; sửa applyFoundItem, applyViews, quickSign, onPartyApply, onCfApply, ROW_KEYS, return (export rowSnap/stripAiTag/lockUser/reloadItems)
+scan-recheck.js	refreshMainTable, aiCompareItem, aiApplyCertain (viết lại), _writeUncertainMeta, _runRecheckQueueInner (viết lại); HÀM MỚI recheckOne, resumeIfPending, refreshReviewUi, helper tiến độ IndexedDB, applyManualView, ensureManualObserver; sửa goToNextUncertain, bindRecheckUI, ScanReviewAVFilter, window.ScanRecheck
+app.js	c08StripTrace
+AppsScript_ScanPatch.gs	AV_HEADER, syncAvStatus_, scanSelfTest
+
+Không đổi chữ ký hay giá trị trả về của hàm nào đang được nơi khác gọi. Chỉ thêm tham số tùy chọn priority và thêm khóa export. Không đổi tên ID/class nào.
+
+(2) THIẾU HÀM, chưa làm được phần nào
+Thiếu	Ảnh hưởng
+AppsScript_UpdateRow.gs (hàm ur_*, doPost thật)	Chưa kiểm được việc ghi cột AV có nằm đúng cột 48 không, và có bỏ qua tiêu đề khác không.
+scan-review.css, scan-review-ui.css	Chưa kiểm class .rv-manual, .rv-unc-hide có bị CSS khác đè không (đã thêm style nội tuyến !important).
+PHẦN 8 AppsScript_ScanPatch.gs (hàng đợi server)	Không sửa, khuyên không cài trigger: dùng key riêng, model cũ, chỉ so xe đầu tiên của phiếu, không có quy tắc “chắc chắn” và không khóa trường. Chạy ngầm trong trình duyệt (đã sửa ở trên) là đủ.
+(3) 5 bước tự kiểm tra
+Nạp file: mở web, bấm F12 → Console. Không được còn SyntaxError, phải thấy [scan-review-av] bootstrap xong. Gõ ScanRecheck.recheckOne phải ra function. Mở <URL/exec>?action=syncAvStatusDiagnose và scanSelfTest phải ra “MỌI THỨ SẴN SÀNG”.
+Yêu cầu 1 và 2 (ghi như người dùng): bấm “🔁 Kiểm lại tất cả chưa kiểm (AI)” với 3 phiếu thử.
+Phiếu đúng: Ghi chú có AI kiểm lần 1: xác định đúng (dd/mm/yyyy), ô 🖼 được tick, cột AV có giá trị.
+Bấm “Quay lại bước trước”: Sheet trả về giá trị cũ.
+Chạy lần 2: dấu AI không bị nhân đôi.
+Yêu cầu 3 (nghi vấn, khóa, nhảy tiếp):
+Trường nghi vấn không bị ghi. Có huy hiệu 🤖, và bộ lọc “Còn nghi vấn” lọc đúng.
+Bấm “⚖ Kiểm thủ công mục nghi vấn”: mở đúng thẻ và ảnh, chỉ còn trường nghi vấn.
+Bấm “✅ Google Sheet đúng” hoặc “Dữ liệu từ phiếu scan đúng”: trường bị khóa (lọc “Đã khoá (bạn xác nhận)” thấy xe này).
+Hết trường nghi vấn thì tự nhảy sang xe kế.
+Chạy lại AI: trường đã khóa không bị đọc lại.
+Yêu cầu 4 (ngầm, ưu tiên thấp, lưu tiến độ):
+Bắt đầu quét 1 file khi AI đang chạy: dòng chân trang báo “Tạm dừng: người dùng đang bận”, và log có “Nhường hàng đợi quét”.
+Giữa chừng bấm F5: sau ~25 giây tự chạy tiếp, không gửi lại các phiếu đã kiểm. Bấm nút khi đang chạy sẽ hỏi dừng; dừng xong thì F5 không tự chạy.
+Yêu cầu 5 (không phá chức năng cũ): thử bằng tay “Áp dụng xe này”, “Quay lại bước trước”, “Rà soát với Google Sheet thật”, quét phiếu mới. Mở bảng C08 và xuất file, cột “Kết quả rà soát” không được chứa chữ “AI kiểm lần”.
         .test(String(diag.avHeader).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim());
       say(validHeader, 'Tiêu đề AV hợp lệ (trống hoặc "Trạng thái kiểm").' + (validHeader ? '' : ' → đổi AV1 thành "Trạng thái kiểm" hoặc xoá trắng.'));
     } else {
@@ -457,7 +490,7 @@ function scanTestOrphanCleanup() {
    • Log AV_LAST_SYNC_LOG trong PropertiesService (action 'getAvSyncLog' để đọc).
    ========================================================================= */
 var AV_SHEET_DEFAULT = 'Tong hop';
-var AV_HEADER = 'Trạng thái kiểm';
+var AV_HEADER = 'Trạng thái xe chưa kiểm';
 var AV_COL_INDEX = 47;      // 0-based: cột 48 = AV
 
 // Chuẩn hoá biển số để khớp: bỏ mọi ký tự không phải chữ/số, viết hoa.
@@ -556,7 +589,7 @@ function syncAvStatus_(d) {
     var existingHeader = '';
     try { existingHeader = String(sh.getRange(1, avCol + 1).getValue() || '').trim(); } catch (e) { existingHeader = ''; }
     var existingHeaderNorm = String(existingHeader).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-    var avAliasesNorm = ['trang thai kiem', 'trang thai kiem phieu', 'trang thai kiem tra', 'av'];
+    var avAliasesNorm = ['trang thai xe chua kiem', 'trang thai kiem', 'trang thai kiem phieu', 'trang thai kiem tra', 'av'];
     if (existingHeader && avAliasesNorm.indexOf(existingHeaderNorm) < 0) {
       return { ok: false, error: 'Cột AV (48) đang có tiêu đề "' + existingHeader + '" — không phải "' + AV_HEADER + '". Đổi tiêu đề hoặc xoá trắng AV1 rồi thử lại.' };
     }

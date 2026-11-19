@@ -78,17 +78,6 @@
     const st = row ? String(row.trangThaiXe || '').trim() : '';
     return st ? out + ' · Trạng thái xe: ' + st : out;
   }
-    let out;
-    if (r.status === 'manual') out = 'Đã kiểm thủ công';
-    else if (r.status === 'error') out = (checked ? 'Đã kiểm' : 'Chưa kiểm') + ' — lỗi kiểm lại';
-    else if (r.status === 'done') {
-      const n = (r.nghiVan || []).length;
-      out = n ? 'Có nghi vấn (' + n + ') — đã kiểm lại lần ' + (r.count || 1)
-              : 'Đã kiểm lại lần ' + (r.count || 1) + ' – đúng';
-    } else out = checked ? 'Đã kiểm' : 'Chưa kiểm';
-    const st = row ? String(row.trangThaiXe || '').trim() : '';
-    return st ? out + ' · Trạng thái xe: ' + st : out;
-  }
 
   async function itemsByPlate(plate) {
     return (await DB.tx(DB.ST_ITEMS, 'readonly', os => os.index('bienSo').getAll(plate)).catch(() => [])) || [];
@@ -532,7 +521,7 @@
 
   /* =================== 6. PHIẾU LẠ: ĐÃ KIỂM ĐÚNG BIỂN SỐ =================== */
   function injectOrphanPlateCheck(cardEl) {
-    if (!cardEl.classList.contains('rv-orphan')) return;
+    // Bỏ guard: cho cả phiếu lạ và không lạ (Yêu cầu D — tick đúng biển số riêng)
     let plateField = null;
     for (const f of cardEl.querySelectorAll('.rv-row .rv-field')) {
       const b = f.querySelector('b');
@@ -584,10 +573,17 @@
     if (act === 'recheck') {
       // Ưu tiên NEW SYSTEM (scan-recheck.js): gửi ẢNH + dữ liệu Sheet + dữ liệu phiếu, ghi qua applyFoundItem
       if (window.ScanRecheck && typeof window.ScanRecheck.aiCompareItem === 'function') {
+        if (window._aiRecheckRunning) { say('AI đang kiểm lại hàng loạt — vui lòng chờ hoặc dùng "🔁 Kiểm lại tất cả".', true); return; }
         const it = await DB.dbGet(DB.ST_ITEMS, b.dataset.id); if (!it) return;
         if (!window.confirm('AI kiểm lại mục «' + (it.bienSoRaw || it.bienSo || '(chưa có biển)') + '»?\n\n' +
           '• Gửi ẢNH các mặt phiếu + dữ liệu Sheet + dữ liệu phiếu đã đọc cho Gemini.\n' +
           '• Trường chắc chắn (2 lần đọc khớp, tin cậy ≥ 90) → tự ghi như bạn làm tay, đóng dấu «AI kiểm lần n».\n' +
+
+THÊM dòng set lock và finally reset:
+      // ngay sau dòng `b.disabled = true; b.textContent = '⏳ Đang kiểm…';` thêm:
+      window._aiRecheckRunning = true;
+      // trong khối finally đổi thành:
+        finally { b.disabled = false; b.textContent = '🔁 Kiểm lại'; window._aiRecheckRunning = false; }
           '• Trường nghi vấn → đánh dấu, không tự ghi.\n' +
           '• Trường đã khoá (bạn xác nhận) → AI không đụng.')) return;
         b.disabled = true; b.textContent = '⏳ Đang kiểm…';
@@ -611,6 +607,12 @@
       return;
     }
     if (act === 'recheck-all') {
+      // ƯU TIÊN NEW SYSTEM (scan-recheck.js): đối chiếu ẢNH ↔ Sheet từng trường
+      if (window.ScanRecheck && typeof window.ScanRecheck.recheckAllUnchecked === 'function') {
+        try { await window.ScanRecheck.recheckAllUnchecked(); } catch (err) { say('Lỗi kiểm lại AI: ' + (err && err.message || err), true); }
+        return;
+      }
+      // Fallback OLD path (chỉ khi chưa nạp scan-recheck.js)
       const items = (await DB.dbGetAll(DB.ST_ITEMS)) || [];
       const todo = items.filter(isPendingRecheck);
       if (!todo.length) { say('Không có phiếu chưa kiểm nào cần kiểm lại.'); return; }
@@ -732,7 +734,13 @@
     // Bộ lọc riêng (KHÔNG đụng #rvFilter)
     const sel = document.createElement('select');
     sel.id = 'rvAvFilter'; sel.className = 'row-inline-select'; sel.title = 'Lọc theo kết quả kiểm lại (kết hợp được với các bộ lọc khác)';
-    sel.innerHTML = '<option value="all">Kiểm lại: tất cả</option><option value="uncertain">⚠ Chưa chắc chắn</option><option value="manual">✔ Đã kiểm thủ công</option>';
+    sel.innerHTML =
+      '<option value="all">Kiểm lại: tất cả</option>' +
+      '<option value="uncertain">⚠ Chưa chắc chắn (còn nghi vấn)</option>' +
+      '<option value="certain">✔ AI xác định đúng (đã khóa)</option>' +
+      '<option value="locked">🔒 Có trường đã khóa</option>' +
+      '<option value="none">— Chưa có nghi vấn</option>' +
+      '<option value="manual">✔ Đã kiểm thủ công</option>';
     sel.value = avFilterMode;
     sel.addEventListener('change', () => {
       avFilterMode = sel.value;
@@ -821,7 +829,11 @@
       seen.add(row._rowId);
       const want = computeAV(it, row);
       if (!want || /^Chưa có dữ liệu/.test(want)) continue;
-      const mk = avMatchKeyForRow(row);
+      // Ưu tiên khớp bằng matchKeyForRow (Mã ID/MOTO_ID) — ĐỒNG BỘ với applyFoundItem và backfillAllToAV.
+      // Chỉ fallback avMatchKeyForRow (Biển số) khi không có matchKeyForRow, tránh ghi nhầm dòng khi trùng biển.
+      let mk = null;
+      if (typeof matchKeyForRow === 'function') { try { mk = matchKeyForRow(row); } catch (e) { mk = null; } }
+      if (!mk) mk = avMatchKeyForRow(row);
       if (!mk) continue;
       const sig = mk.header + '=' + mk.value;
       const entry = done[sig];
@@ -830,9 +842,9 @@
       if (!force && entryVal === want && (now - entryTime) < AV_SKIP_MS) continue;
       row[AV_KEY] = want;
       try {
-        // Ưu tiên khớp theo BIỂN SỐ (chắc chắn hơn Mã ID khi Excel tự đổi kiểu dữ liệu)
-        if (row.bienSo && String(row.bienSo).trim() && typeof enqueueSync === 'function') {
-          enqueueSync('Biển số', String(row.bienSo).trim(), { [AV_HEADER]: want }, row._rowId);
+        // ĐỒNG BỘ khóa match với applyFoundItem: dùng matchKeyForRow (Mã ID/MOTO_ID ưu tiên), fallback Biển số.
+        if (mk && typeof enqueueSync === 'function') {
+          enqueueSync(mk.header, String(mk.value), { [AV_HEADER]: want }, row._rowId);
         } else {
           enqueueRowSync(row, { [AV_HEADER]: want });
         }
