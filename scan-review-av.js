@@ -572,29 +572,21 @@
     }
     if (act === 'recheck') {
       // Ưu tiên NEW SYSTEM (scan-recheck.js): gửi ẢNH + dữ liệu Sheet + dữ liệu phiếu, ghi qua applyFoundItem
-      if (window.ScanRecheck && typeof window.ScanRecheck.aiCompareItem === 'function') {
+      if (window.ScanRecheck && typeof window.ScanRecheck.recheckOne === 'function') {
         if (window._aiRecheckRunning) { say('AI đang kiểm lại hàng loạt — vui lòng chờ hoặc dùng "🔁 Kiểm lại tất cả".', true); return; }
-        const it = await DB.dbGet(DB.ST_ITEMS, b.dataset.id); if (!it) return;
-        if (!window.confirm('AI kiểm lại mục «' + (it.bienSoRaw || it.bienSo || '(chưa có biển)') + '»?\n\n' +
+        const it0 = await DB.dbGet(DB.ST_ITEMS, b.dataset.id); if (!it0) return;
+        if (!window.confirm('AI kiểm lại mục «' + (it0.bienSoRaw || it0.bienSo || '(chưa có biển)') + '»?\n\n' +
           '• Gửi ẢNH các mặt phiếu + dữ liệu Sheet + dữ liệu phiếu đã đọc cho Gemini.\n' +
           '• Trường chắc chắn (2 lần đọc khớp, tin cậy ≥ 90) → tự ghi như bạn làm tay, đóng dấu «AI kiểm lần n».\n' +
-
-THÊM dòng set lock và finally reset:
-      // ngay sau dòng `b.disabled = true; b.textContent = '⏳ Đang kiểm…';` thêm:
-      window._aiRecheckRunning = true;
-      // trong khối finally đổi thành:
-        finally { b.disabled = false; b.textContent = '🔁 Kiểm lại'; window._aiRecheckRunning = false; }
           '• Trường nghi vấn → đánh dấu, không tự ghi.\n' +
           '• Trường đã khoá (bạn xác nhận) → AI không đụng.')) return;
         b.disabled = true; b.textContent = '⏳ Đang kiểm…';
+        window._aiRecheckRunning = true;
         try {
-          const cmp = await window.ScanRecheck.aiCompareItem(it, {});
-          const lan = ((it.recheck && it.recheck.lan) || 0) + 1;
-          const r = await window.ScanRecheck.aiApplyCertain(it, cmp, lan);
-          say('AI kiểm lần ' + lan + ': ' + (r.certain || 0) + ' trường chắc chắn đã ghi · ' + (r.uncertain || 0) + ' nghi vấn.');
-          try { if (typeof refreshMainTable === 'function') refreshMainTable(); } catch (e) { /* bỏ qua */ }
+          const r = await window.ScanRecheck.recheckOne(it0.id);
+          say('AI kiểm lần ' + r.lan + ': ' + (r.certain || 0) + ' trường chắc chắn đã ghi · ' + (r.uncertain || 0) + ' nghi vấn.');
         } catch (e) { say('Lỗi kiểm: ' + (e && e.message || e), true); }
-        finally { b.disabled = false; b.textContent = '🔁 Kiểm lại'; }
+        finally { window._aiRecheckRunning = false; b.disabled = false; b.textContent = '🔁 Kiểm lại'; }
         return;
       }
       // Fallback (chỉ khi chưa có scan-recheck.js): OLD path
@@ -989,15 +981,10 @@ THÊM dòng set lock và finally reset:
     if (_autoRecheckBusy) return;
     if (isStopped()) return;
     // NEW SYSTEM (scan-recheck.js): chỉ tự chạy tiếp khi có tiến độ bị gián đoạn, KHÔNG tự quét mới
-    if (window.ScanRecheck && typeof window.ScanRecheck.runRecheckQueue === 'function') {
-      let saved = null;
-      try { saved = JSON.parse(localStorage.getItem('scanRecheckProgress_v1') || 'null'); } catch (e) { saved = null; }
-      if (!saved || !saved.total || (saved.next || 0) >= (saved.total || 0)) return;   // không có việc dở → không tự chạy
+    if (window.ScanRecheck && typeof window.ScanRecheck.resumeIfPending === 'function') {
       _autoRecheckBusy = true;
-      try {
-        console.info('[scan-review-av] tự chạy tiếp recheck AI từ tiến độ đã lưu (' + saved.next + '/' + saved.total + ')');
-        await window.ScanRecheck.runRecheckQueue({ onlyUnchecked: true });
-      } catch (e) { console.warn('[scan-review-av] autoRecheckPending (new)', e); }
+      try { await window.ScanRecheck.resumeIfPending(); }
+      catch (e) { console.warn('[scan-review-av] autoRecheckPending (new)', e); }
       finally { _autoRecheckBusy = false; }
       return;
     }

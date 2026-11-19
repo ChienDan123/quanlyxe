@@ -544,6 +544,14 @@ const ScanReview = (() => {
   /* ------------------------------------------------------------------ */
   // Lưu mục + báo cho scan-sync.js đẩy lại meta phiếu lên online (trước đây thiếu sự kiện này nên thay đổi đối chiếu không lên Drive)
   async function saveItem(it) { it.updatedAt = Date.now(); await DB.dbPut(ST_ITEMS, it); S.emit('itemsChanged', { scanId: it.scanId }); }
+  // Gỡ dấu «AI kiểm lần n: …» cũ trước khi nối dấu mới (chạy lại không nhân đôi dấu)
+  const AI_TAG_RE = /(?:\s*[|·]\s*)?AI kiểm lần \d+: (?:xác định đúng|còn nghi vấn)(?: \(\d{1,2}\/\d{1,2}\/\d{4}\))?/g;
+  const stripAiTag = (s) => String(s == null ? '' : s).replace(AI_TAG_RE, '').replace(/^\s*[|·]\s*/, '').trim();
+  // Người dùng xác nhận trường nào thì KHÓA trường đó: AI không đọc lại / không sửa ở mọi lần kiểm sau
+  function lockUser(it, keys) {
+    it.recheck = it.recheck || {}; it.recheck.uncertain = it.recheck.uncertain || {}; it.recheck.locked = it.recheck.locked || {};
+    (keys || []).forEach(k => { delete it.recheck.uncertain[k]; it.recheck.locked[k] = { by: 'user', at: Date.now() }; });
+  }
 
   // Áp dụng 1 mục có trên DS. onlyKeys (tùy chọn) = chỉ áp dụng các trường này (áp dụng RIÊNG LẺ từng trường).
   async function applyFoundItem(v, onlyKeys, opts) {
@@ -581,12 +589,12 @@ const ScanReview = (() => {
     // updateRow_() trong Apps Script tự tạo cột chưa có.
     // AI tag: chỉ append khi opts.aiTag có — KHÔNG đổi cú pháp ghi hiện tại
     if (opts && opts.aiTag) {
-      const noteCurrent = (toWrite.ghiChu != null) ? toWrite.ghiChu : row.ghiChu;
-      const sep = noteCurrent && String(noteCurrent).trim() ? ' | ' : '';
-      toWrite.ghiChu = String(noteCurrent || '') + sep + opts.aiTag;
+      const noteCurrent = stripAiTag((toWrite.ghiChu != null) ? toWrite.ghiChu : row.ghiChu);
+      const sep = noteCurrent ? ' | ' : '';
+      toWrite.ghiChu = noteCurrent + sep + opts.aiTag;
       it.aiTag = opts.aiTag;
       // Đưa tag vào it.result để _writeUncertainMeta (nếu chạy sau) nối tiếp không làm mất tag này
-      it.result = (it.result ? it.result + ' · ' : '') + opts.aiTag;
+      { const baseRes = stripAiTag(it.result); it.result = (baseRes ? baseRes + ' · ' : '') + opts.aiTag; }
     }
     const meta = {
       phieuScan: `Có — ${it.sheetLabel} (mã ${it.scanId.slice(0, 8)})`,
@@ -1632,6 +1640,7 @@ const ScanReview = (() => {
     const keys = Object.keys(toWrite), before = clone(it), rowBefore = rowSnap(v.row, keys);
     await updateSingleRowFields(v.row, toWrite);
     it.partyDoneAt = Date.now(); it.imgChecked = true; it.imgCheckedAt = it.imgCheckedAt || Date.now();   // xác nhận = đã đối chiếu ảnh
+    lockUser(it, partyKeys(role));
     await saveItem(it);
     record('Cập nhật ' + PARTY_ROLES[role].label + ' vào Sheet', [{ id: it.id, before, after: clone(it), rowId: v.row._rowId, rowBefore, rowAfter: rowSnap(v.row, keys) }]);
     refreshMainTable(); rerenderCard(it);
@@ -1945,6 +1954,7 @@ const ScanReview = (() => {
     const keys = Object.keys(toWrite), before = clone(it), rowBefore = rowSnap(v.row, keys);
     await updateSingleRowFields(v.row, toWrite);
     cfs.forEach(c => { c.doneAt = Date.now(); });
+    lockUser(it, cfs.map(c => c.key));
     it.imgChecked = true; it.imgCheckedAt = it.imgCheckedAt || Date.now();   // xác nhận = đã đối chiếu ảnh
     await saveItem(it);
     record('Ghi trường mới lên Sheet', [{ id: it.id, before, after: clone(it), rowId: v.row._rowId, rowBefore, rowAfter: rowSnap(v.row, keys) }]);
@@ -2209,6 +2219,7 @@ const ScanReview = (() => {
     try {
       for (const v of founds) {
         const before = (pre && pre[v.it.id]) || clone(v.it), rowBefore = rowSnap(v.row, v.fields.map(f => f.spec.key));
+        if (onlyKeys && !(opts && opts.aiTag)) lockUser(v.it, onlyKeys);   // «Áp dụng riêng trường» = người dùng xác nhận → khóa
         const r = await applyFoundItem(v, onlyKeys, opts);
         changes.push({ id: v.it.id, before, after: clone(v.it), rowId: v.row._rowId, rowBefore, rowAfter: rowSnap(v.row, v.fields.map(f => f.spec.key)) });
         writes += r.writes; ok++;
@@ -2351,6 +2362,7 @@ const ScanReview = (() => {
     let f;
     await track(it, 'Phiếu đã ký cam kết', async () => {
       it.edits.tinhTrangCamKet = SIGNED;
+      lockUser(it, ['tinhTrangCamKet']);
       f = computeView(it).fields.find(x => x.spec.key === 'tinhTrangCamKet');
       if (f && isActionable(f.state)) { it.decisions.tinhTrangCamKet = 'apply'; it.source.tinhTrangCamKet = 'scan'; }
       else { delete it.decisions.tinhTrangCamKet; delete it.source.tinhTrangCamKet; }
@@ -3597,6 +3609,9 @@ const ScanReview = (() => {
   function reloadPrefs() { try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) { /* bỏ qua */ } }
   return { backfillChecker, reloadPrefs, open, openForPlate, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge,
     // Mở thêm cho scan-recheck.js dùng (trước đây thiếu → scan-recheck không chạy được):
-    applyFoundItem, applyViews, saveItem, normItem, goToItem, setFocus, renderReview, record, clone, markFieldsChecked };
+    applyFoundItem, applyViews, saveItem, normItem, goToItem, setFocus, renderReview, record, clone, markFieldsChecked,
+    // Cho scan-recheck.js: hoàn tác được cả cột Sheet, gỡ dấu AI cũ, khóa trường, nạp lại danh sách mục sau khi AI ghi ngầm
+    rowSnap, stripAiTag, lockUser,
+    reloadItems: async () => { R.items = (await DB.dbGetAll(ST_ITEMS)).map(normItem); } };
 })();
 window.ScanReview = ScanReview;
