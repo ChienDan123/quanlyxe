@@ -666,7 +666,7 @@
         </select>
         <select id="rvChecker" class="tpl-input" style="width:auto" title="Lọc theo người kiểm"></select>
         <input id="rvSearch" class="tpl-input" type="search" placeholder="Tìm biển số / chủ xe…" style="max-width:220px">
-        <label class="rv-filter-av" title="Bộ lọc AI (kết hợp AND với bộ lọc bên cạnh)">
+        <label class="rv-filter-av" title="Bộ lọc AI (kết hợp AND với bộ lọc bên cạnh). «Tất cả» = không lọc thêm.">
           🤖 AI:
           <select id="rvAvFilter">
             <option value="all">Tất cả</option>
@@ -674,6 +674,12 @@
             <option value="certain">AI đã chắc chắn</option>
             <option value="locked">Đã khoá (bạn xác nhận)</option>
             <option value="none">Không còn nghi vấn</option>
+            <option value="chua_kiem_lai">Chưa kiểm lại</option>
+            <option value="dung">Chắc chắn đúng</option>
+            <option value="da_ghi">Đã ghi</option>
+            <option value="nghi_van">Nghi vấn (AI)</option>
+            <option value="loi">Lỗi</option>
+            <option value="khoa_thu_cong">Khoá thủ công</option>
           </select>
         </label>
         <button type="button" class="btn btn-ghost btn-sm" id="btnNextUncertain" title="Đi tới mục nghi vấn kế tiếp và cuộn tới trường nghi vấn đầu tiên">⚖ Kiểm thủ công mục nghi vấn</button>
@@ -800,6 +806,8 @@
 <script src="scan-compare.js?v=20261013"></script>
 <script src="scan-review.js?v=20261028"></script>
 <script src="scan-recheck.js?v=20261120"></script>
+<script src="scan-ai-status.js"></script>
+<script src="scan-recheck-ui.js?v=20261120"></script>
 <script src="scan-review-av.js?v=20261118"></script>
 <script src="scan-files.js?v=20261013"></script>
 <script src="scan-sync.js?v=20261013"></script>

@@ -28,6 +28,77 @@ const ScanReview = (() => {
   /* ------------------------------------------------------------------ */
   // bienSo chuẩn hóa -> { bienSo, scanIds[], review:'da_kiem'|'chua_kiem', orphan, result }
   const linkMap = new Map();
+  /* ===== CỜ TÍNH NĂNG — bật/tắt nút «Áp dụng tất cả» ===== */
+  const SHOW_APPLY_ALL = false;   // true: hiện lại #btnRvApplyAll + chữ «(N mục)» ở chân modal So sánh
+
+  /* ===== PHÂN LOẠI AI — DUY NHẤT một nguồn sự thật =====
+     Trả về đúng 1 trong 6 giá trị; dùng chung cho: passesFilter, renderStats, renderAvFilterOptions,
+     cardHtml (badge), nút «Kiểm thủ công mục nghi vấn» (goToNextUncertain đọc it.recheck gián tiếp),
+     chip trạng thái (qua window.ScanReviewAI.aiClass).
+     Đảm bảo tổng 6 nhóm = tổng số mục (không sót, không trùng) — có self-check trong console. */
+  function aiClass(it) {
+    if (!it) return 'chua_kiem_lai';
+    const r = it.recheck || {};
+    const unc = r.uncertain || {};
+    const hasUnc = Object.keys(unc).some(k => !k.startsWith('_'));
+    const lock = r.locked || {};
+    const locks = Object.values(lock);
+    const hasUserLock = locks.some(l => l && l.by === 'user');
+    const hasAiLock   = locks.some(l => l && l.by === 'ai');
+    const appliedAny  = it.applied && Object.keys(it.applied).length > 0;
+    // 1) Lỗi — trừ khi người dùng đã xác nhận thủ công (ưu tiên thấp hơn khoá thủ công)
+    if (r.status === 'error' && !hasUserLock) return 'loi';
+    // 2) Còn nghi vấn — ưu tiên trên mọi trạng thái khác (đây là việc cần làm)
+    if (hasUnc) return 'nghi_van';
+    // 3) Người dùng đã xác nhận thủ công (khóa)
+    if (r.status === 'manual' || hasUserLock) return 'khoa_thu_cong';
+    // 4) AI đã áp dụng (có trường được ghi)
+    if (appliedAny) return 'da_ghi';
+    // 5) AI đã chắc chắn nhưng chưa cần ghi
+    if (hasAiLock) return 'dung';
+    // 6) Chưa kiểm lại
+    return 'chua_kiem_lai';
+  }
+  // Tự kiểm tổng: in console, trả true nếu khớp
+  function aiClassSelfCheck(views) {
+    const arr = Array.isArray(views) ? views : (R.items || []).map(computeView);
+    const groups = { chua_kiem_lai: 0, dung: 0, da_ghi: 0, nghi_van: 0, loi: 0, khoa_thu_cong: 0 };
+    arr.forEach(v => { const c = aiClass(v.it); if (c in groups) groups[c]++; else console.error('[aiClassSelfCheck] Unknown class:', c, v.it && v.it.id); });
+    const sum = Object.values(groups).reduce((a, b) => a + b, 0);
+    const ok = sum === arr.length;
+    console.log('[aiClassSelfCheck]', { total: arr.length, groups, sum, ok: ok ? 'OK ✓' : 'MISMATCH ✗' });
+    return ok;
+  }
+  // Cập nhật nhãn các <option> của #rvAvFilter kèm số đếm
+  function renderAvFilterOptions(views) {
+    const el = document.getElementById('rvAvFilter');
+    if (!el) return;
+    const cur = el.value;
+    const c = { chua_kiem_lai: 0, dung: 0, da_ghi: 0, nghi_van: 0, loi: 0, khoa_thu_cong: 0 };
+    (views || []).forEach(v => { const k = aiClass(v.it); if (k in c) c[k]++; });
+    const map = {
+      all: (views || []).length,
+      uncertain: c.nghi_van,
+      certain:   c.dung + c.da_ghi,
+      locked:    c.khoa_thu_cong,
+      none:      (views || []).length - c.nghi_van,
+      chua_kiem_lai: c.chua_kiem_lai,
+      dung:          c.dung,
+      da_ghi:        c.da_ghi,
+      nghi_van:      c.nghi_van,
+      loi:           c.loi,
+      khoa_thu_cong: c.khoa_thu_cong,
+    };
+    Array.from(el.options).forEach(o => {
+      const base = (o.textContent || '').replace(/\s*\(\d+\)\s*$/, '').trim();
+      const n = map[o.value] != null ? map[o.value] : 0;
+      o.textContent = `${base} (${n})`;
+    });
+    el.value = cur;
+  }
+  // Expose để scan-recheck.js dùng
+  window.ScanReviewAI = { aiClass, selfCheck: aiClassSelfCheck, renderAvFilterOptions };
+
   let _renderTimer = null;
   // Vẽ lại bảng chính (gộp nhiều lần gọi, tránh vẽ liên tục khi đang quét ngầm)
   function refreshMainTable() {
@@ -755,7 +826,8 @@ const ScanReview = (() => {
     for (const v of vs) {
       const it = v.it, dec = it.orphanDecision || 'later';
       it.orphan = true;
-      it.result = orphanResultText(it);
+      // #3: giữ dấu «AI kiểm lần n: xác định đúng» (nếu AI vừa chốt) trong cột Kết quả đối chiếu — gửi cùng lúc, không phải chờ đồng bộ sau
+      it.result = orphanResultText(it) + ((it.aiTag && /xác định đúng/.test(it.aiTag)) ? ' · ' + it.aiTag : '');
       if (dec === 'apply' && it.bienSo && (!it.orphanSheet || it.orphanExtraSig !== orphanSig(it))) toPush.push(it);   // chưa ghi hàng, hoặc đã ghi nhưng thiếu / đổi cột bổ sung → gửi lại (không tạo hàng trùng)
       else if (dec === 'apply' && !it.bienSo) out.notes.push(`«${it.bienSoRaw || '(chưa có biển)'}»: chưa có biển số nên KHÔNG ghi được — nhập biển số rồi bấm lại`);
       else if (dec === 'later') out.notes.push(`«${it.bienSoRaw || it.bienSo}»: đang ở «Để kiểm sau» nên CHƯA ghi — bấm nút «📷 Dữ liệu từ phiếu scan đúng → ghi phiếu lạ» để ghi`);
@@ -1432,8 +1504,25 @@ const ScanReview = (() => {
   }
   function passesFilter(v) {
     if (!passesChecker(v)) return false;
-    // Bộ lọc riêng #rvAvFilter của scan-review-av.js (chưa chắc chắn / đã kiểm thủ công), kết hợp với bộ lọc dưới
-    if (typeof window.ScanReviewAVFilter === 'function' && !window.ScanReviewAVFilter(v.it)) return false;
+    // Bộ lọc AI: CHỈ áp khi #rvAvFilter khác 'all' (khi 'all' = KHÔNG lọc gì thêm — tập kết quả = đúng bộ lọc chính)
+    const avEl = document.getElementById('rvAvFilter');
+    const avMode = avEl ? String(avEl.value || 'all') : 'all';
+    if (avMode && avMode !== 'all') {
+      const cls = aiClass(v.it);
+      switch (avMode) {
+        case 'uncertain':      if (cls !== 'nghi_van') return false; break;
+        case 'certain':        if (cls !== 'dung' && cls !== 'da_ghi') return false; break;
+        case 'locked':         if (cls !== 'khoa_thu_cong') return false; break;
+        case 'none':           if (cls === 'nghi_van') return false; break;
+        case 'chua_kiem_lai':  if (cls !== 'chua_kiem_lai') return false; break;
+        case 'dung':           if (cls !== 'dung') return false; break;
+        case 'da_ghi':         if (cls !== 'da_ghi') return false; break;
+        case 'nghi_van':       if (cls !== 'nghi_van') return false; break;
+        case 'loi':            if (cls !== 'loi') return false; break;
+        case 'khoa_thu_cong':  if (cls !== 'khoa_thu_cong') return false; break;
+        default: /* mode lạ: bỏ qua, không lọc thêm */ break;
+      }
+    }
     const cat = viewCategory(v), it = v.it;
     switch (R.filter) {
       case 'later': return hasLater(v);                                   // có trường «Để kiểm sau»
@@ -2005,6 +2094,27 @@ const ScanReview = (() => {
     }
     return out.sort((x, y) => x.score - y.score).slice(0, max);
   }
+  // #3: so khớp CHẶT cho phiếu lạ — trả về các biển ĐÃ CÓ trong DS mà biển p có thể chỉ là đọc sai:
+  //   Levenshtein <= 2, hoặc chỉ khác đúng 1 ký tự dễ nhầm (O/0, I/1, B/8, S/5, Z/2, D/0, G/6, Q/0).
+  const _CONFUSABLE = { O: '0', '0': 'O', I: '1', '1': 'I', B: '8', '8': 'B', S: '5', '5': 'S', Z: '2', '2': 'Z', D: '0', Q: '0', G: '6', '6': 'G' };
+  function findSimilarPlates(p, max = 6) {
+    p = norm(String(p || ''));
+    if (!p || p.length < 4) return [];
+    const out = [];
+    for (const [k, rows] of dsIndex()) {
+      if (k === p) continue;
+      if (Math.abs(k.length - p.length) > 2) continue;
+      let d = lev(k, p), why = '';
+      if (d <= 2) why = 'lev=' + d;
+      else if (k.length === p.length) {
+        let diff = 0, confusable = true;
+        for (let i = 0; i < k.length; i++) if (k[i] !== p[i]) { diff++; if (_CONFUSABLE[k[i]] !== p[i] && _CONFUSABLE[p[i]] !== k[i]) confusable = false; }
+        if (diff === 1 && confusable) { why = 'nhầm ký tự'; d = 1; }
+      }
+      if (why) out.push({ k, score: d, why, row: rows[0] });
+    }
+    return out.sort((x, y) => x.score - y.score).slice(0, max);
+  }
   function plateSuggestHtml(v) {
     const it = v.it; if (v.found) return '';
     if (!it.bienSo) return '<div class="rv-sugg"><span class="hint">Chưa đọc được biển số — nhập biển vào ô trên, hệ thống sẽ tự tìm xe khớp trong danh sách.</span></div>';
@@ -2051,6 +2161,11 @@ const ScanReview = (() => {
     const plate = it.bienSoRaw || '(không đọc được biển số)';
     const badges = [`<span class="rv-badge ${cat}">${CAT_LABEL[cat]}${cat === 'diff' ? ` (${v.actionable})` : ''}</span>`,
       `<span class="rv-badge ${it.review}">${it.review === 'da_kiem' ? '✔ Đã kiểm' : '○ Chưa kiểm'}</span>`];
+    // Nhãn AI — dùng CHUNG aiClass với bộ lọc + số đếm + chip trạng thái
+    { const cls = aiClass(it);
+      const label = { chua_kiem_lai: '🤖 Chưa kiểm lại', dung: '🤖 AI: đúng', da_ghi: '🤖 AI: đã ghi', nghi_van: '🤖 AI: nghi vấn', loi: '🤖 AI: lỗi', khoa_thu_cong: '🔒 Khoá thủ công' }[cls];
+      badges.push(`<span class="rv-badge rv-badge-ai rv-badge-${cls}">${label}</span>`);
+    }
     if (it.imgChecked) badges.push('<span class="rv-badge applied">🖼 Đã kiểm với ảnh</span>');
     if (userMode(it)) badges.push(`<span class="rv-badge warn" title="Dòng «người mua / sử dụng» trên phiếu → đối chiếu với cột AH–AK «Người sử dụng xe - …» ở bảng bên dưới.">👥 Người sử dụng: ${escapeHtml(partyValue(it, PARTY_FIELDS[0]) || '(chưa rõ tên)')}</span>`);
     else if (it.scanData.partyTen && !it.partyRole) badges.push(`<span class="rv-badge warn" title="Theo phiếu: người mua / sử dụng ≠ chủ xe đứng tên ĐKX. Chọn mục «Thông tin trên phiếu là của» để ghi sang cột riêng.">👥 Người mua / sử dụng: ${escapeHtml(it.scanData.partyTen)}</span>`);
@@ -2094,11 +2209,14 @@ const ScanReview = (() => {
 
   function renderStats(views) {
     const cnt = { match: 0, diff: 0, orphan: 0, da: 0, chua: 0, img: 0, later: 0, noChecker: 0 };
-    views.forEach(v => { if (hasLater(v)) cnt.later++; if (!checkerOf(v)) cnt.noChecker++; cnt[viewCategory(v)]++; if (v.it.review === 'da_kiem') cnt.da++; else cnt.chua++; if (v.it.imgChecked) cnt.img++; });
-    const slotMissingScans = new Set(views.filter(v => !slotInfo(v.it.scanId).complete).map(v => v.it.scanId)).size;   // số tờ còn thiếu xe
+    const aiCnt = { chua_kiem_lai: 0, dung: 0, da_ghi: 0, nghi_van: 0, loi: 0, khoa_thu_cong: 0 };
+    views.forEach(v => { if (hasLater(v)) cnt.later++; if (!checkerOf(v)) cnt.noChecker++; cnt[viewCategory(v)]++; if (v.it.review === 'da_kiem') cnt.da++; else cnt.chua++; if (v.it.imgChecked) cnt.img++; aiCnt[aiClass(v.it)]++; });
+    const slotMissingScans = new Set(views.filter(v => !slotInfo(v.it.scanId).complete).map(v => v.it.scanId)).size;
     const withScan = new Set(R.items.filter(i => i.bienSo && dsIndex().has(i.bienSo)).map(i => i.bienSo));
     const dsNoScan = (state.rawData || []).filter(r => !withScan.has(norm(r.bienSo))).length;
-    $('#rvStats').innerHTML = `<b>${views.length}</b> xe trên phiếu · khớp hoàn toàn <b>${cnt.match}</b> · có khác biệt <b>${cnt.diff}</b> · phiếu lạ <b class="${cnt.orphan ? 'scan-warn' : ''}">${cnt.orphan}</b> · đã kiểm <b>${cnt.da}</b> · chưa kiểm <b>${cnt.chua}</b> · 🖼 đã kiểm với ảnh <b>${cnt.img}/${views.length}</b> · 🕓 để kiểm sau <b>${cnt.later}</b> · chưa có người kiểm <b class="${cnt.noChecker ? 'scan-warn' : ''}">${cnt.noChecker}</b> · ⚠ phiếu thiếu xe <b class="${slotMissingScans ? 'scan-warn' : ''}">${slotMissingScans}</b> · DS chưa có phiếu <b>${dsNoScan}</b>`;
+    $('#rvStats').innerHTML = `<b>${views.length}</b> xe trên phiếu · khớp hoàn toàn <b>${cnt.match}</b> · có khác biệt <b>${cnt.diff}</b> · phiếu lạ <b class="${cnt.orphan ? 'scan-warn' : ''}">${cnt.orphan}</b> · đã kiểm <b>${cnt.da}</b> · chưa kiểm <b>${cnt.chua}</b> · 🖼 đã kiểm với ảnh <b>${cnt.img}/${views.length}</b> · 🕓 để kiểm sau <b>${cnt.later}</b> · chưa có người kiểm <b class="${cnt.noChecker ? 'scan-warn' : ''}">${cnt.noChecker}</b> · ⚠ phiếu thiếu xe <b class="${slotMissingScans ? 'scan-warn' : ''}">${slotMissingScans}</b> · DS chưa có phiếu <b>${dsNoScan}</b>`
+      + `<br>🤖 AI: chưa kiểm lại <b>${aiCnt.chua_kiem_lai}</b> · chắc chắn đúng <b>${aiCnt.dung}</b> · đã ghi <b>${aiCnt.da_ghi}</b> · còn nghi vấn <b class="${aiCnt.nghi_van ? 'scan-warn' : ''}">${aiCnt.nghi_van}</b> · lỗi <b class="${aiCnt.loi ? 'scan-warn' : ''}">${aiCnt.loi}</b> · khoá thủ công <b>${aiCnt.khoa_thu_cong}</b>`;
+    renderAvFilterOptions(views);
   }
 
   function renderReview() {
@@ -2154,8 +2272,17 @@ const ScanReview = (() => {
     }
     $('#rvFooterSummary').innerHTML = `Chờ áp dụng: <b>${todo.length}</b> mục · sẽ cập nhật <b>${fApply}</b> trường từ phiếu${fFix ? ` + <b>${fFix}</b> trường Sheet sửa tay` : ''} (${xeApply} xe) · để kiểm sau <b>${fLater}</b> · giữ Sheet <b>${fSkip}</b>` + (orphanPush ? ` · phiếu lạ ghi tab riêng <b>${orphanPush}</b>` : '');
     $('#rvPreview').innerHTML = lines.length ? '<ul class="rv-preview-list">' + lines.slice(0, 400).join('') + (lines.length > 400 ? `<li>… và ${lines.length - 400} dòng nữa</li>` : '') + '</ul>' : '<p class="hint">Chưa có thay đổi nào chờ ghi.</p>';
-    $('#btnRvApplyAll').disabled = R.busy || !todo.length || !state.rawData.length;
-    $('#btnRvApplyAll').textContent = `✅ Áp dụng tất cả (${todo.length} mục)`;
+    // #2: ẩn / hiện theo SHOW_APPLY_ALL. Khi false → display:none + không cập nhật text (không còn chữ «(N mục)» ở footer).
+    { const btnAll = document.getElementById('btnRvApplyAll');
+      if (btnAll) {
+        if (SHOW_APPLY_ALL) {
+          btnAll.style.display = '';
+          btnAll.disabled = R.busy || !todo.length || !state.rawData.length;
+          btnAll.textContent = `✅ Áp dụng tất cả (${todo.length} mục)`;
+        } else {
+          btnAll.style.display = 'none';
+        }
+      } }
   }
 
   /* ---- LỊCH SỬ THAO TÁC: «Quay lại bước trước» / «Tới bước sau» ----
@@ -3011,6 +3138,12 @@ const ScanReview = (() => {
     $('#rvRedo').addEventListener('click', () => stepHistory(1));
     $('#btnRvFull').addEventListener('click', () => { prefs.full = !prefs.full; savePrefs(); applyFullscreen(); });
     $('#rvFilter').addEventListener('change', (e) => { R.filter = e.target.value; R.page = 1; renderReview(); });
+    // #rvAvFilter: reset cả R.page để không lệch với danh sách đếm; handler này thay cho handler cũ trong scan-recheck.js (đã bỏ _rvBound)
+    { const avEl = document.getElementById('rvAvFilter');
+      if (avEl && !avEl._rvBoundNew) {
+        avEl._rvBoundNew = true;
+        avEl.addEventListener('change', () => { R.page = 1; renderReview(); });
+      } }
     $('#rvChecker').addEventListener('change', (e) => { R.checker = e.target.value; R.page = 1; renderReview(); });
     $('#rvSearch').addEventListener('input', (e) => { R.search = e.target.value.trim(); R.page = 1; renderReview(); });
     // Thanh công cụ: người kiểm phiếu mặc định (cột AQ) + 2 tùy chọn
@@ -3021,13 +3154,20 @@ const ScanReview = (() => {
     });
     $('#rvChkTag').addEventListener('change', (e) => { prefs.tag = e.target.checked; savePrefs(); renderReview(); });
     $('#rvChkQuick').addEventListener('change', (e) => { prefs.quick = e.target.checked; savePrefs(); });
-    $('#btnRvApplyAll').addEventListener('click', async () => {
-      const todo = pendingViews(R.items.map(computeView));
-      if (!todo.length) return;
-      if (!isWriteConnected() && !confirm('Chưa kết nối Apps Script 2 chiều: thay đổi chỉ lưu trên máy này. Vẫn áp dụng?')) return;
-      if (!confirm(`Áp dụng ${todo.length} mục theo các lựa chọn hiện tại?\nMục "Để kiểm sau" sẽ không sửa dữ liệu, chỉ ghi cảnh báo vào cột kết quả.`)) return;
-      await applyViews(todo, 'Đang áp dụng');
-    });
+    // #2: cờ SHOW_APPLY_ALL. Khi false KHÔNG gắn handler — không còn đường kích hoạt áp dụng hàng loạt do bấm nhầm.
+    if (SHOW_APPLY_ALL) {
+      $('#btnRvApplyAll').addEventListener('click', async () => {
+        const todo = pendingViews(R.items.map(computeView));
+        if (!todo.length) return;
+        if (!isWriteConnected() && !confirm('Chưa kết nối Apps Script 2 chiều: thay đổi chỉ lưu trên máy này. Vẫn áp dụng?')) return;
+        if (!confirm(`Áp dụng ${todo.length} mục theo các lựa chọn hiện tại?\nMục "Để kiểm sau" sẽ không sửa dữ liệu, chỉ ghi cảnh báo vào cột kết quả.`)) return;
+        await applyViews(todo, 'Đang áp dụng');
+      });
+    } else {
+      // Ẩn phòng khi DOM chèn trễ (modal chưa render lúc bind)
+      const _hide = () => { const b = document.getElementById('btnRvApplyAll'); if (b) b.style.display = 'none'; };
+      _hide(); setTimeout(_hide, 0); setTimeout(_hide, 500);
+    }
     $('#rvPager').addEventListener('click', (e) => {
       const b = e.target.closest('[data-act="page"]'); if (!b) return;
       R.page = parseInt(b.dataset.p, 10); renderReview(); $('#rvList').scrollIntoView({ block: 'start' });
@@ -3607,11 +3747,20 @@ const ScanReview = (() => {
 
   // Nạp lại tùy chọn từ localStorage (scan-hub.js gọi khi nhận cài đặt mới từ máy khác)
   function reloadPrefs() { try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) { /* bỏ qua */ } }
+  // #3: expose findPlateCandidates cho scan-recheck.js kiểm phiếu lạ
+  if (typeof window !== 'undefined') {
+    window.ScanReviewAI = window.ScanReviewAI || {};
+    window.ScanReviewAI.findPlateCandidates = findPlateCandidates;
+    window.ScanReviewAI.findSimilarPlates = findSimilarPlates;
+    
+  }
   return { backfillChecker, reloadPrefs, open, openForPlate, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge,
     // Mở thêm cho scan-recheck.js dùng (trước đây thiếu → scan-recheck không chạy được):
     applyFoundItem, applyViews, saveItem, normItem, goToItem, setFocus, renderReview, record, clone, markFieldsChecked,
     // Cho scan-recheck.js: hoàn tác được cả cột Sheet, gỡ dấu AI cũ, khóa trường, nạp lại danh sách mục sau khi AI ghi ngầm
-    rowSnap, stripAiTag, lockUser,
+    rowSnap, stripAiTag, lockUser, orphanSig,
+    // #3 phiếu lạ: scan-recheck.js gọi trực tiếp (trước đây thiếu → kiểm biển gần giống bị bỏ qua, ghi phiếu lạ báo lỗi)
+    findPlateCandidates, findSimilarPlates, applyOrphanItems,
     reloadItems: async () => { R.items = (await DB.dbGetAll(ST_ITEMS)).map(normItem); } };
 })();
 window.ScanReview = ScanReview;

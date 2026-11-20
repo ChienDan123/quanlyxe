@@ -45,8 +45,13 @@
     return;
   }
 
-  const THRESH_CONFIDENT = 90;                  // ngưỡng «chắc chắn» cho trường
+  const THRESH_CONFIDENT = 90;                  // ngưỡng «chắc chắn» cho trường (phiếu thường)
   const PROGRESS_KEY = 'scanRecheckProgress_v1';
+  /* #3 — Phiếu lạ (không có bên Sheet để so): quy tắc CHẶT HƠN */
+  const ORPHAN_TRUST_MIN = 92;                  // ngưỡng tin cậy các trường khác (chủ xe, CCCD, SĐT, tình trạng)
+  const ORPHAN_PLATE_MIN_READS = 2;             // phải đọc nhất quán ≥ 2 lần độc lập
+  // Kiểm dạng biển VN (đơn giản): có cả chữ + số, dài 6–10 ký tự sau khi chuẩn hoá
+  function _isVnPlate(p) { return !!p && /[A-Z]/.test(p) && /\d/.test(p) && p.length >= 6 && p.length <= 10; }
 
   /* ---------- Schema Gemini: đọc ảnh + đối chiếu từng trường ---------- */
   const AI_CMP_SCHEMA = {
@@ -117,8 +122,12 @@
       .map(f => ({ key: f.spec.key, label: f.spec.label, scanValue: String(f.scanVal == null ? '' : f.scanVal), sheetValue: String(f.dsVal == null ? '' : f.dsVal) }));
     if (!fields.length) return { fields: [], truongKhongRo: [] };
 
+    // #3: phiếu lạ không có bên Sheet để so — đổi prompt cho phù hợp
+    const isOrphanPrompt = !v.found;
     const promptText =
-      'Bạn là người đối chiếu phiếu giấy với Google Sheet. Ảnh đính kèm là phiếu thu thập / biên bản / cam kết của xe. ' +
+      (isOrphanPrompt
+        ? 'Bạn là người đối chiếu phiếu giấy với DỮ LIỆU ĐÃ ĐỌC TRƯỚC ĐÓ (phiếu lạ — chưa có trong Google Sheet). Ảnh đính kèm là phiếu thu thập / biên bản / cam kết của xe. '
+        : 'Bạn là người đối chiếu phiếu giấy với Google Sheet. Ảnh đính kèm là phiếu thu thập / biên bản / cam kết của xe. ') +
       'Với mỗi trường trong danh sách bên dưới, hãy:\n' +
       ' (1) đọc giá trị TRÊN ẢNH → imageValue (giữ nguyên dấu tiếng Việt, chữ số);\n' +
       ' (2) đọc LẠI MỘT LẦN ĐỘC LẬP → imageValue2 (phải khớp imageValue nếu bạn chắc chắn; nếu không đọc rõ → để trống và thêm key vào truongKhongRo);\n' +
@@ -127,7 +136,9 @@
       ' (5) confidence 0–100 (độ tin cậy của bạn về imageValue);\n' +
       ' (6) reason ngắn; (7) regionHint nếu ảnh có vùng cụ thể.\n' +
       'Lưu ý: điền đủ mọi key trong danh sách; không đọc được thì vẫn trả key đó với imageValue="" và thêm vào truongKhongRo. ' +
-      'Trả về JSON đúng schema.\n\nDanh sách trường:\n' + JSON.stringify(fields, null, 2);
+      'Trả về JSON đúng schema.\n\n'
+      + (isOrphanPrompt ? 'LƯU Ý PHIẾU LẠ: sheetValue luôn rỗng (chưa có trong Sheet). Hãy đọc ảnh 2 lần thật cẩn thận (imageValue + imageValue2) cho BIỂN SỐ và các trường quan trọng; nếu 2 lần đọc lệch → để imageValue2 trống và thêm key vào truongKhongRo (coi như nghi vấn).\n\n' : '')
+      + 'Danh sách trường:\n' + JSON.stringify(fields, null, 2);
 
     parts.push({ text: promptText });
 
@@ -142,40 +153,93 @@
     cmp = cmp || {};
     it.recheck = it.recheck || {}; it.recheck.uncertain = it.recheck.uncertain || {}; it.recheck.locked = it.recheck.locked || {};
     it.decisions = it.decisions || {}; it.source = it.source || {}; it.edits = it.edits || {};
-    const before = clone(it);                                   // snapshot TRƯỚC mọi thay đổi → hoàn tác được
+    const before = clone(it);
     const locked = it.recheck.locked;
     const sent = new Set(cmp._keys || []);
     const khongRo = new Set((cmp.truongKhongRo || []).map(String));
-    // Chỉ cho phép AI ghi giá trị ĐỌC TỪ ẢNH với các trường tự do an toàn; trường khác chỉ được «giữ Sheet» hoặc «lấy theo phiếu đã đọc»
     const SAFE_FREE = {
       chuXe: (s) => (s.length >= 2 && s.length <= 80 && !/\d/.test(s)) ? s : '',
       cccd: (s) => { const d = s.replace(/\D/g, ''); return (d.length === 9 || d.length === 11 || d.length === 12) ? d : ''; },
       soDienThoai: (s) => { const d = s.replace(/\D/g, ''); return (d.length >= 9 && d.length <= 11) ? d : ''; },
     };
     const certain = [], uncertain = [], returned = new Set();
+    // Phiếu lạ: quy tắc CHẶT hơn — kiểm biển trước
+    const vCheck = computeView(it);
+    const isOrphan = !vCheck.found;
+    let orphanPlateIssue = '';
+    if (isOrphan) {
+      const plateVal = String(it.bienSo || '').trim();
+      if (!plateVal) orphanPlateIssue = 'chưa có biển số';
+      else if (!_isVnPlate(plateVal)) orphanPlateIssue = 'biển không đúng dạng VN (' + plateVal + ')';
+      else {
+        // (a) đọc nhất quán ≥ ORPHAN_PLATE_MIN_READS lần độc lập (imageValue + imageValue2) và khớp biển đang lưu
+        if (!locked.bienSo) {
+          const pf = (cmp.fields || []).find(f => f && f.key === 'bienSo');
+          const k1 = pf ? _normKey(pf.imageValue).toUpperCase().replace(/[^A-Z0-9]/g, '') : '';
+          const k2 = pf ? _normKey(pf.imageValue2).toUpperCase().replace(/[^A-Z0-9]/g, '') : '';
+          const mine = plateVal.toUpperCase().replace(/[^A-Z0-9]/g, '');
+          const reads = [k1, k2].filter(Boolean);
+          if (!pf) orphanPlateIssue = 'AI không đọc lại biển số';
+          else if (reads.length < ORPHAN_PLATE_MIN_READS || k1 !== k2) orphanPlateIssue = 'biển số đọc chưa nhất quán 2 lần (' + (k1 || '?') + ' / ' + (k2 || '?') + ')';
+          else if (k1 !== mine) orphanPlateIssue = 'AI đọc biển «' + k1 + '» khác biển đang lưu «' + mine + '»';
+          else if ((Number(pf.confidence) || 0) < ORPHAN_TRUST_MIN) orphanPlateIssue = 'độ tin cậy biển số thấp (' + (Number(pf.confidence) || 0) + ')';
+        }
+        // (b) KHÔNG gần giống (Levenshtein ≤ 2 / 1 ký tự dễ nhầm) biển đã có trong DS
+        if (!orphanPlateIssue) {
+          const fn = (R && R.findSimilarPlates) || (window.ScanReviewAI && window.ScanReviewAI.findSimilarPlates)
+                  || (R && R.findPlateCandidates) || (window.ScanReviewAI && window.ScanReviewAI.findPlateCandidates);
+          const cands = typeof fn === 'function' ? fn(plateVal) : [];
+          if (cands.length) orphanPlateIssue = 'gần giống biển đã có trong DS: ' + cands.map(c => c.k).slice(0, 3).join(', ');
+        }
+      }
+    }
+    // Duyệt từng trường
     for (const f of (cmp.fields || [])) {
       if (!f || !f.key || locked[f.key] || (sent.size && !sent.has(f.key))) continue;
       returned.add(f.key);
       const iv = String(f.imageValue || '').trim();
       const twoReads = iv !== '' && _normKey(iv) === _normKey(f.imageValue2);
       const conf = Number(f.confidence) || 0;
-      let ok = twoReads && conf >= THRESH_CONFIDENT && !khongRo.has(f.key), mode = '';
+      const trust = isOrphan ? ORPHAN_TRUST_MIN : THRESH_CONFIDENT;
+      let ok = twoReads && conf >= trust && !khongRo.has(f.key), mode = '';
       if (ok) {
-        if (f.matchesSheet) mode = 'sheet';
-        else if (f.matchesScan) mode = 'scan';
-        else if (SAFE_FREE[f.key]) { const clean = SAFE_FREE[f.key](iv); if (clean) { mode = 'edit'; f._clean = clean; } }
-        if (!mode) ok = false;
+        if (isOrphan) {
+          // Phiếu lạ: chỉ chấp nhận giá trị đọc từ ảnh (không có Sheet để so)
+          if (SAFE_FREE[f.key]) { const clean = SAFE_FREE[f.key](iv); if (clean) { mode = 'edit'; f._clean = clean; } }
+          // Trường meta / trường tự do khác: giữ nguyên giá trị đã đọc (không ghi đè vì không có nguồn chuẩn)
+          else mode = 'keep';
+        } else {
+          if (f.matchesSheet) mode = 'sheet';
+          else if (f.matchesScan) mode = 'scan';
+          else if (SAFE_FREE[f.key]) { const clean = SAFE_FREE[f.key](iv); if (clean) { mode = 'edit'; f._clean = clean; } }
+          if (!mode) ok = false;
+        }
+      }
+      // Phiếu lạ: nếu biển có vấn đề (gần giống / sai dạng / trống) → coi NHƯ nghi vấn cho MỌI trường
+      if (isOrphan && orphanPlateIssue && f.key === 'bienSo') {
+        // Biển là trường đặc biệt — nếu có issue thì đưa vào uncertain
+        uncertain.push(Object.assign({}, f, { reason: orphanPlateIssue }));
+        continue;
       }
       if (ok) { f._mode = mode; certain.push(f); } else uncertain.push(f);
     }
-    // Trường đã gửi mà AI không trả về → coi là nghi vấn (không bỏ sót)
+    // Phiếu lạ + biển có vấn đề → CHẶN toàn bộ (không ghi), đẩy mọi trường sang uncertain
+    if (isOrphan && orphanPlateIssue) {
+      const seen = new Set(uncertain.map(f => f.key));
+      for (const f of (cmp.fields || [])) {
+        if (!seen.has(f.key) && !locked[f.key]) {
+          uncertain.push(Object.assign({}, f, { reason: 'biển số: ' + orphanPlateIssue }));
+          seen.add(f.key);
+        }
+      }
+    }
     sent.forEach(k => { if (!returned.has(k) && !locked[k]) uncertain.push({ key: k, imageValue: '', matchesScan: false, matchesSheet: false, confidence: 0, reason: 'AI không trả kết quả cho trường này' }); });
 
     it.recheck.lan = lan; it.recheck.lastAt = Date.now();
     if (it.recheck.status === 'error') delete it.recheck.status;
     delete it.recheck.lastError; delete it.recheck.uncertain._error;
 
-    // 1) NGHI VẤN: đánh dấu riêng từng trường, KHÔNG tự ghi
+    // 1) NGHI VẤN
     for (const f of uncertain) {
       it.recheck.uncertain[f.key] = {
         imageValue: String(f.imageValue || ''), matchesScan: !!f.matchesScan, matchesSheet: !!f.matchesSheet,
@@ -184,15 +248,16 @@
       it.decisions[f.key] = 'later';
     }
 
-    // 2) CHẮC CHẮN: đi đúng đường người dùng (source/decision + tick ảnh + applyFoundItem)
-    let wrote = 0, rowId = null, rowBefore = null, rowAfter = null;
-    if (certain.length) {
+    // 2) CHẮC CHẮN
+    let wrote = 0, rowId = null, rowBefore = null, rowAfter = null, orphanPushed = 0;
+    if (certain.length && !(isOrphan && orphanPlateIssue)) {
       const certainKeys = [];
       for (const f of certain) {
         const k = f.key; certainKeys.push(k);
         if (f._mode === 'sheet') { it.source[k] = 'sheet'; it.decisions[k] = 'skip'; }
         else if (f._mode === 'scan') { it.source[k] = 'scan'; it.decisions[k] = 'apply'; }
-        else { it.edits[k] = f._clean; it.source[k] = 'scan'; it.decisions[k] = 'apply'; }
+        else if (f._mode === 'edit') { it.edits[k] = f._clean; it.source[k] = 'scan'; it.decisions[k] = 'apply'; }
+        else if (f._mode === 'keep') { /* phiếu lạ: giữ nguyên giá trị đọc — không đổi */ }
         it.recheck.locked[k] = { by: 'ai', at: Date.now(), confidence: Number(f.confidence) || 0, lan };
         delete it.recheck.uncertain[k];
       }
@@ -204,12 +269,47 @@
       const aiTag = `AI kiểm lần ${lan}: xác định đúng (${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()})`;
       const v2 = computeView(it);
       if (v2.found && v2.row) {
+        // Đường cũ: phiếu thường → applyFoundItem
         const ks = v2.fields.map(f => f.spec.key);
         rowId = v2.row._rowId;
         rowBefore = R.rowSnap ? R.rowSnap(v2.row, ks) : null;
         const r = await applyFoundItem(v2, certainKeys, { aiTag });
         wrote = (r && r.writes) || 0;
         rowAfter = R.rowSnap ? R.rowSnap(v2.row, ks) : null;
+      } else if (isOrphan) {
+        // #3: phiếu lạ CHẮC CHẮN → đi đúng cơ chế orphan-apply hiện có (applyOrphanItems → pushOrphans → scanOrphanUpsert_)
+        it.orphanDecision = 'apply';
+        it.orphanPushed = false; it.orphanSheet = it.orphanSheet || false;
+        it.orphanExtraMsg = ''; it.pushError = '';
+        it.imgChecked = true;
+        it.aiTag = aiTag;             // applyOrphanItems đưa dấu này vào «Kết quả đối chiếu phiếu» ngay lần ghi đầu
+        const v3 = computeView(it);   // dựng lại sau khi đổi orphanDecision
+        const or = await (R.applyOrphanItems ? R.applyOrphanItems([v3]) : Promise.resolve({ failed: 1, error: 'thiếu hàm applyOrphanItems (scan-review.js chưa export)' }));
+        if (or && or.pushed) {
+          orphanPushed = or.pushed; wrote = or.pushed;
+          // thêm tag AI vào Ghi chú — dùng đúng stripAiTag hiện có để không cộng dồn
+          try {
+            it.aiTag = aiTag;
+            if (!String(it.result || '').includes(aiTag)) it.result = (R.stripAiTag ? R.stripAiTag(it.result) : String(it.result || '')) + ' · ' + aiTag;
+            await saveItem(it);
+            // Ghi tag AI + trạng thái kết quả lên dòng vừa tạo (nếu có rowId)
+            const vAfter = computeView(it);
+            if (vAfter.found && vAfter.row) {
+              const _usf = getUpdateSingleRowFields();
+              if (typeof _usf === 'function') await _usf(vAfter.row, {
+                kiemPhieu: 'Đã kiểm', ketQuaPhieu: it.result,
+              });
+            }
+          } catch (e) { console.warn('[recheck] không ghi được tag AI cho phiếu lạ:', e); }
+        } else if (or && or.failed) {
+          // Ghi lỗi → giữ ở nghi vấn
+          uncertain.push({ key: '_orphan_push', imageValue: '', matchesScan: false, matchesSheet: false,
+            confidence: 0, reason: 'Chưa ghi được phiếu lạ: ' + (or.error || '?') });
+          it.recheck.status = 'error'; it.recheck.errLan = lan;
+          it.recheck.lastError = { error: 'Chưa ghi được phiếu lạ: ' + (or.error || '?'), lan, at: Date.now() };
+          await saveItem(it);
+          try { const UI = window.AIRecheckUI; UI && UI.log && UI.log('Lỗi ghi phiếu lạ ' + (it.bienSoRaw || it.id) + ': ' + String(or.error || '?').slice(0, 100)); } catch (_) {}
+        }
       }
     } else if (!uncertain.length) {
       await saveItem(it);
@@ -226,8 +326,8 @@
     }
     if (uncertain.length) await _writeUncertainMeta(it, lan, uncertain);
 
-    try { if (typeof record === 'function') record(`AI kiểm lần ${lan} – ${it.bienSoRaw || 'xe'}`, [{ id: it.id, before, after: clone(it), rowId, rowBefore, rowAfter }]); } catch (_) {}
-    return { certain: certain.length, uncertain: uncertain.length, wrote };
+    try { if (typeof record === 'function') record(`AI kiểm lần ${lan} – ${it.bienSoRaw || 'xe'}${isOrphan ? ' (phiếu lạ)' : ''}`, [{ id: it.id, before, after: clone(it), rowId, rowBefore, rowAfter }]); } catch (_) {}
+    return { certain: certain.length, uncertain: uncertain.length, wrote, orphanPushed, orphanPlateIssue };
   }
 
   // Ghi meta "AI kiểm lần n: còn nghi vấn" lên cột Kết quả đối chiếu phiếu — KHÔNG đụng dữ liệu trường
@@ -275,6 +375,7 @@
   }
 
   /* ---- Tiến độ lưu BỀN trong IndexedDB (store kv của app.js: idbGet/idbSet) ---- */
+  const _uiDo = (fn, a, b) => { try { const U = window.AIRecheckUI; if (U && typeof U[fn] === 'function') U[fn](a, b); } catch (_) {} };
   const PROG_IDB_KEY = 'aiRecheckProgressV2';
   async function _idbGetProg() { try { return (typeof idbGet === 'function') ? ((await idbGet(PROG_IDB_KEY)) || null) : _loadProgress(); } catch (_) { return null; } }
   async function _idbSetProg(p) { try { if (typeof idbSet === 'function') await idbSet(PROG_IDB_KEY, p); else _saveProgress(p); } catch (_) {} }
@@ -307,9 +408,9 @@
     if (window._aiRecheckRunning) return;
     const prog = await _idbGetProg();
     if (!prog || !prog.lan || prog.paused) return;
-    if (prog.retryAt && Date.now() < prog.retryAt) return;
-    if (navigator.onLine === false) return;
-    if (S.isBusy && S.isBusy()) return;
+    if (prog.retryAt && Date.now() < prog.retryAt) { _uiDo('queued', 'chờ thử lại lúc ' + new Date(prog.retryAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }), prog); return; }
+    if (navigator.onLine === false) { _uiDo('queued', 'đang mất mạng — chờ có mạng', prog); return; }
+    if (S.isBusy && S.isBusy()) { _uiDo('queued', 'chờ bạn quét xong phiếu', prog); return; }
     await runRecheckQueue({ onlyUnchecked: prog.onlyUnchecked !== false });
   }
 
@@ -329,6 +430,7 @@
       return false;
     };
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const UI = window.AIRecheckUI;
     let prog = null;
     try {
       say('Nạp danh sách mục…');
@@ -346,26 +448,57 @@
         if ((Number(r.lan) || 0) >= prog.lan) return false;           // mục đã kiểm trong lượt này → không gửi lại (resume an toàn)
         if ((Number(r.errLan) || 0) >= prog.lan) return false;
         const v = computeView(x);
-        if (!v.found) return false;                                    // phiếu lạ: không có dòng Sheet để đối chiếu
         const locked = r.locked || {};
+        // #3: phiếu lạ VẪN cho chạy AI — nhưng chỉ khi chưa ghi thành công vào Sheet, và biển số đã có
+        if (!v.found) {
+          if (!x.bienSo) return false;                                // chưa có biển → chưa ghi được
+          if (x.orphanSheet && x.orphanDecision === 'apply' && x.orphanExtraSig === (R.orphanSig ? R.orphanSig(x) : x.orphanExtraSig)) return false; // đã ghi đủ → không gửi lại
+          return v.fields.some(f => !f.spec.meta && !locked[f.spec.key]);
+        }
         return v.fields.some(f => !f.spec.meta && !locked[f.spec.key]);
       };
       const ids = all.filter(need).map(x => x.id);
       prog.total = (prog.done || 0) + ids.length;
       await _idbSetProg(prog);
-      if (!ids.length) { await _idbClearProg(); say('Không còn mục nào cần kiểm.'); return; }
+      if (!ids.length) { await _idbClearProg(); say('Không còn mục nào cần kiểm.'); _uiDo('finishEmpty'); return; }
+
+      try { UI && UI.begin && UI.begin({ lan: prog.lan, total: prog.total }); } catch (_) {}
 
       let stopped = false;
       for (let i = 0; i < ids.length; i++) {
-        while (userBusy() && !window._aiRecheckAbort) { say(`Tạm dừng: người dùng đang bận (${prog.done}/${prog.total})…`); await sleep(1500); }
-        if (window._aiRecheckAbort) { stopped = true; prog.paused = true; say('Đã dừng theo yêu cầu — bấm lại nút để chạy tiếp.'); break; }
+        while (userBusy() && !window._aiRecheckAbort) {
+          say(`Tạm dừng: người dùng đang bận (${prog.done}/${prog.total})…`);
+          const _rm = document.getElementById('rvRescanModal');
+          const _why = (S.isBusy && S.isBusy()) ? 'bạn đang quét phiếu' : (_rm && !_rm.classList.contains('hidden') ? 'bạn đang đọc ảnh / quét lại' : 'bạn đang bận');
+          try { UI && UI.wait && UI.wait(_why); } catch (_) {}
+          await sleep(1500);
+        }
+        if (window._aiRecheckAbort) {
+          stopped = true; prog.paused = true;
+          say('Đã dừng theo yêu cầu — bấm lại nút để chạy tiếp.');
+          try { UI && UI.pause && UI.pause('bạn bấm tạm dừng'); } catch (_) {}
+          break;
+        }
 
         const raw = await DB.dbGet(ST_ITEMS, ids[i]); if (!raw) continue;
         const it = normItem(raw);
         if (!need(it)) continue;                                       // người dùng vừa xác nhận / khóa xong
+        if (navigator.onLine === false) {
+          stopped = true; prog.paused = true; prog.retryAt = Date.now() + 10 * 60000;
+          say('Tạm dừng: mất mạng — sẽ thử lại sau 10 phút.');
+          try { UI && UI.pause && UI.pause('mất mạng'); } catch (_) {}
+          break;
+        }
+        try { UI && UI.tick && UI.tick({
+          status: 'running',
+          currentPlate: String(it.bienSoRaw || '(không biển)'),
+          currentIndex: prog.done + 1, total: prog.total, lan: prog.lan,
+        }); } catch (_) {}
         try {
           say(`Đang kiểm ${it.bienSoRaw || '(không biển)'} (${prog.done + 1}/${prog.total}) — lần ${prog.lan}…`);
+          _uiDo('calling', String(it.bienSoRaw || ''));
           const cmp = await aiCompareItem(it, { onStatus: say, priority: 'low' });
+          _uiDo('called', String(it.bienSoRaw || ''));
           const cur = normItem((await DB.dbGet(ST_ITEMS, it.id)) || it);   // bản mới nhất (người dùng có thể đã sửa trong lúc chờ Gemini)
           const r = await aiApplyCertain(cur, cmp, prog.lan);
           prog.certain += r.certain; prog.unc += r.uncertain;
@@ -373,9 +506,19 @@
           const kind = e && e.kind;
           if (kind === 'quota' || kind === 'nokey' || kind === 'nomodel' || kind === 'cancelled') {   // lỗi hạ tầng: dừng, tự thử lại sau
             stopped = true; prog.retryAt = Date.now() + 10 * 60000;
-            say('Tạm dừng: ' + (e.message || e)); break;
+            const reason = (kind === 'quota') ? 'hết quota key'
+                         : (kind === 'nokey') ? 'chưa có API key'
+                         : (kind === 'nomodel') ? 'model quá tải / không khả dụng'
+                         : 'bị huỷ';
+            say('Tạm dừng: ' + (e.message || e));
+            try {
+              if (kind === 'nokey' || kind === 'nomodel') UI && UI.error && UI.error(String(e.message || reason).slice(0, 140));
+              else UI && UI.pause && UI.pause(reason);
+            } catch (_) {}
+            break;
           }
           console.error('[recheck] lỗi', it.id, e);
+          try { UI && UI.log && UI.log('Lỗi ' + (it.bienSoRaw || it.id) + ': ' + String((e && e.message) || e).slice(0, 120)); } catch (_) {}
           try {
             const cur = normItem((await DB.dbGet(ST_ITEMS, it.id)) || it);
             cur.recheck.status = 'error'; cur.recheck.errLan = prog.lan;
@@ -391,11 +534,20 @@
       if (!stopped) {
         await _idbClearProg();
         say(`Hoàn tất lần ${prog.lan}: ${prog.certain} trường chắc chắn đã ghi · ${prog.unc} trường nghi vấn.`);
+        try { UI && UI.finish && UI.finish({ certain: prog.certain || 0, uncertain: prog.unc || 0,
+          written: prog.certain || 0, errored: 0 }); } catch (_) {}
+      } else if (window._aiRecheckHard) {
+        await _idbClearProg(); _uiDo('stopped');
       } else await _idbSetProg(prog);
       await refreshReviewUi(true); refreshMainTable();
+    } catch (e) {
+      console.error('[recheck] lỗi hệ thống', e);
+      try { if (prog) await _idbSetProg(Object.assign(prog, { paused: true })); } catch (_) {}
+      _uiDo('error', String((e && e.message) || e).slice(0, 140));
     } finally {
       window._aiRecheckRunning = false;
       window._aiRecheckAbort = false;
+      window._aiRecheckHard = false;
     }
   }
 
@@ -408,32 +560,33 @@
   /* ---------- HÀM MỚI: ScanReviewAVFilter — bộ lọc #rvAvFilter (passesFilter đã gọi) ---------- */
   // QUAN TRỌNG: passesFilter trong scan-review.js đã gọi window.ScanReviewAVFilter.
   // scan-review-av.js (nếu đã tồn tại) có thể cũng định nghĩa hàm này → phải CHUỖI (chain), không ghi đè.
-  const _origAVFilter = (typeof window.ScanReviewAVFilter === 'function') ? window.ScanReviewAVFilter : null;
   function ScanReviewAVFilter(it) {
     if (!it) return true;
-    // 1) Bộ lọc cũ của scan-review-av.js chạy TRƯỚC
-    if (_origAVFilter) { try { if (!_origAVFilter(it)) return false; } catch (_) {} }
-    // 2) Bộ lọc AI mới — chỉ can thiệp khi #rvAvFilter ở chế độ AI (tên option ta thêm)
+    // Chỉ áp dụng khi #rvAvFilter KHÁC 'all' — 'all' = KHÔNG lọc gì thêm (đúng yêu cầu #4)
     const el = document.getElementById('rvAvFilter');
     const mode = el ? String(el.value || 'all') : 'all';
     if (!mode || mode === 'all') return true;
-    const unc = (it.recheck && it.recheck.uncertain) || {};
-    const lock = (it.recheck && it.recheck.locked) || {};
-    const hasUnc = Object.keys(unc).some(k => !k.startsWith('_'));
-    const hasLock = Object.keys(lock).length > 0;
-    // Value khớp <select id="rvAvFilter"> trong index.html: all | uncertain | certain | locked | none
-    if (mode === 'uncertain') return hasUnc;
-    if (mode === 'locked')    return Object.values(lock).some(l => l && l.by === 'user');                 // người dùng đã xác nhận
-    if (mode === 'certain')   return !hasUnc && Object.values(lock).some(l => l && l.by === 'ai');       // AI đã chắc chắn
-    if (mode === 'none')      return !hasUnc;
-    if (mode === 'manual')    return it && it.recheck && it.recheck.status === 'manual';
-    return true;
+    const cls = (window.ScanReviewAI && window.ScanReviewAI.aiClass) ? window.ScanReviewAI.aiClass(it) : 'chua_kiem_lai';
+    switch (mode) {
+      case 'uncertain':      return cls === 'nghi_van';
+      case 'certain':        return cls === 'dung' || cls === 'da_ghi';
+      case 'locked':         return cls === 'khoa_thu_cong';
+      case 'none':           return cls !== 'nghi_van';
+      case 'chua_kiem_lai':  return cls === 'chua_kiem_lai';
+      case 'dung':           return cls === 'dung';
+      case 'da_ghi':         return cls === 'da_ghi';
+      case 'nghi_van':       return cls === 'nghi_van';
+      case 'loi':            return cls === 'loi';
+      case 'khoa_thu_cong':  return cls === 'khoa_thu_cong';
+      default: return true;
+    }
   }
   window.ScanReviewAVFilter = ScanReviewAVFilter;
 
   /* ---------- HÀM MỚI: goToNextUncertain — nút «Kiểm thủ công mục nghi vấn» ---------- */
   /* ---- KIỂM THỦ CÔNG MỤC NGHI VẤN: mở đúng thẻ + ảnh, chỉ hiện trường nghi vấn, xác nhận xong → khóa → tự nhảy tiếp ---- */
   const MANUAL = { on: false, id: null, keys: new Set() };
+  const _aiClassOf = (it) => (window.ScanReviewAI && window.ScanReviewAI.aiClass) ? window.ScanReviewAI.aiClass(it) : 'nghi_van';
   const uncKeys = (it) => Object.keys((it.recheck && it.recheck.uncertain) || {}).filter(k => !k.startsWith('_'));
   (function manualCss() {
     if (document.getElementById('rvManualCss')) return;
@@ -498,7 +651,7 @@
     list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
     const pos = MANUAL.id ? list.findIndex(x => x.id === MANUAL.id) : -1;
     const ordered = list.slice(pos + 1).concat(list.slice(0, pos + 1))
-      .filter(x => uncKeys(x).length && !(x.recheck && x.recheck.status === 'manual'));
+      .filter(x => uncKeys(x).length && _aiClassOf(x) === 'nghi_van');   // cùng định nghĩa «nghi vấn» với bộ lọc / số đếm / chip
     if (!ordered.length) {
       MANUAL.on = false; MANUAL.id = null; MANUAL.keys = new Set(); applyManualView();
       toast('✅ Hoàn tất: không còn mục nghi vấn.'); return;
@@ -506,10 +659,12 @@
     const it = ordered[0], keys = uncKeys(it);
     MANUAL.on = true; MANUAL.id = it.id; MANUAL.keys = new Set(keys);
     try {
-      const fEl = document.getElementById('rvFilter'); if (fEl) fEl.value = 'all';
-      const cEl = document.getElementById('rvChecker'); if (cEl) cEl.value = '';
-      const sEl = document.getElementById('rvSearch'); if (sEl) sEl.value = '';
-      const avEl = document.getElementById('rvAvFilter'); if (avEl) avEl.value = 'all';
+      // Đặt giá trị RỒI phát sự kiện: handler trong scan-review.js mới cập nhật R.filter / R.checker / R.search / R.page
+      // (trước đây chỉ gán .value → ô chọn hiện «Tất cả» nhưng R.filter vẫn là «Cần xem xét» → thẻ nghi vấn bị ẩn)
+      const fEl = document.getElementById('rvFilter'); if (fEl && fEl.value !== 'all') { fEl.value = 'all'; fEl.dispatchEvent(new Event('change')); }
+      const cEl = document.getElementById('rvChecker'); if (cEl && cEl.value !== '') { cEl.value = ''; cEl.dispatchEvent(new Event('change')); }
+      const sEl = document.getElementById('rvSearch'); if (sEl && sEl.value !== '') { sEl.value = ''; sEl.dispatchEvent(new Event('input')); }
+      const avEl = document.getElementById('rvAvFilter'); if (avEl && avEl.value !== 'all') { avEl.value = 'all'; avEl.dispatchEvent(new Event('change')); }
     } catch (_) {}
     await refreshReviewUi(true);
     await goToItem(it.id, true);                                       // mở thẻ + khung ảnh đúng phiếu/vùng xe
@@ -524,11 +679,7 @@
 
   /* ---------- HÀM MỚI: bindRecheckUI — gắn sự kiện cho nút/bộ lọc mới ---------- */
   function bindRecheckUI() {
-    const av = document.getElementById('rvAvFilter');
-    if (av && !av._rvBound) {
-      av._rvBound = true;
-      av.addEventListener('change', () => { if (typeof renderReview === 'function') renderReview(); });
-    }
+    // #rvAvFilter đã được bindReviewUI (scan-review.js) xử lý — không gắn trùng
     const btnNext = document.getElementById('btnNextUncertain');
     if (btnNext && !btnNext._rvBound) { btnNext._rvBound = true; btnNext.addEventListener('click', goToNextUncertain); }
     // #btnRecheckAll: capture + stopImmediatePropagation → chỉ logic mới chạy. Đang chạy ngầm thì bấm = hỏi dừng.
@@ -538,15 +689,27 @@
       btnAll.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (window._aiRecheckRunning) {
-          if (window.confirm('AI đang kiểm lại ngầm. Dừng lại?\n(Tiến độ được lưu — bấm lại nút này để chạy tiếp.)')) window._aiRecheckAbort = true;
-          return;
-        }
-        recheckAllUnchecked();
+        if (window._aiRecheckRunning) { _uiDo('open'); return; }       // đang chạy → mở bảng trạng thái (Tạm dừng / Dừng hẳn nằm trong đó)
+        _idbGetProg().then(pr => { if (pr && pr.lan) return resumeRecheck(); return recheckAllUnchecked(); }).catch(() => {});
       }, true);
     }
     ensureManualObserver();
   }
+
+  /* ---------- Điều khiển cho bảng trạng thái (scan-ai-status.js) ---------- */
+  function pauseRecheck() { if (window._aiRecheckRunning) window._aiRecheckAbort = true; }
+  async function resumeRecheck() {
+    if (window._aiRecheckRunning) return;
+    const pr = await _idbGetProg();
+    if (!pr || !pr.lan) return recheckAllUnchecked();
+    pr.paused = false; pr.retryAt = 0; await _idbSetProg(pr);
+    await runRecheckQueue({ onlyUnchecked: pr.onlyUnchecked !== false });
+  }
+  async function stopRecheckHard() {
+    if (window._aiRecheckRunning) { window._aiRecheckHard = true; window._aiRecheckAbort = true; return; }
+    await _idbClearProg(); _uiDo('stopped');
+  }
+  async function getRecheckProgress() { return _idbGetProg(); }
 
   /* ---------- Auto-bind khi DOM sẵn sàng ---------- */
   if (document.readyState !== 'loading') bindRecheckUI();
@@ -559,6 +722,8 @@
     recheckOne, resumeIfPending,
     ScanReviewAVFilter, goToNextUncertain, bindRecheckUI,
     stop: () => { window._aiRecheckAbort = true; },
+    pause: pauseRecheck, resume: resumeRecheck, stopHard: stopRecheckHard, getProgress: getRecheckProgress,
+    clearProgress: () => { _idbClearProg(); },
   };
   // Mở lại web: chạy tiếp tiến độ dang dở (nếu có) sau khi hệ thống ổn định, rồi kiểm tra định kỳ
   setTimeout(() => { resumeIfPending().catch(() => {}); }, 25000);
