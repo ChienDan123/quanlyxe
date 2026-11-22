@@ -132,6 +132,8 @@ const ScanStore = (() => {
     q('#btnFreeLocal').addEventListener('click', freeNow);
     q('#btnCopyGs').addEventListener('click', copyGs);
     injectImageAndLinkExtras(free);
+    /*IDB-LEAN:P1-7*/ // móc gọi khối «Dung lượng IndexedDB» (scan-lean.js) — chỉ chèn 1 lần
+    try { if (window.ScanLean && ScanLean.injectUi) ScanLean.injectUi(); } catch (e) { /* bỏ qua */ }
   }
   // Sao chép mã Apps Script riêng vào clipboard (file nằm cùng repo GitHub Pages)
   async function copyGs() {
