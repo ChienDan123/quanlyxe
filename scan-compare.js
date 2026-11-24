@@ -104,15 +104,30 @@
      - giá trị phiếu CHƯA có trong danh sách Trạng thái xe -> note nhắc bổ sung, mặc định 'later';
      - Sheet đang ở trạng thái QUY TRÌNH (đã liên hệ / đã xác minh...) mà phiếu ghi «Còn sử dụng»: không mâu thuẫn -> coi là khớp. */
   const WORKFLOW_STATUS = ['Đã liên hệ', 'Đã xác minh', 'Chưa liên hệ được', 'Cần xác minh thêm'].map(flat);
+  // /*PV2-B*/ So khop trang thai voi quy tac chuan hoa thong nhat voi scan-review.js.
+  // - Norm: bo dau, ha chu, GIU khoang trang; chuan hoa viet tat "k0/ko/kg/khg/xo/kh0 ro" -> "khong ro".
+  // - Chap nhan lech tien to "da " (ban khong ro <-> da ban khong ro).
+  // - "khong ro nguoi su dung" != "chua sang ten" (khac nghia, KHONG coi la khop).
   function cmpStatus(scanRaw, dsRaw) {
+    /*PV2-B*/
+    const norm = (s) => {
+      if (typeof _normStatusText === 'function') return _normStatusText(s);
+      // fallback neu scan-review chua load: cung quy tac
+      let f = String(s || '');
+      try { if (f.normalize) f = f.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D'); } catch (e) {}
+      f = f.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      return f.replace(/\b(k0|kg|khg|ko|xo|kh0)\s+(ro|r0)\b/g, 'khong ro').replace(/\s+/g, ' ').trim();
+    };
+    const stripDa = (f) => (f ? (f.replace(/^da\s+/i, '').trim() || f) : f);
     const a = String(scanRaw || '').trim(), b = String(dsRaw || '').trim();
     if (!a) return { state: 'empty' };
-    if (flat(a) === flat(b)) return { state: 'same' };
+    const aN = norm(a), bN = norm(b);
+    if (aN && bN && (aN === bN || stripDa(aN) === stripDa(bN))) return { state: 'same' };
     const list = (typeof STATUS_OPTIONS !== 'undefined') ? STATUS_OPTIONS : [];
-    const known = list.some(o => flat(o) === flat(a));
+    const known = list.some(o => norm(o) === aN);
     const unk = known ? '' : ' · «' + a + '» chưa có trong danh sách Trạng thái xe — bấm ➕ để thêm';
     if (flat(a) === flat('Còn sử dụng') && WORKFLOW_STATUS.includes(flat(b))) return { state: 'same', note: 'Sheet đang ở trạng thái quy trình — giữ nguyên' };
-    if (!b) return { state: 'fill', newVal: a, defaultDecision: known ? 'apply' : 'later', note: unk.replace(/^ · /, '') };
+    if (!bN) return { state: 'fill', newVal: a, defaultDecision: known ? 'apply' : 'later', note: unk.replace(/^ · /, '') };
     return { state: 'diff', newVal: a, defaultDecision: 'later', note: 'Khác Trạng thái xe đang có' + unk };
   }
 

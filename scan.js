@@ -165,8 +165,15 @@ const ScanApp = (() => {
      dung lượng request trước khi gửi (xem analyzeSheet). */
   const MAX_IMG_BYTES = 3.5 * 1024 * 1024;     // trần dung lượng mỗi ảnh sau nén
   const MAX_REQUEST_B64 = 18 * 1024 * 1024;    // trần tổng base64 của 1 request (Gemini ~20MB)
-  const MAX_PAGES_PER_SHEET = 8;               // tối đa số mặt / 1 phiếu
-  const clampPps = (n) => { n = parseInt(n, 10); return Number.isFinite(n) ? Math.min(MAX_PAGES_PER_SHEET, Math.max(1, n)) : 2; };
+  const MAX_PAGES_PER_SHEET = 4;   /*QP:Q3-1*/ // ≤4 trang/lần gọi; nhiều hơn → chia khúc 3 trang để JSON không bị cắt
+  // 'auto' = dùng autoSegmentPages (mặc định mới). Số nguyên = chế độ thủ công (legacy), vẫn dùng như số trang/phiếu cố định.
+  const clampPps = (n) => {
+    /*PV2-A*/
+    if (n === 'auto' || n == null || n === '') return 'auto';
+    const v = parseInt(n, 10);
+    if (!Number.isFinite(v) || v < 1) return 'auto';
+    return Math.min(64, Math.max(1, v));   // không còn kẹp 8 — danh sách 1 phiếu có thể nhiều trang
+  };
   // Trần dung lượng mỗi mặt khi 1 phiếu có n mặt (để tổng request không vượt giới hạn Gemini)
   const pageBytesCap = (n) => Math.min(MAX_IMG_BYTES, Math.floor(MAX_REQUEST_B64 * 0.75 / Math.max(1, n)));
 
@@ -267,7 +274,7 @@ const ScanApp = (() => {
   const DEFAULT_MODEL = 'gemini-3.8-flash';
   const DEFAULT_FALLBACK_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
   const OLD_DEFAULT_MODEL = 'gemini-2.5-flash';   // mặc định cũ -> tự nâng lên mặc định mới (xem loadSettings)
-  const SETTINGS_VER = 4;                        // v2: thêm fallbackModels + đổi model mặc định · v3: giảm keyMinGapMs/globalStaggerMs (tăng tốc)
+  const SETTINGS_VER = 5;   /*QP:Q2-2*/
 
   const DEFAULT_SETTINGS = {
     name: 'main',
@@ -276,7 +283,7 @@ const ScanApp = (() => {
     timeoutSec: 90,
     maxWaitRounds: 4,          // số lần chờ khi MỌI (model × key) đang cooldown, rồi mới báo lỗi
     maxEdgePx: 2000,
-    pagesPerSheet: 2,          // số mặt / phiếu: mặc định 2 (mặt trước + sau); 1..8
+    pagesPerSheet: 'auto',     /*QP:Q2-1*/ // mặc định TỰ NHẬN DIỆN; số nguyên = chế độ thủ công
     skipDuplicates: true,      // bỏ qua tờ đã quét (trùng hash ảnh mặt 1)
     /* ---- CHẠY SONG SONG + GIỚI HẠN TỐC ĐỘ (sửa được trong Cài đặt hoặc trực tiếp ở đây) ---- */
     concurrency: 0,            // số tờ xử lý đồng thời: 0 = TỰ ĐỘNG (số key đang dùng được + 1, tối đa maxConcurrency); 1 = tuần tự như cũ
@@ -318,6 +325,7 @@ const ScanApp = (() => {
     if ((stored.settingsVer || 0) < SETTINGS_VER) {
       if (!stored.model || stored.model === OLD_DEFAULT_MODEL) st.model = DEFAULT_MODEL;
       if (!Array.isArray(stored.fallbackModels)) st.fallbackModels = [...DEFAULT_FALLBACK_MODELS];
+      if (stored.pagesPerSheet == null || stored.pagesPerSheet === 2) st.pagesPerSheet = 'auto';   /*QP:Q2-2*/ // v5: mặc định cũ (2) → Tự nhận diện
       // v3: giá trị nghỉ cũ (2000/500ms — mặc định cũ) -> mặc định mới nhanh hơn; giá trị người dùng tự chỉnh thì giữ nguyên
       // v4: chạy song song thật sự -> nâng mặc định (300/150ms của v3) lên 1000/400ms cho an toàn trước 429; giá trị người dùng tự chỉnh thì giữ nguyên
       if (stored.keyMinGapMs === 2000 || stored.keyMinGapMs === 300 || stored.keyMinGapMs == null) st.keyMinGapMs = DEFAULT_SETTINGS.keyMinGapMs;
@@ -552,7 +560,12 @@ const ScanApp = (() => {
     if (systemInstruction) baseBody.systemInstruction = { parts: [{ text: systemInstruction }] };
     const baseCfg = { temperature: 0 };
     if (schema) { baseCfg.responseMimeType = 'application/json'; baseCfg.responseSchema = schema; }
-    const bodyFor = (model) => { const t = thinkingCfg(model); return { ...baseBody, generationConfig: t ? { ...baseCfg, thinkingConfig: t } : baseCfg }; };
+    const bodyFor = (model) => {   /*QP:Q3-2*/
+      const t = thinkingCfg(model), cfg = { ...baseCfg };
+      if (schema && /gemini-(2\.5|[3-9])/i.test(model)) cfg.maxOutputTokens = 32768;   // tránh cắt cụt JSON danh sách dài
+      if (t) cfg.thinkingConfig = t;
+      return { ...baseBody, generationConfig: cfg };
+    };
     let waitRound = 0, yielded = false;
     for (;;) {
       if (signal && signal.aborted) throw new GeminiError('cancelled', 'Đã hủy');
@@ -648,16 +661,23 @@ const ScanApp = (() => {
   }
 
   /* ---------------------------- 6. PROMPT + JSON SCHEMA ---------------------------- */
-  const TINH_TRANG = ['dang_hoat_dong', 'da_ban_chua_sang_ten', 'mat_cap', 'het_nien_han', 'mua_chua_sang_ten', 'khac', 'khong_ro'];
-  const TINH_TRANG_LABEL = {
-    dang_hoat_dong: 'Đang hoạt động', da_ban_chua_sang_ten: 'Đã bán chưa sang tên', mat_cap: 'Mất cắp',
+  /*QUET-PHIEU:P1-1*/ const TINH_TRANG = ['dang_hoat_dong', 'da_ban_chua_sang_ten', 'ban_khong_ro_nguoi_su_dung', 'mat_cap', 'het_nien_han', 'mua_chua_sang_ten', 'khac', 'khong_ro'];
+  /*QUET-PHIEU:P1-1*/ const TINH_TRANG_LABEL = {
+    dang_hoat_dong: 'Đang hoạt động', da_ban_chua_sang_ten: 'Đã bán chưa sang tên', ban_khong_ro_nguoi_su_dung: 'Bán không rõ người sử dụng', mat_cap: 'Mất cắp',
     het_nien_han: 'Hết niên hạn', mua_chua_sang_ten: 'Mua chưa sang tên', khac: 'Khác', khong_ro: 'Không rõ',
   };
   const S = 'STRING';
   const SCAN_SCHEMA = {
+    /*PV2-A*/
     type: 'OBJECT',
     properties: {
       loaiPhieu: { type: S, enum: ['phieu_thu_thap', 'ban_cam_ket', 'khac'] },
+      docType: { type: S, enum: ['bien_ban', 'cam_ket', 'danh_sach'] },
+      startPage: { type: 'INTEGER' },
+      endPage: { type: 'INTEGER' },
+      declaredTotal: { type: 'INTEGER' },
+      lastStt: { type: 'INTEGER' },
+      missingStt: { type: 'ARRAY', items: { type: 'INTEGER' } },
       danhSachXe: {
         type: 'ARRAY',
         items: {
@@ -668,10 +688,17 @@ const ScanApp = (() => {
             tinhTrang: { type: S, enum: TINH_TRANG },
             tinhTrangGhiTrenPhieu: { type: S },
             ghiChu: { type: S },
-            tenDKX: { type: S },            // «Tên trong ĐKX» của dòng xe = CHỦ PHƯƠNG TIỆN
-            nguoiMuaSuDung: { type: S },    // dòng «Tên người mua / người sử dụng» của dòng xe
-            // Khung chữ nhật bao khối thông tin của xe trên MẶT 1, chuẩn hóa 0–1000 (gốc trên-trái) — màn So sánh dùng để bấm ảnh ↔ xe
+            tenDKX: { type: S },
+            nguoiMuaSuDung: { type: S },
             vungY0: { type: 'INTEGER' }, vungX0: { type: 'INTEGER' }, vungY1: { type: 'INTEGER' }, vungX1: { type: 'INTEGER' },
+            stt: { type: 'INTEGER' },
+            page: { type: 'INTEGER' },
+            soKhung: { type: S },
+            soMay: { type: S },
+            statusRaw: { type: S },
+            statusCode: { type: S, enum: ['con_su_dung', 'ban_khong_ro', 'ban_chua_sang_ten', 'ban_phe_lieu', 'hu_hong', 'mat', 'giai_the', 'khong_con_o_dia_phuong', 'khong_tham_gia_dao_tao', 'khac', 'khong_xac_dinh'] },
+            checkMark: { type: 'BOOLEAN' },
+            conf: { type: 'NUMBER' },
           },
           required: ['bienSo', 'tinhTrang', 'vungY0', 'vungX0', 'vungY1', 'vungX1'],
         },
@@ -683,35 +710,43 @@ const ScanApp = (() => {
       backHasContent: { type: 'BOOLEAN' },
       backNote: { type: S },
       truongKhongRo: { type: 'ARRAY', items: { type: S } },
-      huongMat1: { type: 'INTEGER' },   // độ xoay THUẬN chiều kim đồng hồ cần để MẶT 1 đứng thẳng: 0 | 90 | 180 | 270
-      huongMat2: { type: 'INTEGER' },   // như trên cho MẶT 2 (không có mặt 2 -> 0)
+      huongMat1: { type: 'INTEGER' },
+      huongMat2: { type: 'INTEGER' },
     },
     required: ['loaiPhieu', 'danhSachXe', 'chuHo', 'cccd', 'sdt', 'ghiChuTay', 'backHasContent', 'huongMat1', 'huongMat2'],
   };
 
   function buildPrompt(hasBack, extraN) {
+    /*PV2-A*/
     extraN = extraN || 0;
-    return `Bạn là công cụ OCR chuyên đọc phiếu giấy tiếng Việt về phương tiện (xe máy/ô tô) do cán bộ cơ sở thu thập. Hãy đọc ảnh và trả về DUY NHẤT một JSON đúng schema đã cho.
+    const pageCount = (hasBack ? 2 : 1) + extraN;
+    return `Bạn là công cụ OCR chuyên đọc phiếu giấy tiếng Việt về phương tiện (xe máy/ô tô) do cán bộ cơ sở thu thập. Hãy đọc TẤT CẢ ${pageCount} ảnh và trả về DUY NHẤT một JSON đúng schema.
+
+NGỮ CẢNH: ${pageCount} ảnh có thể là (i) 1 phiếu nhiều mặt (mặt 1 thông tin, mặt 2+ danh sách/chữ ký), HOẶC (ii) 1 DANH SÁCH nhiều trang cùng 1 bảng (vd 57 xe/6 trang, 78 xe/9 trang). Trang sau KHÔNG có tiêu đề bảng vẫn là HÀNG của CÙNG bảng — đọc tiếp theo STT và gộp TOÀN BỘ danh sách vào 1 mảng danhSachXe.
 
 QUY TẮC:
 1. loaiPhieu: "phieu_thu_thap" (phiếu thu thập thông tin xe), "ban_cam_ket" (bản cam kết), hoặc "khac".
-2. danhSachXe: MỖI xe trên phiếu là 1 phần tử (thường 1–3 xe). Với mỗi xe:
+2. danhSachXe: MỖI xe trên phiếu là 1 phần tử (có thể RẤT NHIỀU xe — danh sách 57, 78 xe là bình thường; đọc hết, KHÔNG bỏ sót, KHÔNG rút gọn). Với mỗi xe:
    - bienSo: chép ĐÚNG như viết trên phiếu (VD "92N2-0582"), không tự sửa/đoán. Nếu không đọc được thì để "".
    - loaiXe: nếu có (VD xe máy, ô tô), không có thì "".
-   - tinhTrang: chọn 1 giá trị: dang_hoat_dong | da_ban_chua_sang_ten | mat_cap | het_nien_han | mua_chua_sang_ten | khac | khong_ro. Căn cứ ô được tích/gạch hoặc chữ ghi tay cạnh xe đó.
+   - stt: số thứ tự STT in/viết trên phiếu cho dòng xe đó (không tự đánh số lại). page: số MẶT (1..N, đúng thứ tự ảnh gửi) chứa dòng xe đó.
+   - Trạng thái KHÔNG khớp mục nào (vd "Không tham gia đào tạo"): tinhTrang = khac, statusCode = khac, tinhTrangGhiTrenPhieu = chép NGUYÊN VĂN. Không ép sang mục gần giống sai nghĩa.
+   - Cột Ghi chú chỉ có dấu ✗ / x là dấu tick, KHÔNG phải nội dung: ghiChu rỗng.
+   - tinhTrang: ${'chọn 1 giá trị: dang_hoat_dong | da_ban_chua_sang_ten | ban_khong_ro_nguoi_su_dung | mat_cap | het_nien_han | mua_chua_sang_ten | khac | khong_ro.'} ${'Căn cứ ô được tích/gạch hoặc chữ ghi tay cạnh xe đó.'}
+   ${'PHÂN BIỆT RẤT QUAN TRỌNG: "Đã bán không rõ người sử dụng" (kể cả viết tắt: K0 rõ / khg rõ / ko rõ / xo rõ / kh0 rõ / không gì rõ) LUÔN chọn ban_khong_ro_nguoi_su_dung; "Đã bán chưa sang tên" CHỈ khi phiếu CÓ nêu tên người mua cụ thể hoặc đã giao xe cho ai đó có tên.'}
    - tinhTrangGhiTrenPhieu: chép nguyên văn dòng/ô tình trạng viết trên phiếu cho xe đó.
    - ghiChu: ghi chú riêng của xe đó (nếu có).
    - tenDKX: họ tên ghi ở ô «Tên trong ĐKX» của DÒNG XE đó (đây là CHỦ PHƯƠNG TIỆN thật sự). Dòng xe không ghi tên thì "" — TUYỆT ĐỐI không tự điền tên chủ hộ vào.
    - nguoiMuaSuDung: họ tên ghi ở dòng «Tên người mua / người sử dụng» ngay dưới của xe đó (người đang sử dụng / mua xe hiện tại). Không ghi thì "".
-3. chuHo: họ tên CHỦ PHIẾU / chủ hộ ở phần đầu phiếu (người khai). Người này có thể KHÔNG phải chủ xe — chủ xe của từng xe là tenDKX. Giữ nguyên dấu tiếng Việt.
+3. chuHo: họ tên CHỦ PHIẾU / chủ hộ ở phần đầu phiếu (người khai). Người này có thể KHÔNG phải chủ xe — chủ xe của từng xe là tenDKX. Giữ nguyên dấu tiếng Việt. Nếu chủ phiếu là TỔ CHỨC (có «Tổ chức», «Mã số thuế», «Đại diện»): chuHo = TÊN TỔ CHỨC, cccd = MÃ SỐ THUẾ; họ tên/CCCD/SĐT/chức vụ người đại diện ghi vào ghiChuTay, KHÔNG làm chủ xe.
 4. cccd: số CCCD/CMND/MST, CHỈ gồm chữ số đúng như trên phiếu. Nếu thiếu số hoặc mờ, chép phần đọc được — KHÔNG tự thêm số.
 5. sdt: số điện thoại, chỉ chữ số.
 6. ghiChuTay: toàn bộ chữ viết tay/ghi chú thêm không thuộc ô in sẵn. Không có thì "".
 7. truongKhongRo: liệt kê tên trường (VD "cccd", "bienSo xe 2") mà chữ mờ/khó đọc, để con người kiểm tra lại.
-8. TUYỆT ĐỐI không bịa dữ liệu. Chỗ không có/không đọc được -> chuỗi rỗng.
+8. TUYỆT ĐỐI không bịa dữ liệu. Chỗ không có/không đọc được -> chuỗi rỗng (vd ô GCNĐKX trống thì để trống). Biển số trùng ở nhiều STT: vẫn trả RIÊNG từng STT, không gộp, không tự chọn.
 10. HƯỚNG ẢNH: huongMat1${hasBack ? ' / huongMat2' : ''} = số độ cần xoay ảnh THEO CHIỀU KIM ĐỒNG HỒ để chữ in đứng thẳng, đọc xuôi từ trái sang phải: 0 (ảnh đã đúng chiều), 90 (đầu phiếu đang nằm bên TRÁI ảnh), 180 (ảnh bị lộn ngược), 270 (đầu phiếu đang nằm bên PHẢI ảnh). Ảnh gần như trắng/không có chữ -> 0.${hasBack ? '' : ' Đặt huongMat2 = 0.'}
-11. VÙNG XE: với mỗi xe, vungY0, vungX0, vungY1, vungX1 là khung chữ nhật bao TOÀN BỘ khối thông tin của xe đó trên MẶT 1 (dòng biển số, tình trạng, tên trong ĐKX, tên người mua / sử dụng). Tọa độ chuẩn hóa 0–1000 so với cả ảnh MẶT 1, gốc ở góc TRÊN-TRÁI (Y = chiều dọc, X = chiều ngang, Y0<Y1, X0<X1), tính theo ảnh đúng như được gửi. Các xe khác nhau phải có khung khác nhau, không chồng lên nhau.
-${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extraN > 1 ? '–MẶT ' + (2 + extraN) : ''}). Đọc thêm biển số/xe có trên các mặt phụ vào danhSachXe (vẫn không bịa). Với xe chỉ xuất hiện trên MẶT 3 trở đi: đặt vungY0 = vungX0 = vungY1 = vungX1 = 0 (vùng xe chỉ tính trên MẶT 1). Chỉ huongMat1/huongMat2 áp cho mặt 1/2. Nếu mặt 2 trở đi có chữ/chữ ký/ghi chú → backHasContent = true.\n` : ''}${hasBack
+11. VÙNG XE: với mỗi xe, vungY0, vungX0, vungY1, vungX1 là khung chữ nhật bao TOÀN BỘ khối thông tin của xe đó trên ĐÚNG MẶT chứa xe đó (ghi số mặt vào trường page) (dòng biển số, tình trạng, tên trong ĐKX, tên người mua / sử dụng). Tọa độ chuẩn hóa 0–1000 so với cả ảnh của MẶT ĐÓ, gốc ở góc TRÊN-TRÁI (Y = chiều dọc, X = chiều ngang, Y0<Y1, X0<X1), tính theo ảnh đúng như được gửi. Các xe khác nhau phải có khung khác nhau, không chồng lên nhau.
+${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extraN > 1 ? '–MẶT ' + (2 + extraN) : ''}). Đọc thêm biển số/xe có trên các mặt phụ vào danhSachXe (vẫn không bịa). Với xe ở MẶT 3 trở đi: page = số mặt đó và vungY0/X0/Y1/X1 là khung trên CHÍNH mặt đó (KHÔNG đặt 0). Chỉ huongMat1/huongMat2 áp cho mặt 1/2. Nếu mặt 2 trở đi có chữ/chữ ký/ghi chú → backHasContent = true.\n` : ''}${hasBack
   ? `9. Có ${2 + extraN} ảnh: MẶT 1 (thông tin chính) và MẶT 2. backHasContent = true nếu mặt 2 có chữ/chữ ký/dấu/ghi chú đáng kể; = false nếu trống hoặc gần như trắng. Nếu true, tóm tắt ngắn vào backNote (VD "có chữ ký người kê khai"). Thông tin xe/chủ hộ vẫn lấy chủ yếu từ mặt 1.`
   : `9. Chỉ có 1 ảnh (mặt 1). Đặt backHasContent = false.`}`;
   }
@@ -734,16 +769,90 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
   }
 
   // Parse JSON Gemini trả về (phòng khi có ```json fence dù đã yêu cầu mimeType JSON)
+  /*QP:Q3-2*/ // HÀM MỚI: vá JSON bị cắt cụt (cắt tại dấu đóng cuối cùng rồi đóng nốt ngoặc)
+  function repairTruncatedJson(s) {
+    const stack = []; let inStr = false, esc = false, cut = -1, cutStack = null;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === '{' || c === '[') stack.push(c);
+      else if (c === '}' || c === ']') { stack.pop(); cut = i; cutStack = stack.slice(); }
+    }
+    if (cut < 0) return null;
+    return s.slice(0, cut + 1) + cutStack.reverse().map(c => (c === '{' ? '}' : ']')).join('');
+  }
   function parseJsonLoose(txt) {
     const clean = String(txt).replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '').trim();
     try { return JSON.parse(clean); }
-    catch (e) { throw new GeminiError('parse', 'Không parse được JSON từ Gemini: ' + e.message, { raw: txt }); }
+    catch (e) {
+      const fixed = repairTruncatedJson(clean);
+      if (fixed) { try { const j = JSON.parse(fixed); if (j && typeof j === 'object') { j._truncated = true; return j; } } catch (e2) { /* rơi xuống lỗi gốc */ } }
+      throw new GeminiError('parse', 'Không parse được JSON từ Gemini: ' + e.message, { raw: txt });
+    }
   }
 
   // Chuyển JSON Gemini -> object `extracted` theo schema IndexedDB
+  // /*PV2-B*/ Phat hien chu goc "ban khong ro nguoi su dung/mua" (ke ca viet tat tay k0/ko/kg/khg/xo/kh0 + ro/biet).
+  // Dung cung quy tac voi scan-review.js (giu khoang trang, yeu cau chu the "nguoi su dung/nguoi mua"). Khong bat buoc co chu "ban".
+  function _looksLikeBanKhongRoTextScan(s) {
+    let t = String(s || '').toLowerCase();
+    try {
+      if (t.normalize) t = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\u0111/g, 'd').replace(/\u0110/g, 'D');
+    } catch (e) { /* giu nguyen raw neu normalize loi */ }
+    t = t.replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!t) return false;
+    if (!/\b(khong|k0|kg|khg|ko|xo|kh0)\s+(ro|r0|biet)\b/.test(t) && !/\bkhong\s+gi\s+ro\b/.test(t)) return false;
+    return /\bnguoi\s+(su\s+dung|sd|mua)\b/.test(t) || /\bng\s+(sd|mua)\b/.test(t) || /\bnsd\b/.test(t);   /*QP:Q1-3*/
+  }
   function toExtracted(j) {
+    /*QP:Q3-4*/
     const xe = Array.isArray(j.danhSachXe) ? j.danhSachXe : [];
+    const tickOnly = (s) => /^[\s✗✘×xX✓✔\-–.]*$/.test(String(s == null ? '' : s));   // dấu ✗/x ở cột Ghi chú chỉ là dấu tick
+    xe.forEach(v => {
+      if (!v) return;
+      if (v.tinhTrang === 'da_ban_chua_sang_ten' && _looksLikeBanKhongRoTextScan((v.tinhTrangGhiTrenPhieu || '') + ' ' + (v.ghiChu || ''))) v.tinhTrang = 'ban_khong_ro_nguoi_su_dung';
+      if (v.ghiChu && tickOnly(v.ghiChu)) v.ghiChu = '';
+    });
+    const TT2CODE = {
+      dang_hoat_dong: 'con_su_dung', da_ban_chua_sang_ten: 'ban_chua_sang_ten', ban_khong_ro_nguoi_su_dung: 'ban_khong_ro',
+      mat_cap: 'mat', het_nien_han: 'khac', mua_chua_sang_ten: 'ban_chua_sang_ten', khac: 'khac', khong_ro: 'khong_xac_dinh',
+    };
+    const vehiclesDoc = xe.map((v, i) => ({
+      stt: (v && Number(v.stt)) || (i + 1),
+      page: (v && Number(v.page)) || 1,
+      plate: normalizeBienSo((v && v.bienSo) || ''),
+      plateRaw: String((v && v.bienSo) || '').trim(),                 // giữ nguyên bản chép gốc để hiển thị (R5)
+      loaiXe: (v && v.loaiXe) || '',
+      soKhung: (v && v.soKhung) || '',
+      soMay: (v && v.soMay) || '',
+      tinhTrang: (v && v.tinhTrang) || '',
+      tinhTrangGhiTrenPhieu: (v && v.tinhTrangGhiTrenPhieu) || '',
+      statusRaw: (v && (v.tinhTrangGhiTrenPhieu || v.statusRaw)) || '',
+      statusCode: (v && v.statusCode) || TT2CODE[(v && v.tinhTrang) || 'khong_ro'] || 'khong_xac_dinh',
+      tenDKX: (v && v.tenDKX) || '',
+      nguoiMuaSuDung: (v && v.nguoiMuaSuDung) || '',
+      vungY0: v && v.vungY0, vungX0: v && v.vungX0, vungY1: v && v.vungY1, vungX1: v && v.vungX1,
+      note: (v && v.ghiChu) || '',
+      checkMark: !!(v && v.checkMark),
+      dupOf: null,
+      source: 'scan',
+      conf: 0.8,
+    }));
+    const maxStt = vehiclesDoc.reduce((m, v) => Math.max(m, Number(v.stt) || 0), 0);
+    const docType = j.loaiPhieu === 'ban_cam_ket' ? 'cam_ket' : 'bien_ban';
+    const doc = {
+      docType, startPage: 1, endPage: 1,
+      owner: { name: (j.chuHo || '').trim(), cccd: normalizeCccd(j.cccd), phone: normalizeCccd(j.sdt),
+        address: '', birth: '', issueDate: '', issuePlace: '', representative: '', orgName: '', mst: '' },
+      declaredTotal: Number(j.declaredTotal) || 0,
+      lastStt: Math.max(Number(j.lastStt) || 0, maxStt) || vehiclesDoc.length,   // STT lớn nhất, không phải số xe đếm được
+      complete: true,
+      missingStt: Array.isArray(j.missingStt) ? j.missingStt.slice() : [],
+      vehicles: vehiclesDoc,
+    };
     return {
+      boxPerPage: true,
       loaiPhieu: j.loaiPhieu || 'khac',
       bienSo: xe.map(v => normalizeBienSo(v.bienSo)).filter(Boolean),
       bienSoRaw: xe.map(v => v.bienSo || ''),
@@ -755,7 +864,26 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       ghiChu: [j.ghiChuTay, j.backNote].filter(Boolean).join(' | '),
       backHasContent: !!j.backHasContent,
       truongKhongRo: j.truongKhongRo || [],
+      docs: [doc],
     };
+  }
+  /*QP:Q3-4*/ // HÀM MỚI: đồng bộ xe do verifyAndFillMissing bổ sung/sửa (docs[].vehicles) sang danh sách cũ extracted.vehicles
+  function syncLegacyFromDocs(ex) {
+    const doc = ex && Array.isArray(ex.docs) && ex.docs[0]; if (!doc || !Array.isArray(ex.vehicles)) return;
+    for (let i = 0; i < doc.vehicles.length; i++) {
+      const v = doc.vehicles[i]; if (!v) continue;
+      if (i < ex.vehicles.length) {
+        const lv = ex.vehicles[i];
+        if (!lv.bienSo && (v.plateRaw || v.plate)) lv.bienSo = v.plateRaw || v.plate;
+        if (!lv.statusCode && v.statusCode) lv.statusCode = v.statusCode;
+        if (!lv.tinhTrangGhiTrenPhieu && v.statusRaw) lv.tinhTrangGhiTrenPhieu = v.statusRaw;
+        continue;
+      }
+      ex.vehicles.push({ bienSo: v.plateRaw || v.plate || '', loaiXe: v.loaiXe || '', tinhTrang: 'khong_ro', tinhTrangGhiTrenPhieu: v.statusRaw || '',
+        statusCode: v.statusCode || '', ghiChu: v.note || '', soKhung: v.soKhung || '', soMay: v.soMay || '', stt: v.stt, page: v.page, checkMark: !!v.checkMark });
+      if (v.plate) ex.bienSo.push(v.plate);
+      ex.bienSoRaw.push(v.plateRaw || v.plate || ''); ex.tinhTrang.push('khong_ro');
+    }
   }
 
   /* ---- TỰ XOAY ẢNH CHO ĐÚNG CHIỀU ----
@@ -779,19 +907,195 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
   }
   const stripRegions = (j) => { (j.danhSachXe || []).forEach(v => { delete v.vungY0; delete v.vungX0; delete v.vungY1; delete v.vungX1; }); };
 
-  async function analyzeOnce(front, back, onStatus, signal, extras) {
+  async function analyzeOnce(front, back, onStatus, signal, extras, priority) {
     extras = extras || [];
     const total = front.base64.length + (back ? back.base64.length : 0) + extras.reduce((a, p) => a + p.base64.length, 0);
     if (total > MAX_REQUEST_B64) {
       throw new GeminiError('fatal', `Dung lượng ảnh quá lớn (${(total / 1048576).toFixed(1)}MB > 18MB) dù đã nén.`);
     }
-    const r = await geminiGenerate({ parts: buildParts(front, back, extras), schema: SCAN_SCHEMA, onStatus, signal });
+    const r = await geminiGenerate({ parts: buildParts(front, back, extras), schema: SCAN_SCHEMA, onStatus, signal, priority });
     const json = parseJsonLoose(r.text);
     return { json, extracted: toExtracted(json), geminiRaw: r.text, meta: r };
   }
 
-  // Phân tích 1 tờ: trả { extracted, geminiRaw, meta, front, back, rotated:{front,back} } — front/back là ảnh ĐÃ xoay đúng chiều (dùng để lưu).
-  async function analyzeSheet({ front, back, extras, onStatus, signal }) {
+  /* ---- A3: helpers cho phân tích NHIỀU TRANG (danh sách dài / nhóm autoSegment) ---- */
+  function buildChunkPrompt(pageCount, hasCtxPage, prevLastStt) {
+    /*PV2-A*/
+    const lines = [
+      'Bạn là OCR đọc phiếu/danh sách phương tiện tiếng Việt. Đọc TẤT CẢ các trang được gửi và trả DUY NHẤT JSON theo schema.',
+      '',
+      'Số trang trong request: ' + pageCount + '.' + (hasCtxPage ? ' Trang ĐẦU TIÊN là TRANG NGỮ CẢNH (đầu phiếu, đã đọc ở khúc trước) — chỉ đọc để hiểu cột, KHÔNG đếm lại xe của trang đó vào kết quả.' : ''),
+      prevLastStt > 0 ? ('STT cuối của khúc TRƯỚC: ' + prevLastStt + '. Khúc này đọc tiếp từ STT ' + (prevLastStt + 1) + '.') : '',
+      '',
+      'QUY TẮC:',
+      '- Các trang sau không có tiêu đề bảng VẪN là hàng của CÙNG bảng. Đọc tiếp theo STT.',
+      '- Với mỗi dòng xe trả: stt, page, bienSo, loaiXe, soKhung, soMay, statusRaw (nguyên văn chữ viết tay / ô tích của DÒNG XE đó), statusCode, checkMark, ghiChu, tinhTrangGhiTrenPhieu, vungY0/X0/Y1/X1, conf.',
+      '- statusCode: con_su_dung | ban_khong_ro | ban_chua_sang_ten | ban_phe_lieu | hu_hong | mat | giai_the | khong_con_o_dia_phuong | khong_tham_gia_dao_tao | khac | khong_xac_dinh.',
+      '- QUY TẮC ƯU TIÊN: statusRaw có "không rõ người sử dụng/người mua" hoặc viết tắt (ko rõ, kg rõ, k0 rõ, khg rõ, kh0 rõ, xo rõ, không biết) → ban_khong_ro. THẮNG mọi cụm "đã bán/chưa sang tên". "Chưa sang tên" chỉ khi rõ đã bán/mua và có tên người mua cụ thể.',
+      '- Biên bản dạng ma trận: với TỪNG dòng, dấu X ở cột nào thì suy statusCode theo cột đó; không dùng dấu X của dòng khác.',
+      '- checkMark = true nếu DÒNG XE đó có dấu X ở cột Ghi chú.',
+      '- page = số trang trong request (1-based, tính cả trang ngữ cảnh nếu có).',
+      '- KHÔNG BỊA số khung/số máy; trống → "".',
+      '- lastStt = STT lớn nhất đọc được trong khúc này. declaredTotal = số xe chủ phiếu khai (nếu có, để 0 nếu không).',
+      '- Biển số trùng ở nhiều STT vẫn trả riêng từng STT.',
+      '- vungY0/X0/Y1/X1 = khung xe trên CHÍNH trang chứa xe (0–1000 so với ảnh trang đó). Trạng thái không khớp mục nào (vd Không tham gia đào tạo) → statusCode = khac, giữ nguyên văn ở statusRaw. Cột Ghi chú chỉ có dấu ✗/x → ghiChu rỗng.',
+      '- tinhTrang (bắt buộc theo schema): dang_hoat_dong | da_ban_chua_sang_ten | ban_khong_ro_nguoi_su_dung | mat_cap | het_nien_han | mua_chua_sang_ten | khac | khong_ro. "Đã bán không rõ người sử dụng" (kể cả viết tắt NSD) = ban_khong_ro_nguoi_su_dung; không khớp mục nào = khac + chép NGUYÊN VĂN vào tinhTrangGhiTrenPhieu.',
+      '- tenDKX = tên ở ô «Tên trong ĐKX» của dòng xe; nguoiMuaSuDung = «Tên người mua / người sử dụng» của dòng xe. Không ghi thì "" (không tự điền tên chủ phiếu).',
+      'Trả DUY NHẤT JSON đúng schema.'
+    ];
+    return lines.filter(Boolean).join('\n');
+  }
+
+  async function analyzeOnceChunk(pagesInChunk, page1Ctx, prevLastStt, onStatus, signal, priority) {
+    /*PV2-A*/
+    const hasCtx = !!page1Ctx;
+    const total = pagesInChunk.reduce((a, p) => a + (p.base64 ? p.base64.length : 0), 0) + (hasCtx ? page1Ctx.base64.length : 0);
+    if (total > MAX_REQUEST_B64) {
+      throw new GeminiError('fatal', 'Khúc trang quá lớn (' + (total / 1048576).toFixed(1) + 'MB > 18MB) dù đã nén.');
+    }
+    const parts = [{ text: buildChunkPrompt(pagesInChunk.length + (hasCtx ? 1 : 0), hasCtx, prevLastStt || 0) }];
+    if (hasCtx) {
+      parts.push({ text: 'TRANG 1 (ngữ cảnh):' });
+      parts.push({ inlineData: { mimeType: page1Ctx.mime, data: page1Ctx.base64 } });
+      pagesInChunk.forEach(function (p, i) {
+        parts.push({ text: 'TRANG ' + (i + 2) + ':' });
+        parts.push({ inlineData: { mimeType: p.mime, data: p.base64 } });
+      });
+    } else {
+      pagesInChunk.forEach(function (p, i) {
+        parts.push({ text: 'TRANG ' + (i + 1) + ':' });
+        parts.push({ inlineData: { mimeType: p.mime, data: p.base64 } });
+      });
+    }
+    const r = await geminiGenerate({ parts: parts, schema: SCAN_SCHEMA, onStatus: onStatus, signal: signal, priority: priority });
+    const json = parseJsonLoose(r.text);
+    return { json: json, extracted: toExtracted(json), geminiRaw: r.text, meta: r };
+  }
+
+  async function analyzeOnceWithRotation(pages, onStatus, signal, priority) {
+    /*PV2-A*/
+    const say = onStatus || function () {};
+    const front = pages[0];
+    const back = pages[1] || null;
+    const extras = pages.slice(2);
+    let res = await analyzeOnce(front, back, onStatus, signal, extras, priority);
+    const dF = normDeg(res.json.huongMat1), dB = back ? normDeg(res.json.huongMat2) : 0;
+    if (!dF && !dB) return { res: res, pages: pages, rotated: { front: 0, back: 0 } };
+
+    say('  ↻ Ảnh lệch chiều (mặt 1: ' + dF + '°, mặt 2: ' + dB + '°) → tự xoay rồi đọc lại…', 'warn');
+    let f = front, b = back;
+    try {
+      if (dF) f = await rotatePrepared(front, dF);
+      if (dB && back) b = await rotatePrepared(back, dB);
+    } catch (e) {
+      say('  Không xoay được ảnh: ' + (e.message || e), 'warn');
+      return { res: res, pages: pages, rotated: { front: 0, back: 0 } };
+    }
+    const rotatedPages = pages.slice();
+    rotatedPages[0] = f;
+    if (b) rotatedPages[1] = b;
+
+    try {
+      const res2 = await analyzeOnce(f, b, onStatus, signal, extras, priority);
+      if (normDeg(res2.json.huongMat1) || (b && normDeg(res2.json.huongMat2))) say('  ⚠ Sau khi xoay máy vẫn thấy ảnh lệch — kiểm tra lại.', 'warn');
+      return { res: res2, pages: rotatedPages, rotated: { front: dF, back: dB } };
+    } catch (e) {
+      if (['cancelled', 'quota', 'nokey', 'nomodel'].indexOf(e && e.kind) >= 0) throw e;
+      say('  Đọc lại sau khi xoay lỗi (' + (e.message || e) + ') → dùng kết quả lần 1, bỏ vùng xe.', 'warn');
+      stripRegions(res.json);
+      res.extracted = toExtracted(res.json);
+      return { res: res, pages: rotatedPages, rotated: { front: dF, back: dB } };
+    }
+  }
+
+  /* A3: analyzeSheet nhận pages[] (cả nhóm) — chia khúc khi vượt pageBytesCap/MAX_PAGES_PER_SHEET; mỗi khúc kèm trang 1 + STT cuối khúc trước. A5: verifyAndFillMissing cuối. */
+  async function analyzeSheet({ front, back, extras, pages, onStatus, signal, priority }) {
+    /*QP:Q3-5*/
+    const say = onStatus || (() => {});
+    if (!pages) {
+      pages = [];
+      if (front) pages.push(front);
+      if (back) pages.push(back);
+      if (extras) extras.forEach(function (e) { pages.push(e); });
+    }
+    if (!pages.length) throw new GeminiError('fatal', 'analyzeSheet: không có trang nào.');
+    const INFRA = ['cancelled', 'quota', 'nokey', 'nomodel'];
+    const totalB64 = pages.reduce(function (a, p) { return a + (p.base64 ? p.base64.length : 0); }, 0);
+    const tooManyPages = pages.length > MAX_PAGES_PER_SHEET;
+    const tooBigBytes = totalB64 > MAX_REQUEST_B64 * 0.85;
+    const failedChunks = [];
+    let merged;
+
+    if (!tooManyPages && !tooBigBytes) {
+      const r = await analyzeOnceWithRotation(pages, onStatus, signal, priority);
+      merged = {
+        json: r.res.json, extracted: r.res.extracted, geminiRaw: r.res.geminiRaw, meta: r.res.meta,
+        front: r.pages[0], back: r.pages[1] || null, rotated: r.rotated, pages: r.pages,
+      };
+    } else {
+      const CHUNK_PAGES = 3;
+      say('  Tổng ' + pages.length + ' trang (' + (totalB64 / 1048576).toFixed(1) + 'MB) → đọc theo khúc ' + CHUNK_PAGES + ' trang (kèm trang đầu làm ngữ cảnh).', 'warn');
+      const firstR = await analyzeOnceWithRotation(pages.slice(0, CHUNK_PAGES), onStatus, signal, priority);
+      const rotatedPages = firstR.pages.concat(pages.slice(CHUNK_PAGES));
+      const allXe = (firstR.res.json.danhSachXe || []).slice();
+      let lastStt = Number(firstR.res.json.lastStt) || 0;
+      allXe.forEach(function (v) { if (v && v.stt && Number(v.stt) > lastStt) lastStt = Number(v.stt); });
+      let mergedRaw = firstR.res.geminiRaw;
+      let truncated = !!firstR.res.json._truncated;
+
+      for (let i = CHUNK_PAGES; i < rotatedPages.length; i += CHUNK_PAGES) {
+        const slice = rotatedPages.slice(i, i + CHUNK_PAGES), no = Math.floor(i / CHUNK_PAGES) + 1;
+        say('  Khúc ' + no + ' (' + slice.length + ' trang, STT cuối khúc trước: ' + lastStt + ')…');
+        let chRes = null;
+        for (let attempt = 0; attempt < 2 && !chRes; attempt++) {
+          try { chRes = await analyzeOnceChunk(slice, rotatedPages[0], lastStt, onStatus, signal, priority); }
+          catch (e) {
+            if (INFRA.indexOf(e && e.kind) >= 0) throw e;
+            say('  Khúc ' + no + ' lỗi lần ' + (attempt + 1) + ' (' + (e.message || e) + ')' + (attempt ? ' → bỏ khúc.' : ' → đọc lại…'), 'warn');
+          }
+        }
+        if (!chRes) { failedChunks.push(no); continue; }
+        if (chRes.json._truncated) truncated = true;
+        (chRes.json.danhSachXe || []).forEach(function (v) {
+          if (!v) return;
+          const localPage = Number(v.page) || 1;
+          if (localPage <= 1) return;                       // bỏ trang ngữ cảnh
+          allXe.push(Object.assign({}, v, { page: i + localPage - 1 }));
+          if (v.stt && Number(v.stt) > lastStt) lastStt = Number(v.stt);
+        });
+        mergedRaw += '\n---CHUNK ' + no + '---\n' + chRes.geminiRaw;
+      }
+      const mergedJson = Object.assign({}, firstR.res.json, { danhSachXe: allXe, lastStt: lastStt, _truncated: truncated });
+      merged = {
+        json: mergedJson, extracted: toExtracted(mergedJson), geminiRaw: mergedRaw, meta: firstR.res.meta,
+        front: rotatedPages[0], back: rotatedPages[1] || null, rotated: firstR.rotated, pages: rotatedPages,
+      };
+    }
+
+    if (merged.extracted && Array.isArray(merged.extracted.docs)) {
+      for (let di = 0; di < merged.extracted.docs.length; di++) {
+        const doc = merged.extracted.docs[di];
+        try { await verifyAndFillMissing(doc, merged.pages || pages, { onStatus: onStatus, maxRounds: 2, priority: priority }); }
+        catch (e) {
+          if (INFRA.indexOf(e && e.kind) >= 0) throw e;
+          say('  verify lỗi doc ' + (di + 1) + ': ' + (e.message || e), 'warn');
+        }
+      }
+      const d0 = merged.extracted.docs[0];
+      if (d0 && (failedChunks.length || (merged.json && merged.json._truncated))) {   // chưa chắc đọc đủ → các xe của phiếu được cờ «cần kiểm lại»
+        d0.complete = false; d0.failedChunks = failedChunks; d0.truncated = !!(merged.json && merged.json._truncated);
+      }
+      syncLegacyFromDocs(merged.extracted);
+    }
+
+    return {
+      json: merged.json, extracted: merged.extracted, geminiRaw: merged.geminiRaw, meta: merged.meta,
+      front: merged.front, back: merged.back, rotated: merged.rotated,
+    };
+  }
+
+  // (giữ nguyên thân hàm analyzeSheet CŨ bên dưới — không cần thiết nữa, nhưng để tránh xung đột ta đã thay thế toàn bộ)
+  async function _analyzeSheetLegacy_removed({ front, back, extras, onStatus, signal }) {
     const say = onStatus || (() => {});
     let res = await analyzeOnce(front, back, onStatus, signal, extras);
     let f = front, b = back, rotated = { front: 0, back: 0 };
@@ -950,13 +1254,142 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       (_lastUsed ? `<div class="hint">Lần gọi thành công gần nhất: <b>${escapeHtml(_lastUsed.model)}</b>${_lastUsed.fallback ? ' (đã dùng model DỰ PHÒNG)' : ''} bằng "${escapeHtml(_lastUsed.keyLabel)}"</div>` : '');
   }
 
+  /* ---- A1: tự chia trang thành nhóm phiếu (1 file PDF có thể chứa nhiều phiếu hoặc 1 phiếu nhiều trang) ---- */
+  async function makeThumbForSegment(page) {
+    /*PV2-A*/
+    try {
+      let blob = null;
+      if (page && page.blob instanceof Blob) blob = page.blob;
+      else if (page && page.base64) {
+        const bstr = atob(page.base64);
+        const arr = new Uint8Array(bstr.length);
+        for (let i = 0; i < bstr.length; i++) arr[i] = bstr.charCodeAt(i);
+        blob = new Blob([arr], { type: page.mime || 'image/jpeg' });
+      }
+      if (!blob) return null;
+      const bmp = await createImageBitmap(blob);
+      const maxSide = 512;
+      const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+      const w = Math.max(1, Math.round(bmp.width * scale));
+      const h = Math.max(1, Math.round(bmp.height * scale));
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(bmp, 0, 0, w, h);
+      if (bmp.close) bmp.close();
+      const outBlob = await new Promise(function (res) { cv.toBlob(res, 'image/jpeg', 0.5); });
+      cv.width = cv.height = 0;
+      if (!outBlob) return null;
+      const buf = await outBlob.arrayBuffer();
+      const u8 = new Uint8Array(buf);
+      let bin = '';
+      const CH = 0x8000;
+      for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+      return { mime: 'image/jpeg', base64: btoa(bin) };
+    } catch (e) { return null; }
+  }
+
+  async function autoSegmentPages(pages) {
+    /*PV2-A*/
+    pages = pages || [];
+    const n = pages.length;
+    if (!n) return { groups: [] };
+    if (n === 1) return { groups: [{ startPage: 1, endPage: 1 }] };
+    const fallback = function () {
+      return { groups: Array.from({ length: n }, function (_, i) { return { startPage: i + 1, endPage: i + 1 }; }) };
+    };
+
+    let thumbs;
+    try { thumbs = await Promise.all(pages.map(function (p) { return makeThumbForSegment(p); })); }
+    catch (e) { return fallback(); }
+    if (!thumbs || thumbs.some(function (t) { return !t; })) return fallback();
+
+    const SEGMENT_PROMPT = [
+      'Bạn nhận ' + n + ' ảnh thu nhỏ (theo thứ tự trang) của một file scan — có thể là NHIỀU phiếu trong 1 PDF, hoặc 1 phiếu nhiều trang. Nhiệm vụ: chia các trang thành NHÓM, mỗi nhóm = 1 phiếu.',
+      '',
+      'QUY TẮC:',
+      '- 1 trang BẮT ĐẦU phiếu mới khi có: tiêu đề in sẵn ("BẢN CAM KẾT", "BIÊN BẢN LÀM VIỆC", "CỘNG HÒA XÃ HỘI…"), khối thông tin chủ hộ/chủ xe (họ tên, CCCD), hoặc bố cục đầu phiếu rõ ràng.',
+      '- 1 trang là TRANG NỐI TIẾP (cùng phiếu với trang trước) khi: tiếp tục bảng danh sách xe (chỉ có STT + biển số + tình trạng + dấu X, KHÔNG có tiêu đề), hoặc chỉ có phần cuối cam kết/chữ ký/ngày tháng.',
+      '- Biên bản nhiều mặt (mặt 1 thông tin, mặt 2 danh sách, mặt 3 chữ ký…): gộp vào CÙNG 1 phiếu.',
+      '- Danh sách dài (nhiều trang cùng 1 bảng): gộp vào CÙNG 1 phiếu cho tới khi có tiêu đề/khối chủ hộ MỚI.',
+      '- Trả groups: mỗi phần tử có startPage và endPage (1-based, chỉ số trang trong ảnh đã gửi), không chồng lấn, phủ HẾT các trang từ 1..' + n + '.'
+    ].join('\n');
+
+    const parts = [{ text: SEGMENT_PROMPT }];
+    thumbs.forEach(function (t, i) {
+      parts.push({ text: 'TRANG ' + (i + 1) + ':' });
+      parts.push({ inlineData: { mimeType: t.mime, data: t.base64 } });
+    });
+
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        groups: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              startPage: { type: 'INTEGER' },
+              endPage: { type: 'INTEGER' }
+            },
+            required: ['startPage', 'endPage']
+          }
+        }
+      },
+      required: ['groups']
+    };
+
+    try {
+      const r = await geminiGenerate({ parts: parts, schema: schema });   /*QP:Q2-3*/ // KHÔNG dùng priority 'low': hàm này chạy bên trong hàng đợi của người dùng → sẽ treo vô hạn
+      const j = parseJsonLoose(r.text);
+      const raw = Array.isArray(j.groups) ? j.groups : [];
+      const cleaned = [];
+      for (let gi = 0; gi < raw.length; gi++) {
+        const g = raw[gi];
+        let s = Math.round(Number(g && g.startPage) || 0);
+        let e = Math.round(Number(g && g.endPage) || 0);
+        if (s < 1) s = 1;
+        if (e > n) e = n;
+        if (s <= n && e >= s) cleaned.push({ startPage: s, endPage: e });
+      }
+      cleaned.sort(function (a, b) { return a.startPage - b.startPage; });
+      const filled = [];
+      let cur = 1;
+      for (let ci = 0; ci < cleaned.length; ci++) {
+        const g = cleaned[ci];
+        while (cur < g.startPage) { filled.push({ startPage: cur, endPage: cur }); cur++; }
+        if (g.startPage < cur) g.startPage = cur;
+        if (g.endPage < g.startPage) g.endPage = g.startPage;
+        if (g.endPage > n) g.endPage = n;
+        filled.push(g);
+        cur = g.endPage + 1;
+      }
+      while (cur <= n) { filled.push({ startPage: cur, endPage: cur }); cur++; }
+      if (!filled.length) return fallback();
+      return { groups: filled };
+    } catch (e) {
+      return fallback();
+    }
+  }
+
   async function fillScanSettingsForm() {
+    /*PV2-A*/
     ensureModelUi();
     const st = await loadSettings();
     $('#geminiModel').value = st.model;
     if ($('#geminiFallback')) $('#geminiFallback').value = st.fallbackModels.join(', ');
     $('#geminiTimeout').value = st.timeoutSec;
     $('#geminiMaxWait').value = st.maxWaitRounds;
+    // PPS auto mode (ID MỚI, không đụng ID cũ '#scanPagesPerSheet')
+    const autoEl = $('#scanPpsAuto');
+    const ppsEl = $('#scanPagesPerSheet');
+    if (autoEl && ppsEl) {
+      const isAuto = (st.pagesPerSheet == null) || (st.pagesPerSheet === 'auto') || (st.pagesPerSheet === '');
+      autoEl.checked = isAuto;
+      ppsEl.value = isAuto ? 2 : String(parseInt(st.pagesPerSheet, 10) || 2);
+      ppsEl.disabled = isAuto;
+    }
     renderKeyList();
   }
 
@@ -1001,15 +1434,30 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
 
     // Thông số: lưu ngay khi đổi
     const saveParams = async () => {
+      /*PV2-A*/
       const st = await loadSettings();
       st.model = normalizeModelList($('#geminiModel').value)[0] || DEFAULT_MODEL;
       if ($('#geminiFallback')) st.fallbackModels = normalizeModelList($('#geminiFallback').value).filter(m => m !== st.model);
       st.timeoutSec = Math.max(10, parseInt($('#geminiTimeout').value, 10) || DEFAULT_SETTINGS.timeoutSec);
       st.maxWaitRounds = Math.max(0, parseInt($('#geminiMaxWait').value, 10) || 0);
+      const autoEl = $('#scanPpsAuto'), ppsEl = $('#scanPagesPerSheet');
+      if (autoEl && ppsEl) {
+        if (autoEl.checked) st.pagesPerSheet = 'auto';
+        else st.pagesPerSheet = clampPps(parseInt(ppsEl.value, 10) || 2);
+      }
       await saveSettings(st);
-      await fillScanSettingsForm();   // hiển thị lại giá trị đã chuẩn hóa + bảng trạng thái model
+      await fillScanSettingsForm();
     };
     ['#geminiModel', '#geminiFallback', '#geminiTimeout', '#geminiMaxWait'].forEach(sel => { const el = $(sel); if (el) el.addEventListener('change', saveParams); });
+    // Auto PPS: click checkbox bật/tắt input số; đổi số cũng lưu
+    const autoEl = $('#scanPpsAuto'), ppsEl = $('#scanPagesPerSheet');
+    if (autoEl) {
+      autoEl.addEventListener('change', async () => {
+        if (ppsEl) { ppsEl.disabled = autoEl.checked; }
+        await saveParams();
+      });
+    }
+    if (ppsEl) ppsEl.addEventListener('change', saveParams);
     const btnDef = $('#btnGeminiModelDefault'), btnRst = $('#btnGeminiModelReset');
     if (btnDef) btnDef.addEventListener('click', async () => {
       const st = await loadSettings();
@@ -1056,8 +1504,8 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     if (!e || !e.dbId) return;
     try {
       const jobState = entryJobState(e);
-      await dbPut(ST_QUEUE, { id: e.dbId, kind: 'meta', seq: e.order, type: e.type, name: e.name, pps: e.pps || 0, pageFrom: e.pageFrom || 0, pageTo: e.pageTo || 0, status: e.status === 'run' ? 'wait' : e.status,
-        total: e.jobs ? e.jobs.length : (e.total || 0), jobState, createdAt: e.createdAt || Date.now() });
+      await dbPut(ST_QUEUE, { id: e.dbId, kind: 'meta', seq: e.order, type: e.type, name: e.name, pps: e.pps != null ? e.pps : 'auto', segGroups: e.segGroups || null, pageFrom: e.pageFrom || 0, pageTo: e.pageTo || 0, status: e.status === 'run' ? 'wait' : e.status,
+        total: e.jobs ? e.jobs.length : (e.total || 0), jobState, logicVer: e.logicVer || 0, createdAt: e.createdAt || Date.now() });
     } catch (x) { console.warn('[scan] không lưu được tiến độ hàng đợi', x); }
   }
   // Ghi file gốc (nặng) 1 lần khi upload. Trả true nếu thành công.
@@ -1131,46 +1579,269 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
   }
 
   /* ---- Mở rộng 1 entry thành các job (tờ) ---- */
+  /* ---- A5: kiểm tra đủ STT/trạng thái, quét bổ sung đúng STT thiếu, gộp biển số trùng ---- */
+  function buildVerifyPrompt(missStt, doc) {
+    /*PV2-A*/
+    const plates = (doc.vehicles || []).map(function (v) { return v && v.plate; }).filter(Boolean).slice(0, 30).join(', ');
+    const lines = [
+      'Bạn là công cụ OCR. Đây là TOÀN BỘ các trang của MỘT phiếu/danh sách. Hãy đọc CHÍNH XÁC các dòng có STT sau: ' + missStt.join(', ') + '.',
+      '',
+      'QUY TẮC:',
+      '- Đọc đúng dòng ứng với STT trong danh sách trên. Tìm trên TẤT CẢ các trang được gửi (trang sau không có tiêu đề bảng vẫn là hàng của cùng bảng).',
+      '- Với mỗi dòng trả: stt, plate, loaiXe, soKhung, soMay, statusRaw, statusCode, note, checkMark, page.',
+      '- statusRaw = NGUYÊN VĂN chữ viết tay/ô tích mô tả tình trạng của DÒNG XE đó. statusCode theo bộ: con_su_dung | ban_khong_ro | ban_chua_sang_ten | ban_phe_lieu | hu_hong | mat | giai_the | khong_con_o_dia_phuong | khong_tham_gia_dao_tao | khac | khong_xac_dinh.',
+      '- QUY TẮC ƯU TIÊN: có cụm "không rõ người sử dụng/người mua" hoặc viết tắt (ko rõ, kg rõ, k0 rõ, khg rõ, kh0 rõ, xo rõ, không biết) → ban_khong_ro, THẮNG mọi cụm "đã bán/chưa sang tên". "Chưa sang tên" chỉ khi rõ đã bán/mua và có tên người mua cụ thể.',
+      '- checkMark = true nếu DÒNG XE đó có dấu X ở cột Ghi chú.',
+      '- KHÔNG BỊA số khung/số máy; trống → "".',
+      '- page = số trang trong file (1-based).',
+      '- Biển số trùng ở nhiều STT vẫn trả riêng từng STT.'
+    ];
+    if (plates) lines.push('Gợi ý biển số đã biết (để đối chiếu, không bắt buộc): ' + plates + '.');
+    lines.push('Trả JSON đúng schema.');
+    return lines.join('\n');
+  }
+
+  async function verifyAndFillMissing(doc, pages, opts) {
+    /*PV2-A*/
+    opts = opts || {};
+    const maxRounds = opts.maxRounds || 2;
+    const onStatus = opts.onStatus || function () {};
+    const CHUNK = 6;
+    if (!doc) return doc;
+    pages = pages || [];
+    doc.vehicles = Array.isArray(doc.vehicles) ? doc.vehicles : [];
+
+    function collectStt() {
+      const m = new Map();
+      doc.vehicles.forEach(function (v) { if (v && (v.stt || v.stt === 0)) m.set(String(v.stt), v); });
+      return m;
+    }
+
+    let round = 0;
+    while (round < maxRounds) {
+      round++;
+      const have = collectStt();
+      const target = Math.max(0, Number(doc.lastStt) || 0, Number(doc.declaredTotal) || 0);
+      const missingByStt = [];
+      for (let i = 1; i <= target; i++) if (!have.has(String(i))) missingByStt.push(i);
+      const needsFill = [];
+      doc.vehicles.forEach(function (v) {
+        if (!v) return;
+        if (v.stt && !v.plate) needsFill.push(v.stt);
+        else if (v.stt && !v.statusCode && !v.statusRaw) needsFill.push(v.stt);
+      });
+      const missStt = Array.from(new Set(missingByStt.concat(needsFill))).sort(function (a, b) { return a - b; });
+      doc.missingStt = missStt;
+      if (!missStt.length || !pages.length) break;
+
+      onStatus('Xác minh: thiếu ' + missStt.length + ' STT [' + missStt.slice(0, 10).join(',') + (missStt.length > 10 ? '…' : '') + '] → quét bổ sung (vòng ' + round + '/' + maxRounds + ')', 'warn');
+
+      const chunks = [];
+      for (let i = 0; i < pages.length; i += CHUNK) chunks.push(pages.slice(i, i + CHUNK));
+      let added = 0, updated = 0;
+
+      const schema = {
+        type: 'OBJECT',
+        properties: {
+          vehicles: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                stt: { type: 'INTEGER' },
+                plate: { type: 'STRING' },
+                loaiXe: { type: 'STRING' },
+                soKhung: { type: 'STRING' },
+                soMay: { type: 'STRING' },
+                statusRaw: { type: 'STRING' },
+                statusCode: { type: 'STRING' },
+                note: { type: 'STRING' },
+                checkMark: { type: 'BOOLEAN' },
+                page: { type: 'INTEGER' }
+              },
+              required: ['stt']
+            }
+          }
+        },
+        required: ['vehicles']
+      };
+
+      try {
+        for (let ci = 0; ci < chunks.length; ci++) {
+          const chunk = chunks[ci];
+          const parts = [{ text: buildVerifyPrompt(missStt, doc) }];
+          chunk.forEach(function (p, i) {
+            parts.push({ text: 'TRANG ' + (ci * CHUNK + i + 1) + ':' });
+            parts.push({ inlineData: { mimeType: p.mime, data: p.base64 } });
+          });
+          const r = await geminiGenerate({ parts: parts, schema: schema, onStatus: onStatus, priority: opts.priority });   /*QP:Q2-3*/
+          const j = parseJsonLoose(r.text);
+          const found = Array.isArray(j.vehicles) ? j.vehicles : [];
+          const byStt = collectStt();
+          for (let fi = 0; fi < found.length; fi++) {
+            const nv = found[fi];
+            if (!nv || !nv.stt) continue;
+            const existing = byStt.get(String(nv.stt));
+            if (existing) {
+              if (!existing.plate && nv.plate) { existing.plate = nv.plate; updated++; }
+              if (!existing.loaiXe && nv.loaiXe) existing.loaiXe = nv.loaiXe;
+              if (!existing.soKhung && nv.soKhung) existing.soKhung = nv.soKhung;
+              if (!existing.soMay && nv.soMay) existing.soMay = nv.soMay;
+              if (!existing.statusCode && nv.statusCode) { existing.statusCode = nv.statusCode; updated++; }
+              if (!existing.statusRaw && nv.statusRaw) existing.statusRaw = nv.statusRaw;
+              if (!existing.note && nv.note) existing.note = nv.note;
+              if (nv.checkMark && !existing.checkMark) existing.checkMark = true;
+            } else {
+              doc.vehicles.push({
+                stt: nv.stt,
+                page: nv.page || 1,
+                plate: nv.plate || '',
+                loaiXe: nv.loaiXe || '',
+                soKhung: nv.soKhung || '',
+                soMay: nv.soMay || '',
+                statusRaw: nv.statusRaw || '',
+                statusCode: nv.statusCode || 'khong_xac_dinh',
+                note: nv.note || '',
+                checkMark: !!nv.checkMark,
+                dupOf: null,
+                source: 'scan',
+                conf: 0.7
+              });
+              added++;
+            }
+          }
+        }
+        if (added || updated) onStatus('  ✓ Bổ sung ' + added + ' STT mới, cập nhật ' + updated + ' trường thiếu.');
+        else onStatus('  ⚠ Không tìm thấy thêm thông tin cho các STT thiếu.', 'warn');
+      } catch (e) {
+        onStatus('  Lỗi quét bổ sung: ' + (e.message || e), 'warn');
+        break;
+      }
+    }
+
+    // Gộp biển số trùng trong cùng phiếu: đánh dấu dupOf (không xóa hàng)
+    const byPlate = new Map();
+    doc.vehicles.forEach(function (v) {
+      if (!v || !v.plate) return;
+      const k = normalizeBienSo(v.plate);
+      if (!k) return;
+      if (!byPlate.has(k)) byPlate.set(k, []);
+      byPlate.get(k).push(v);
+    });
+    byPlate.forEach(function (list) {
+      if (list.length <= 1) return;
+      const first = list[0];
+      for (let i = 1; i < list.length; i++) if (!list[i].dupOf) list[i].dupOf = first.stt;
+    });
+
+    const have = collectStt();
+    const target = Math.max(0, Number(doc.lastStt) || 0, Number(doc.declaredTotal) || 0);
+    doc.missingStt = target > 0 ? Array.from({ length: target }, function (_, i) { return i + 1; }).filter(function (i) { return !have.has(String(i)); }) : [];
+    doc.complete = doc.missingStt.length === 0;
+    return doc;
+  }
+
   async function expandEntry(entry) {
+    /*PV2-A*/
     const st = await loadSettings();
-    // Entry khôi phục từ lần trước: BẮT BUỘC dùng đúng cách chia tờ đã lưu (nếu đổi 1↔2 trang/tờ thì chỉ số tờ lệch, bỏ nhầm tờ)
-    const pps = clampPps(entry.pps || st.pagesPerSheet);
+    const pps = clampPps(entry.pps != null ? entry.pps : st.pagesPerSheet);
     entry.pps = pps;
     entry.jobs = [];
-    const mk = (label, pagesDesc, render) => {
-      const job = { id: ++Q.jobNo, entry, label, pagesDesc, render, status: 'wait', error: '', extracted: null, json: null, match: null, scanId: null };
+    const mk = (label, pagesDesc, render, pageCount) => {
+      const job = { id: ++Q.jobNo, entry, label, pagesDesc, render, pageCount: pageCount || 2, status: 'wait', error: '', extracted: null, json: null, match: null, scanId: null };
       entry.jobs.push(job);
       return job;
     };
+
     if (entry.type === 'pdf') {
-      dbgLog(`Đang mở PDF "${entry.name}" (${(entry.files[0].size / 1048576).toFixed(1)}MB)…`);
-      // Dùng promise nhớ lại: nhiều tờ chạy song song cùng gọi getDoc() vẫn chỉ MỞ PDF 1 lần (không tốn gấp đôi RAM)
+      dbgLog('Đang mở PDF "' + entry.name + '" (' + (entry.files[0].size / 1048576).toFixed(1) + 'MB)…');
       entry.getDoc = () => entry.doc ? Promise.resolve(entry.doc)
         : (entry.docP || (entry.docP = openPdf(entry.files[0]).then(d => (entry.doc = d), e => { entry.docP = null; throw e; })));
       const doc = await entry.getDoc();
       const n = doc.numPages;
       const from = Math.max(1, parseInt(entry.pageFrom, 10) || 1);
-      if (from > n) throw new Error(`PDF "${entry.name}" chỉ có ${n} trang, không thể quét từ trang ${from}.`);
+      if (from > n) throw new Error('PDF "' + entry.name + '" chỉ có ' + n + ' trang, không thể quét từ trang ' + from + '.');
       const to = Math.min(n, Math.max(from, parseInt(entry.pageTo, 10) || n));
-      for (let i = from; i <= to; i += pps) {
-        const nums = [];
-        for (let k = i; k < i + pps && k <= to; k++) nums.push(k);
-        const label = nums.length > 1 ? 'tr.' + nums[0] + '-' + nums[nums.length - 1] : 'tr.' + nums[0];
-        mk(entry.name, label, async (maxEdge, maxBytes) => {
-          const d = await entry.getDoc();
-          const out = [];
-          return Promise.all(nums.map(no => renderPdfPage(d, no, maxEdge, entry.name, maxBytes))); // các mặt của 1 tờ render ĐỒNG THỜI (pdf.js worker + canvas riêng); thứ tự kết quả giữ nguyên
-        });
+
+      let groups = null;
+      if (pps === 'auto') {
+        if (entry.segGroups && entry.segGroups.from === from && entry.segGroups.to === to && Array.isArray(entry.segGroups.g) && entry.segGroups.g.length) {
+          groups = entry.segGroups.g; dbgLog('Dùng lại cách chia nhóm đã lưu (' + groups.length + ' phiếu).');
+        } else try {
+          const lowPages = await Promise.all(
+            Array.from({ length: to - from + 1 }, (_, i) => renderPdfPage(doc, from + i, 800, entry.name, MAX_IMG_BYTES))
+          );
+          const seg = await autoSegmentPages(lowPages);
+          groups = seg && seg.groups && seg.groups.length ? seg.groups : null;
+          if (groups) entry.segGroups = { from: from, to: to, g: groups };
+        } catch (e) {
+          dbgLog('autoSegment lỗi: ' + (e.message || e), 'warn');
+        }
       }
-      dbgLog(`PDF "${entry.name}": quét trang ${from}–${to} (tổng ${n}) → ${entry.jobs.length} tờ (${pps} mặt/tờ).`, 'ok');
+
+      if (groups && groups.length) {
+        for (let gi = 0; gi < groups.length; gi++) {
+          const g = groups[gi];
+          const nums = [];
+          for (let k = from + g.startPage - 1; k <= from + g.endPage - 1 && k <= to; k++) nums.push(k);
+          if (!nums.length) continue;
+          const label = nums.length > 1 ? 'tr.' + nums[0] + '-' + nums[nums.length - 1] : 'tr.' + nums[0];
+          const pcount = nums.length;
+          mk(entry.name, label, async (maxEdge, maxBytes) => {
+            const d = await entry.getDoc();
+            return Promise.all(nums.map(no => renderPdfPage(d, no, maxEdge, entry.name, maxBytes)));
+          }, pcount);
+        }
+        dbgLog('PDF "' + entry.name + '": auto chia ' + entry.jobs.length + ' phiếu (tổng ' + (to - from + 1) + ' trang).', 'ok');
+      } else {
+        const ppsNum = pps === 'auto' ? 2 : pps;
+        dbgLog('PDF "' + entry.name + '": auto lỗi/không khả dụng → chế độ cố định ' + ppsNum + ' trang/tờ.');
+        for (let i = from; i <= to; i += ppsNum) {
+          const nums = [];
+          for (let k = i; k < i + ppsNum && k <= to; k++) nums.push(k);
+          const label = nums.length > 1 ? 'tr.' + nums[0] + '-' + nums[nums.length - 1] : 'tr.' + nums[0];
+          const pcount = nums.length;
+          mk(entry.name, label, async (maxEdge, maxBytes) => {
+            const d = await entry.getDoc();
+            return Promise.all(nums.map(no => renderPdfPage(d, no, maxEdge, entry.name, maxBytes)));
+          }, pcount);
+        }
+        dbgLog('PDF "' + entry.name + '": quét trang ' + from + '–' + to + ' (tổng ' + n + ') → ' + entry.jobs.length + ' tờ (' + ppsNum + ' trang/tờ).', 'ok');
+      }
     } else {
       const files = entry.files;
-      for (let i = 0; i < files.length; i += pps) {
-        const grp = files.slice(i, i + pps);
-        mk(grp.map(f => f.name).join(' + '), grp.length > 1 ? 'ảnh ' + (i + 1) + '-' + (i + grp.length) : 'ảnh ' + (i + 1),
-          (maxEdge, maxBytes) => Promise.all(grp.map(f => prepareImageFile(f, maxEdge, maxBytes))));
+      let groups = null;
+      if (pps === 'auto') {
+        dbgLog('Chế độ TỰ ĐỘNG: đang render thử ' + files.length + ' ảnh để chia nhóm…');
+        try {
+          const lowPages = await Promise.all(files.map(f => prepareImageFile(f, 800, MAX_IMG_BYTES)));
+          const seg = await autoSegmentPages(lowPages);
+          groups = seg && seg.groups && seg.groups.length ? seg.groups : null;
+        } catch (e) {
+          dbgLog('autoSegment lỗi: ' + (e.message || e), 'warn');
+        }
       }
-      dbgLog(`${files.length} ảnh → ${entry.jobs.length} tờ (${pps} mặt/tờ).`, 'ok');
+
+      if (groups && groups.length) {
+        for (let gi = 0; gi < groups.length; gi++) {
+          const g = groups[gi];
+          const grp = files.slice(g.startPage - 1, g.endPage);
+          if (!grp.length) continue;
+          const pcount = grp.length;
+          mk(grp.map(f => f.name).join(' + '), pcount > 1 ? 'ảnh ' + g.startPage + '-' + g.endPage : 'ảnh ' + g.startPage,
+            (maxEdge, maxBytes) => Promise.all(grp.map(f => prepareImageFile(f, maxEdge, maxBytes))), pcount);
+        }
+        dbgLog(files.length + ' ảnh → auto chia ' + entry.jobs.length + ' phiếu.', 'ok');
+      } else {
+        const ppsNum = pps === 'auto' ? 2 : pps;
+        for (let i = 0; i < files.length; i += ppsNum) {
+          const grp = files.slice(i, i + ppsNum);
+          const pcount = grp.length;
+          mk(grp.map(f => f.name).join(' + '), grp.length > 1 ? 'ảnh ' + (i + 1) + '-' + (i + grp.length) : 'ảnh ' + (i + 1),
+            (maxEdge, maxBytes) => Promise.all(grp.map(f => prepareImageFile(f, maxEdge, maxBytes))), pcount);
+        }
+        dbgLog(files.length + ' ảnh → ' + entry.jobs.length + ' tờ (' + ppsNum + ' ảnh/tờ).', 'ok');
+      }
     }
     await applySavedState(entry);
     entry.jobs.forEach(j => renderJobRow(j));
@@ -1209,7 +1880,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
      Nay chỉ trước 1 tờ (RAM không phình), Gemini vẫn gọi tuần tự từng tờ. Lỗi render giữ trong promise, nổi lên đúng tờ đó khi tới lượt. */
   function prefetchRender(job) {
     if (!job || job.status !== 'wait' || job._pre) return;
-    job._pre = (async () => { const st = await loadSettings(); return withRenderSlot(() => job.render(st.maxEdgePx, pageBytesCap(job.entry.pps || 2)), st.renderConcurrency); })();
+    job._pre = (async () => { const st = await loadSettings(); return withRenderSlot(() => job.render(st.maxEdgePx, pageBytesCap(job.pageCount || 2)), st.renderConcurrency); })();
     job._pre.catch(() => {});   // tránh unhandledrejection; lỗi thật được await lại trong processJob
   }
   const nextWaitJob = (job) => { const js = job.entry.jobs || [], i = js.indexOf(job); return js.slice(i + 1).find(j => j.status === 'wait') || null; };
@@ -1229,21 +1900,39 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       dbgLog(`Tờ ${pos}/${known} — ${job.label} (${job.pagesDesc}): chuẩn bị ảnh…`);
       // Render/nén ảnh của tờ này diễn ra trong lúc các tờ khác đang chờ Gemini trả lời (đường ống) — nhưng chỉ tối đa renderConcurrency tờ cùng lúc
       const pre = job._pre; job._pre = null;   // dùng bản đã render trước (nếu có)
-      const pages = await (pre || withRenderSlot(() => job.render(st.maxEdgePx, pageBytesCap(job.entry.pps || 2)), st.renderConcurrency));
-      if (!Q.paused && (Q.conc || 1) <= 1) prefetchRender(nextWaitJob(job));   // chạy song song thì các worker đã tự gối đầu — không prefetch thêm để RAM không phình   // ảnh tờ này đã sẵn -> bắt đầu chuẩn bị tờ kế trong lúc đợi Gemini
+      /*PV2-A*/
+      const pageCount = job.pageCount || (Array.isArray(job.render.pages) ? job.render.pages : 2);
+      const pages = await (pre || withRenderSlot(() => job.render(st.maxEdgePx, pageBytesCap(pageCount)), st.renderConcurrency));
+      if (!Q.paused && (Q.conc || 1) <= 1) prefetchRender(nextWaitJob(job));
       const front = pages[0], back = pages[1] || null, extras = pages.slice(2);
       dbgLog(`  mặt 1: ${Math.round(front.blob.size / 1024)}KB` + (back ? `, mặt 2: ${Math.round(back.blob.size / 1024)}KB` : ' (không có mặt 2)') + (extras.length ? `, +${extras.length} mặt phụ` : ''));
       const hash = await sha256Hex(front.blob);
+      let mergeInto = null;   /*QP:Q2-4*/
       if (st.skipDuplicates && hash) {
         releaseHash = await acquireHash(hash);   // chờ nếu 1 tờ cùng hash đang được quét — xong rồi mới kiểm tra trùng
         const ex = await findDoneByHash(hash);
         if (ex) {
-          job.status = 'dup'; job.scanId = ex.id; job.extracted = ex.extracted; job.match = ex.match || null;
-          dbgLog(`  tờ trùng với bản đã quét → bỏ qua.`, 'warn');
-          // Tờ trùng: phát lại sự kiện để tạo mục so sánh nếu chưa có (createItemsForScan không ghi đè mục cũ)
-          if (ex.extracted) emit('sheetDone', { scanId: ex.id, extracted: ex.extracted, label: `${job.entry.name} · ${job.pagesDesc}` });
-          return;
+          const exN = (ex.frontBlob ? 1 : 0) + (ex.backBlob ? 1 : 0) + (ex.extraBlobs || []).filter(x => x && x.blob).length;
+          if (exN < pages.length) {   // phiếu cũ chỉ lưu ít mặt hơn lần này → KHÔNG coi là trùng: quét lại đủ mặt rồi ghép vào CHÍNH phiếu cũ
+            mergeInto = ex;
+            dbgLog(`  phiếu cũ chỉ có ${exN} mặt, lần này ${pages.length} mặt → quét đủ rồi ghép vào phiếu cũ (giữ dữ liệu đã chỉnh).`, 'warn');
+          } else {
+            job.status = 'dup'; job.scanId = ex.id; job.extracted = ex.extracted; job.match = ex.match || null;
+            dbgLog(`  tờ trùng với bản đã quét → bỏ qua.`, 'warn');
+            if (ex.extracted) emit('sheetDone', { scanId: ex.id, extracted: ex.extracted, label: `${job.entry.name} · ${job.pagesDesc}` });
+            return;
+          }
         }
+      }
+      if (mergeInto) {
+        const resM = await analyzeSheet({ front, back, extras, pages, onStatus: dbgLog, signal: ctrl.signal });
+        if (!window.ScanReview || !ScanReview.rescanMerge) throw new Error('Thiếu ScanReview.rescanMerge');
+        const outM = await ScanReview.rescanMerge(mergeInto.id, resM, {
+          extraBlobs: pages.slice(2).map(p => ({ blob: p.blob, mime: p.mime })),
+          backBlob: back ? back.blob : null, backMime: back ? back.mime : '', pagesDesc: job.pagesDesc, pageCount: pages.length });
+        job.scanId = mergeInto.id; job.extracted = resM.extracted; job.json = resM.json; job.match = matchPlates(resM.extracted.bienSo, dsIdx); job.status = 'done';
+        dbgLog(`  ✔ Đã ghép vào phiếu cũ: ${outM.vehicles} xe · +${outM.added} xe mới · ${outM.changed} ô đổi · ${outM.proposals} đề xuất chờ xem.`, 'ok');
+        return;
       }
       rec = {
         id: uid(), timestamp: Date.now(), source: 'batch', isTest: false,
@@ -1251,12 +1940,13 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         frontBlob: front.blob, frontMime: front.mime, backBlob: back ? back.blob : null, backMime: back ? back.mime : null,
         extraBlobs: extras.map(p => ({ blob: p.blob, mime: p.mime })),
         frontHash: hash, backBlank: false, status: 'analyzing', matchedBienSo: [],
+        pages: pages.length, layout: { auto: (job.entry.pps === 'auto'), pages: pages.length, pagesDesc: job.pagesDesc },   /*QP:Q2-5*/
       };
       job.scanId = rec.id;
       if (job.prevScanId && job.prevScanId !== rec.id) { try { const o = await dbGet(ST_SCANS, job.prevScanId); if (o && o.status !== 'done') await dbDelete(ST_SCANS, o.id); } catch (x) { /* bỏ qua */ } job.prevScanId = null; }   // bản dở / lỗi của lần trước: bỏ, tránh rác + bản ghi đôi
       await dbPut(ST_SCANS, rec);
       await saveEntryMeta(job.entry);   // ghi scanId của tờ đang quét: nếu sập sau khi quét xong, lần sau nhận ra tờ này đã xong
-      const res = await analyzeSheet({ front, back, extras, onStatus: dbgLog, signal: ctrl.signal });
+      const res = await analyzeSheet({ front, back, extras, pages, onStatus: dbgLog, signal: ctrl.signal });
       const match = matchPlates(res.extracted.bienSo, dsIdx);
       if (res.rotated && (res.rotated.front || res.rotated.back)) {   // lưu ảnh ĐÃ xoay đúng chiều (hash giữ nguyên của bản gốc để chống quét trùng)
         rec.frontBlob = res.front.blob; rec.frontMime = res.front.mime;
@@ -1268,8 +1958,10 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         geminiRaw: res.geminiRaw, model: res.meta.model, keyLabel: res.meta.keyLabel,
         extracted: res.extracted, backBlank: back ? !res.extracted.backHasContent : false,
         matchedBienSo: match ? match.filter(m => m.found).map(m => m.bienSo) : [], match,
+        logicVer: 2,
       });
       await dbPut(ST_SCANS, rec);
+      job.entry.logicVer = 2;
       job.extracted = res.extracted; job.json = res.json; job.match = match; job.status = 'done';
       // Báo cho màn so sánh tạo mục cho từng xe trên phiếu (không chặn hàng đợi quét)
       emit('sheetDone', { scanId: rec.id, extracted: res.extracted, label: `${job.entry.name} · ${job.pagesDesc}` });
@@ -1389,8 +2081,14 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     const pdfs = files.filter(isPdfFile);
     const imgs = files.filter(f => !isPdfFile(f) && isImageFile(f)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     const bad = files.filter(f => !isPdfFile(f) && !isImageFile(f));
-    const ppsNow = clampPps($('#scanPagesPerSheet').value);
-    const readPg = (sel) => { const v = parseInt(($(sel) || {}).value, 10); return Number.isFinite(v) && v > 0 ? v : 0; };
+    const ppsNow = ($('#scanPpsAuto') && $('#scanPpsAuto').checked) ? 'auto' : clampPps($('#scanPagesPerSheet').value);   /*QP:Q2-6*/
+    const readPg = (sel) => {
+      /*PV2-A*/
+      const autoEl = $('#scanPpsAuto');
+      if (autoEl && autoEl.checked && sel === '#scanPagesPerSheet') return 'auto';
+      const v = parseInt(($(sel) || {}).value, 10);
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    };
     const pageFrom = readPg('#scanPageFrom'), pageTo = readPg('#scanPageTo');
     if (pdfs.length && pageFrom && pageTo && pageFrom > pageTo) { toast(`Khoảng trang không hợp lệ: từ trang ${pageFrom} lớn hơn đến trang ${pageTo}.`, true); return; }
     if (bad.length) toast(`Bỏ qua ${bad.length} file không hỗ trợ: ${bad.slice(0, 3).map(f => f.name).join(', ')}`, true);
@@ -1502,7 +2200,15 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     $('#btnScan').addEventListener('click', async () => {
       openModal('scanModal');
       const st = await loadSettings();
-      $('#scanPagesPerSheet').value = String(clampPps(st.pagesPerSheet));
+      { /*QP:Q2-7*/ // đồng bộ ô tick «Tự động» và ô chọn số mặt theo cài đặt đã lưu (trước đây gán 'auto' vào <select> → rỗng)
+        const autoEl = $('#scanPpsAuto'), ppsEl = $('#scanPagesPerSheet'), cp = clampPps(st.pagesPerSheet), isAuto = cp === 'auto';
+        if (autoEl) autoEl.checked = isAuto;
+        if (ppsEl) {
+          const v = String(isAuto ? 2 : cp);
+          if (![...ppsEl.options].some(o => o.value === v)) ppsEl.add(new Option(v + ' mặt / phiếu', v));
+          ppsEl.value = v; ppsEl.disabled = isAuto;
+        }
+      }
       $('#chkScanSkipDup').checked = !!st.skipDuplicates;
       renderKeyList(); refreshScanCount(); updateAll();
     });
@@ -1584,7 +2290,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     for (const m of metas.sort((a, b) => (a.seq || 0) - (b.seq || 0))) {
       const files = filesBy.get(m.id + ':files'); if (!files || !files.length) continue;
       const st = m.jobState || [], left = m.total ? st.filter(s => s.s === 'wait' || !s.s).length + Math.max(0, m.total - st.length) : -1;   // -1: chưa mở file, chưa biết số tờ
-      const e = { id: ++Q.seq, dbId: m.id, order: m.seq, createdAt: m.createdAt, type: m.type, name: m.name, files, jobs: null, doc: null, error: '', pps: m.pps || 0, pageFrom: m.pageFrom || 0, pageTo: m.pageTo || 0,
+      const e = { id: ++Q.seq, dbId: m.id, order: m.seq, createdAt: m.createdAt, type: m.type, name: m.name, files, jobs: null, doc: null, error: '', pps: m.pps || 0, segGroups: m.segGroups || null, pageFrom: m.pageFrom || 0, pageTo: m.pageTo || 0,
         savedState: st, total: m.total || 0, status: (m.status === 'error' || m.status === 'partial') ? m.status : 'wait', restored: true };
       Q.entries.push(e); renderEntryRow(e); nEntries++; nLeft += left < 0 ? 1 : left;
     }
@@ -1635,6 +2341,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     models: { resetState: resetModelState, renderStatus: renderModelStatus },
     prepareImageFile, openPdf, renderPdfPage, analyzeSheet, geminiGenerate, normalizeBienSo, normalizeCccd, sha256Hex, uid,
     TINH_TRANG_LABEL,
+    autoSegmentPages, pageBytesCap, MAX_IMG_BYTES,   /*QP:Q5-0*/ // dùng cho scan-audit.js
     isBusy: () => !!Q.running,   // hàng đợi quét của người dùng đang chạy? (AI kiểm lại dùng để nhường)
   };
 })();

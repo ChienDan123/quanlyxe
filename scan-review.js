@@ -289,54 +289,184 @@ const ScanReview = (() => {
 
   // Dữ liệu của 1 xe trên phiếu (thông tin chủ phiếu dùng chung cho mọi xe cùng phiếu)
   function buildScanData(ex, v) {
-    const code = v.tinhTrang || 'khong_ro';
+    /*PV2-C*/
+    // `ex` có thể là extracted gốc (legacy) HOẶC ctx {chuHo,cccd,sdt,loaiPhieu,backHasContent,ghiChu} (do flattenDocVehicles dựng).
+    // `v` có thể là vehicle legacy (bienSo/tinhTrang/tinhTrangGhiTrenPhieu/ghiChu) HOẶC contract mới (plate/statusCode/statusRaw/note/soKhung/soMay/stt/page/checkMark).
+    const exS = ex || {};
+    const vs = v || {};
+    // tinhTrangCode/tinhTrangLabel dùng enum LEGACY (dang_hoat_dong | ban_khong_ro_nguoi_su_dung ...) vì nơi khác đang đọc.
+    // statusCode (contract: con_su_dung | ban_khong_ro | ...) là trường thêm, giữ riêng ở `statusCode` bên dưới.
+    const code = vs.tinhTrang || vs.tinhTrangCode || 'khong_ro';
     const label = S.TINH_TRANG_LABEL[code] || code;
     const notes = [];
-    if (NOTEWORTHY(code)) notes.push(label);           // VD: "Đã bán chưa sang tên", "Mất cắp"
-    if (v.ghiChu) notes.push(v.ghiChu);
-    if (ex.ghiChu) notes.push(ex.ghiChu);              // ghi chú tay + ghi chú mặt 2
-    const chuPhieu = String(ex.chuHo || '').trim();
-    const tenDKX = pickStr(v, VEH_OWNER_KEYS), nguoiDung = pickStr(v, VEH_USER_KEYS);
-    const ownerName = tenDKX || chuPhieu;                                   // dòng xe không ghi tên ĐKX -> tên chủ phiếu là chủ phương tiện
+    if (NOTEWORTHY(code)) notes.push(code === 'khac' ? (vs.tinhTrangGhiTrenPhieu || vs.statusRaw || label) : label);   /*QP:Q1-5*/ // «khác» → ghi NGUYÊN VĂN chữ trên phiếu
+    const ghi = vs.ghiChu || vs.note;
+    if (ghi) notes.push(ghi);
+    if (exS.ghiChu) notes.push(exS.ghiChu);
+    const chuPhieu = String(exS.chuHo || (exS.owner && exS.owner.name) || '').trim();
+    const tenDKX = pickStr(vs, VEH_OWNER_KEYS), nguoiDung = pickStr(vs, VEH_USER_KEYS);
+    const ownerName = tenDKX || chuPhieu;
     const holderIsOwner = !tenDKX || (!!C.flat(tenDKX) && C.flat(tenDKX) === C.flat(chuPhieu));
+    const exCccd = exS.cccd || (exS.owner && exS.owner.cccd) || '';
+    const exSdt = exS.sdt || (exS.owner && exS.owner.phone) || '';
+    const exLoai = exS.loaiPhieu || (exS.docType === 'cam_ket' ? 'ban_cam_ket' : '');
     return {
       chuXe: ownerName,
-      cccd: holderIsOwner ? (pickStr(v, ['cccd']) || ex.cccd || '') : '',    // CCCD / SĐT của chủ phiếu chỉ so với chủ xe khi chủ phiếu = chủ xe
-      soDienThoai: holderIsOwner ? (pickStr(v, ['sdt', 'soDienThoai']) || ex.sdt || '') : '',
+      cccd: holderIsOwner ? (pickStr(vs, ['cccd']) || exCccd || '') : '',
+      soDienThoai: holderIsOwner ? (pickStr(vs, ['sdt', 'soDienThoai']) || exSdt || '') : '',
       chuPhieu, tenDKX, nguoiDung, ownerFromHead: !tenDKX,
-      // Gợi ý «người mua / sử dụng»: tên ghi ở dòng xe; nếu không có mà chủ phiếu ≠ chủ xe thì chính chủ phiếu là người đang dùng
       partyTen: nguoiDung || (holderIsOwner ? '' : chuPhieu),
-      partyCccd: holderIsOwner ? '' : (ex.cccd || ''), partySdt: holderIsOwner ? '' : (ex.sdt || ''),
+      partyCccd: holderIsOwner ? '' : (exCccd || ''), partySdt: holderIsOwner ? '' : (exSdt || ''),
       ghiChu: notes.join('; '),
-      tinhTrangCamKet: (ex.loaiPhieu === 'ban_cam_ket' && ex.backHasContent) ? 'Đã ký cam kết' : '',
-      tinhTrangCode: code, tinhTrangLabel: label, tinhTrangGoc: v.tinhTrangGhiTrenPhieu || '',
-      loaiXe: v.loaiXe || '', loaiPhieu: ex.loaiPhieu || '',
+      tinhTrangCamKet: (exLoai === 'ban_cam_ket' && exS.backHasContent) ? 'Đã ký cam kết' : '',
+      tinhTrangCode: code, tinhTrangLabel: label,
+      tinhTrangGoc: vs.tinhTrangGhiTrenPhieu || vs.statusRaw || '',
+      loaiXe: vs.loaiXe || '', loaiPhieu: exLoai || '',
+      // Trường Hợp đồng dữ liệu mới — thêm, không xoá trường cũ
+      soKhung: vs.soKhung || '',
+      soMay: vs.soMay || '',
+      statusCode: vs.statusCode || '',
+      statusRaw: vs.statusRaw || '',
+      checkMark: !!vs.checkMark,
+      conf: (typeof vs.conf === 'number') ? vs.conf : undefined,
+      stt: vs.stt || 0,
+      page: vs.page || 1,
+      dupOf: vs.dupOf || null,
     };
+  }
+
+  /* ---- C1: chuẩn hoá danh sách XE theo Hợp đồng dữ liệu (docs[].vehicles[]) hoặc legacy (extracted.vehicles).
+     Trả mảng phẳng: { v, doc, ctx, stt, page, plate, dupOf, statusCode, docComplete }.
+     ctx = thông tin chủ phiếu/lọai phiếu "hiệu lực" cho xe đó (owner lấy từ doc.owner nếu có, rơi về ex.chuHo legacy). ---- */
+  function flattenDocVehicles(ex) {
+    /*PV2-C*/
+    if (!ex) return [];
+    const docs = Array.isArray(ex.docs) ? ex.docs : null;
+    if (docs && docs.length) {
+      const out = [];
+      docs.forEach((doc, di) => {
+        const vehicles = Array.isArray(doc && doc.vehicles) ? doc.vehicles : [];
+        const owner = (doc && doc.owner) || {};
+        const ctx = {
+          chuHo: owner.name || '', cccd: owner.cccd || '', sdt: owner.phone || '',
+          loaiPhieu: doc && doc.docType === 'cam_ket' ? 'ban_cam_ket' : (doc && doc.docType === 'danh_sach' ? 'phieu_thu_thap' : 'phieu_thu_thap'),
+          backHasContent: !!ex.backHasContent,
+          ghiChu: ex.ghiChu || '',
+        };
+        vehicles.forEach((v, vi) => {
+          out.push({
+            v, doc, ctx, docIdx: di,
+            stt: (v && Number(v.stt)) || (vi + 1),
+            page: (v && Number(v.page)) || 1,
+            plate: (v && v.plate) || '',
+            dupOf: (v && v.dupOf) || null,
+            statusCode: (v && v.statusCode) || '',
+            docComplete: doc && doc.complete !== false,
+          });
+        });
+      });
+      return out;
+    }
+    const vehicles = Array.isArray(ex.vehicles) ? ex.vehicles : [];
+    return vehicles.map((v, i) => ({
+      v, doc: ex, docIdx: 0,
+      ctx: {
+        chuHo: ex.chuHo || '', cccd: ex.cccd || '', sdt: ex.sdt || '',
+        loaiPhieu: ex.loaiPhieu || '',
+        backHasContent: !!ex.backHasContent,
+        ghiChu: ex.ghiChu || '',
+      },
+      stt: (v && Number(v.stt)) || (i + 1),
+      page: (v && Number(v.page)) || 1,
+      plate: (v && (v.plate || v.bienSo)) || '',
+      dupOf: (v && v.dupOf) || null,
+      statusCode: (v && v.statusCode) || '',
+      docComplete: true,
+    }));
   }
 
   // Tạo (nếu chưa có) các mục cho 1 tờ. KHÔNG ghi đè mục đã có (giữ quyết định của người dùng).
   async function createItemsForScan(scanId, extracted, label) {
-    const vehicles = (extracted && extracted.vehicles) || [];
+    /*PV2-C*/
+    // C1: xử lý TOÀN BỘ xe trong mọi doc và mọi trang. Idempotent theo (scanId + plate chuẩn hoá).
+    const list = flattenDocVehicles(extracted);
     const seen = new Set();
     const touched = [];
-    for (let i = 0; i < vehicles.length; i++) {
-      const v = vehicles[i];
-      const plate = norm(v.bienSo);                    // '' nếu máy không đọc được biển
-      const key = plate || ('#' + i);
-      if (seen.has(key)) continue; seen.add(key);
+    const totalStt = list.reduce((m, x) => Math.max(m, x.stt || 0), 0) || list.length;
+    for (let i = 0; i < list.length; i++) {
+      const ent = list[i];
+      // C4: biển trùng trong cùng phiếu (đã bị verifyAndFillMissing đợt A set dupOf) → bỏ, không tạo mục thứ 2.
+      const v = ent.v || {};
+      const plate = norm(ent.plate || v.plate || v.bienSo || '');   // '' nếu máy không đọc được biển
+      const isDup = !!ent.dupOf;   // biển trùng trong cùng phiếu: KHÔNG bỏ, tạo mục riêng + cờ NGHI VẤN
+      const key = isDup ? ((plate || 'xe') + '~stt' + (ent.stt || i)) : (plate || ('#stt-' + (ent.stt || i)));
+      if (seen.has(key)) continue;
+      seen.add(key);
       const id = scanId + '|' + key;
       if (await DB.dbGet(ST_ITEMS, id)) continue;
+
+      const scanData = buildScanData(ent.ctx || extracted, v);
+
+      // C2: điền soKhung / soMay / loaiXe từ sheet nếu phiếu để trống (chỉ khi có biển khớp).
+      const datasetFill = {};
+      if (plate) {
+        try {
+          const rows = (dsIndex().get(plate) || []);
+          if (rows.length) {
+            const row = rows[0];
+            ['soKhung', 'soMay', 'loaiXe'].forEach(f => {
+              if (!scanData[f]) {
+                const sv = sheetVal(row, f);
+                if (sv) { scanData[f] = sv; datasetFill[f] = true; }
+              }
+            });
+          }
+        } catch (e) { /* dsIndex/sheetVal chưa sẵn sàng → bỏ qua */ }
+      }
+
       const it = {
-        id, scanId, bienSo: plate, bienSoRaw: v.bienSo || '', sheetLabel: label || '',
-        scanData: buildScanData(extracted, v),
+        id, scanId,
+        bienSo: plate,
+        bienSoRaw: v.plateRaw || v.bienSo || ent.plate || v.plate || '',   /*QP:Q4-1*/ // hiển thị đúng bản chép gốc «92A-007.35»
+        sheetLabel: label || '',
+        scanData,
         orphan: false, decisions: {}, applied: {}, review: 'chua_kiem', done: false, dirty: false,
         orphanDecision: null, orphanPushed: false, pushError: '', result: '',
         edits: {}, sheetEdits: {}, fixed: {}, imgChecked: false,
-        slotX: i + 1, slotTotal: vehicles.length,   // xe thứ i+1 trên ảnh / tổng số xe máy đọc được (người dùng sửa được nếu phiếu ghi nhiều xe hơn)
-        source: {}, fieldChecked: {}, sheetOk: {},   // nguồn đã chọn RIÊNG từng trường ('scan'|'sheet'), tick «đã kiểm ảnh» từng trường, trường «Sheet đúng» đã chốt // chỉnh sửa tay bên phiếu / bên Sheet + tick "Đã kiểm với ảnh"
+        slotX: ent.stt || (i + 1),
+        slotTotal: totalStt,
+        source: {}, fieldChecked: {}, sheetOk: {},
         createdAt: Date.now(), updatedAt: Date.now(),
+        // Trường mới theo Hợp đồng dữ liệu (chỉ THÊM, không đổi trường cũ)
+        stt: ent.stt || (i + 1),
+        page: ent.page || 1,
+        dupOf: ent.dupOf || null,
+        statusCode: ent.statusCode || '',
+        datasetFill: Object.keys(datasetFill).length ? datasetFill : null,
+        needsReview: false,
       };
+
+      // C5: đánh dấu cần kiểm lại khi trạng thái không xác định / doc chưa hoàn chỉnh (hiện trong bộ lọc "nghi vấn" hiện có)
+      const needFromCode = ent.statusCode === 'khong_xac_dinh';
+      const needFromDoc = ent.docComplete === false;
+      if (needFromCode || needFromDoc || isDup) {
+        it.needsReview = true;
+        const reason = isDup ? ('NGHI VẤN: biển số trùng STT ' + ent.dupOf + ' trong cùng phiếu — cần người chọn') : (needFromCode ? 'Trạng thái không xác định — cần kiểm tra' : 'Phiếu chưa hoàn chỉnh (thiếu STT)');
+        it.recheck = { uncertain: { trangThaiXe: reason }, locked: {}, lan: 0 };
+      }
+
       await DB.dbPut(ST_ITEMS, it);
+      if (isDup && plate) {   // đánh dấu cả mục gốc cùng biển (nếu người dùng chưa xử lý)
+        try {
+          const first = await DB.dbGet(ST_ITEMS, scanId + '|' + plate);
+          if (first && !first.done && !first.needsReview) {
+            first.needsReview = true; first.recheck = first.recheck || { uncertain: {}, locked: {}, lan: 0 };
+            first.recheck.uncertain = first.recheck.uncertain || {};
+            first.recheck.uncertain.trangThaiXe = 'NGHI VẤN: biển số này còn xuất hiện ở STT ' + ent.stt + ' — so sánh trạng thái hai dòng';
+            await DB.dbPut(ST_ITEMS, first);
+          }
+        } catch (e) { /* bỏ qua */ }
+      }
       touched.push(plate);
     }
     for (const p of touched) await recomputeLink(p);
@@ -345,7 +475,12 @@ const ScanReview = (() => {
 
   // Các tờ đã quét TRƯỚC khi có module này (không có mục) -> tạo mục bù (duyệt bằng cursor, mỗi lần 1 bản ghi)
   async function backfillItems(onProgress) {
-    const have = new Set((await DB.dbGetAll(ST_ITEMS)).map(i => i.scanId));
+    /*PV2-C*/
+    // C1: KHÔNG chỉ bù khi scan chưa có mục NÀO; còn bù khi scan có ÍT mục hơn số xe thực tế đã đọc được.
+    // (Ví dụ trước đây chỉ tạo 2 mục cho phiếu 57 xe → nay phát hiện thiếu và gọi lại createItemsForScan (idempotent).)
+    const allItems = await DB.dbGetAll(ST_ITEMS);
+    const countByScan = new Map();
+    allItems.forEach(i => { countByScan.set(i.scanId, (countByScan.get(i.scanId) || 0) + 1); });
     const db = await DB.openDb();
     const todo = [];
     await new Promise((resolve, reject) => {
@@ -354,8 +489,26 @@ const ScanReview = (() => {
         const cur = req.result;
         if (!cur) { resolve(); return; }
         const r = cur.value;
-        if (r.status === 'done' && !r.isTest && r.extracted && !have.has(r.id))
-          todo.push({ id: r.id, ex: r.extracted, label: r.sheetLabel || ((r.fileName || '') + (r.pagesDesc ? ' · ' + r.pagesDesc : '')) });
+        if (r.status === 'done' && !r.isTest && r.extracted) {
+          // Đếm kỳ vọng sau khi bỏ dupOf và trùng plate trong 1 scan (idempotent theo scanId|plate).
+          const list = flattenDocVehicles(r.extracted);
+          const seen = new Set();
+          let expected = 0;
+          list.forEach(ent => {
+            if (ent.dupOf) return;
+            const k = norm(ent.plate || (ent.v && (ent.v.plate || ent.v.bienSo)) || '') || ('#stt-' + (ent.stt || 0));
+            if (seen.has(k)) return;
+            seen.add(k); expected++;
+          });
+          const current = countByScan.get(r.id) || 0;
+          if (current < expected) {
+            todo.push({
+              id: r.id, ex: r.extracted,
+              label: r.sheetLabel || ((r.fileName || '') + (r.pagesDesc ? ' · ' + r.pagesDesc : '')),
+              missing: expected - current,
+            });
+          }
+        }
         cur.continue();
       };
       req.onerror = () => reject(req.error);
@@ -435,6 +588,17 @@ const ScanReview = (() => {
     it.boxOv = it.boxOv || null; it.boxOvPrev = it.boxOvPrev || null; it.boxOvOld = it.boxOvOld || null;
     it.slotX = (Number.isInteger(it.slotX) && it.slotX > 0) ? it.slotX : null;
     it.slotTotal = (Number.isInteger(it.slotTotal) && it.slotTotal > 0) ? it.slotTotal : null;
+    // /*QUET-PHIEU:P1-7*/ Sửa lỗi phân loại cũ: phiếu đã quét trước bản này có tinhTrangGoc rõ "bán không rõ người sử dụng"
+    // nhưng code lại là da_ban_chua_sang_ten. Tự sửa MỘT LẦN khi mở/đọc; KHÔNG đụng it.edits (dữ liệu người dùng đã sửa tay).
+    if (it.scanData && it.scanData.tinhTrangCode === 'da_ban_chua_sang_ten') {
+      try {
+        if (typeof looksLikeBanKhongRo === 'function' && looksLikeBanKhongRo(it.scanData.tinhTrangGoc)) {
+          it.scanData.tinhTrangCode = 'ban_khong_ro_nguoi_su_dung';
+          const lbl = (typeof S !== 'undefined' && S && S.TINH_TRANG_LABEL) ? S.TINH_TRANG_LABEL['ban_khong_ro_nguoi_su_dung'] : '';
+          if (lbl) it.scanData.tinhTrangLabel = lbl;
+        }
+      } catch (e) { /* không làm hỏng việc đọc mục */ }
+    }
     return it;
   }
 
@@ -456,17 +620,204 @@ const ScanReview = (() => {
   /* ---- Ánh xạ «Tình trạng phương tiện» (phiếu) -> «Trạng thái xe» (web) ----
      Thứ tự: khớp chữ ghi trên phiếu -> khớp nhãn chuẩn của mã -> mã có tương ứng rõ ràng -> nhãn/chữ trên phiếu (CHƯA có trong
      danh sách => người dùng bấm ➕ để thêm lựa chọn mới). Mã chưa rõ nghĩa thì KHÔNG tự đoán sang trạng thái khác. */
-  const STATUS_BY_CODE = { dang_hoat_dong: 'Còn sử dụng' };
+  /*QUET-PHIEU:P1-4*/ const STATUS_BY_CODE = {
+    dang_hoat_dong: 'Còn sử dụng',
+    ban_khong_ro_nguoi_su_dung: 'Bán không rõ người sử dụng',
+  };
   const statusList = () => (typeof STATUS_OPTIONS !== 'undefined' ? STATUS_OPTIONS : []);
-  const matchStatus = (t) => { const f = C.flat(t); return f ? (statusList().find(o => C.flat(o) === f) || '') : ''; };
+  // /*PV2-B*/ Nhan dien "ban khong ro nguoi su dung/mua" tu chu goc.
+  // Dung _normStatusText (giu khoang trang giua tu) — KHONG dung C.flat vi C.flat xoa het khoang trang lam mat ranh gioi tu.
+  // Quy tac B2: "khong/ko/kg/k0/khg/xo/kh0 + ro/biet" VA "nguoi su dung/nguoi mua/ng sd/ng mua" -> TRUE.
+  // Khong bat buoc co chu "ban" o dau (yeu cau 3: cum "khong ro nguoi su dung/mua" thang moi cum khac).
+  function looksLikeBanKhongRo(goc) {
+    const f = _normStatusText(goc);
+    if (!f) return false;
+    if (!/\b(khong|k0|kg|khg|ko|xo|kh0)\s+(ro|r0|biet)\b/.test(f) && !/\bkhong\s+gi\s+ro\b/.test(f)) return false;
+    return /\bnguoi\s+(su\s+dung|sd|mua)\b/.test(f) || /\bng\s+(sd|mua)\b/.test(f) || /\bnsd\b/.test(f);   /*QP:Q1-1*/
+  }
+  // /*PV2-B*/ Chuan hoa chuoi de so khop trang thai — GIU KHOANG TRANG giua tu.
+  // Bo dau tieng Viet, ha chu, gop khoang trang; chuan hoa viet tat "k0/ko/kg/khg/xo/kh0 ro" -> "khong ro"; "khong biet" -> "khong biet".
+  function _normStatusText(s) {
+    let f = String(s || '');
+    try {
+      if (f.normalize) f = f.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\u0111/g, 'd').replace(/\u0110/g, 'D');
+    } catch (e) { /* giu nguyen raw neu normalize loi */ }
+    f = f.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!f) return '';
+    return f
+      .replace(/\b(k0|kg|khg|ko|xo|kh0)\s+(ro|r0)\b/g, 'khong ro')
+      .replace(/\bkhong\s+gi\s+ro\b/g, 'khong ro')
+      .replace(/\b(k0|kg|khg|ko|xo|kh0)\s+biet\b/g, 'khong biet')
+      .replace(/\b0\s+(ro|r0)\b/g, 'khong ro')
+      .replace(/\s+/g, ' ').trim();
+  }
+  // bo tien to "da " (sau khi C.flat, chu "da" la ASCII)
+  function _stripDaPrefix(f) { return f ? (f.replace(/^da\s+/i, '').trim() || f) : f; }
+  // /*PV2-B*/ Khop chuoi trang thai voi option trong Sheet.
+  // Buoc 1: khop chinh xac (co + khong co tien to "da "). Buoc 2: 2 chieu contains (>=6 ky tu) de xu ly
+  // truong hop nguoi viet thieu "ban" (vd "khong ro nguoi su dung" van khop "Ban khong ro nguoi su dung").
+  const _containsAscii = (a, b) => !!a && !!b && (a === b || a.startsWith(b + ' ') || a.endsWith(' ' + b) || a.includes(' ' + b + ' '));
+  const matchStatus = (t) => {
+    const raw = String(t || '').trim();
+    if (!raw) return '';
+    const opts = statusList();
+    if (!opts.length) return '';
+    const vIn = _normStatusText(raw);
+    if (!vIn) return '';
+    const vInNoDa = _stripDaPrefix(vIn);
+    // 1) khop chinh xac (co va khong co tien to "da")
+    for (const o of opts) if (_normStatusText(o) === vIn) return o;
+    for (const o of opts) if (_stripDaPrefix(_normStatusText(o)) === vInNoDa) return o;
+    // 2) khop chua 2 chieu (ung vien >= 6 ky tu de tranh khop bua)
+    const sorted = [...opts].sort((a, b) => _normStatusText(b).length - _normStatusText(a).length);
+    for (const o of sorted) {
+      const oN = _normStatusText(o);
+      if (!oN || oN.length < 6) continue;
+      const cands = [oN, _stripDaPrefix(oN)].filter(c => c && c.length >= 6);
+      for (const cand of cands) {
+        if (vIn === cand || vInNoDa === cand) return o;
+        if (_containsAscii(vIn, cand) || _containsAscii(cand, vIn)) return o;
+        if (_containsAscii(vInNoDa, cand) || _containsAscii(cand, vInNoDa)) return o;
+      }
+    }
+    return '';
+  };
   const addStatus = (name) => (typeof addStatusOption === 'function' ? addStatusOption(name) : null);
+  /*QP:Q1-1*/ // HÀM MỚI — bảng quy đổi DUY NHẤT chữ viết trên phiếu → trạng thái chuẩn (R4). Không khớp → '' (KHÔNG đoán).
+  function canonicalStatus(raw) {
+    if (looksLikeBanKhongRo(raw)) return 'Bán không rõ người sử dụng';
+    const t = _normStatusText(raw).replace(/\bxe\b/g, ' ').replace(/\s+/g, ' ').trim().replace(/^da /, '');
+    if (!t) return '';
+    if (/^(ban |chuyen nhuong )?chua sang ten$/.test(t)) return 'Đã bán chưa sang tên';
+    if (/^(con )?(dang )?(duoc )?(su dung|hoat dong)$/.test(t)) return 'Còn sử dụng';
+    if (/^(mat cap|bi mat cap|bi mat|mat)$/.test(t)) return 'Mất cắp';
+    return '';
+  }
   function scanStatus(it) {
-    const d = it.scanData || {}, goc = String(d.tinhTrangGoc || '').trim(), code = d.tinhTrangCode || 'khong_ro';
-    if (code === 'khong_ro' && !goc) return '';
-    const label = (code === 'khac' || code === 'khong_ro') ? '' : (d.tinhTrangLabel || '');
-    return matchStatus(goc) || matchStatus(label) || STATUS_BY_CODE[code] || label || goc;
+    /*QP:Q1-2*/
+    const d = it.scanData || {};
+    const goc = String(d.statusRaw || d.tinhTrangGoc || '').trim();
+    const code = String(d.statusCode || d.tinhTrangCode || '').trim();
+    if (!goc && (!code || code === 'khong_ro' || code === 'khong_xac_dinh')) return '';
+    const r = mapStatusToOption(goc, code, statusList());
+    if (r && r.option) return r.option;
+    if (goc) return goc;                    // chữ lạ (vd «Không tham gia đào tạo»): GIỮ NGUYÊN VĂN → vào luồng «trạng thái lạ»
+    return STATUS_BY_CODE[code] || '';
   }
   const isUnknownStatus = (v) => !!String(v || '').trim() && !matchStatus(v);
+
+  /* ---- B1: Bảng ánh xạ DUY NHẤT statusCode (và chữ trên phiếu) → option trong sheet ----
+     - statusCode (contract) ưu tiên TRƯỚC, statusRaw chỉ để đối chiếu (B5).
+     - Mâu thuẫn giữa statusCode và statusRaw → trả conflict:true (caller đánh dấu "nghi ngờ", không ghi đè).
+     - Option không có trong danh sách STATUS_OPTIONS → option:null + isUnknownStatus:true (không tự thêm, không đoán).
+     - B3: "Đã bán không rõ người sử dụng" thắng "chưa sang tên" (raw looks "không rõ người sử dụng/mua" THẮNG code ban_chua_sang_ten).
+     Trả về: { option: string|null, code: string, isUnknownStatus: boolean, conflict: boolean, reason: string }. */
+  function mapStatusToOption(statusRaw, statusCode, options) {
+    /*PV2-B*/
+    const opts = Array.isArray(options) ? options : statusList();
+    const raw = String(statusRaw || '').trim();
+    const code = String(statusCode || '').trim();
+
+    const CODE_LABEL = {
+      con_su_dung: 'Còn sử dụng',
+      ban_khong_ro: 'Bán không rõ người sử dụng',
+      ban_chua_sang_ten: 'Đã bán chưa sang tên',
+      ban_phe_lieu: 'Bán phế liệu',
+      hu_hong: 'Hư hỏng',
+      mat: 'Mất',
+      giai_the: 'Giải thể',
+      khong_con_o_dia_phuong: 'Không còn ở địa phương',
+      khong_tham_gia_dao_tao: 'Không tham gia đào tạo',
+      khac: 'Khác',
+      khong_xac_dinh: 'Không xác định',
+    };
+    const OLD2NEW = {
+      dang_hoat_dong: 'con_su_dung',
+      da_ban_chua_sang_ten: 'ban_chua_sang_ten',
+      ban_khong_ro_nguoi_su_dung: 'ban_khong_ro',
+      mua_chua_sang_ten: 'ban_chua_sang_ten',
+      mat_cap: 'mat',
+      het_nien_han: 'khac',
+      khong_ro: 'khong_xac_dinh',
+    };
+    const normCode = OLD2NEW[code] || code;
+    // Alias: các nhãn TƯƠNG ỨNG cho statusCode khi nhãn chuẩn không có trong STATUS_OPTIONS.
+    // Chỉ liệt kê những cặp đã XÁC NHẬN tương đương nghĩa (dựa vào C08_STATUS_RULES & nghiệp vụ).
+    // KHÔNG thêm alias cho statusCode mà danh sách không có option tương ứng (mat/giai_the/
+    // khong_con_o_dia_phuong/khong_tham_gia_dao_tao/khac/khong_xac_dinh/ban_chua_sang_ten) —
+    // đúng B1 "không đoán, trả null + isUnknownStatus".
+    const CODE_ALIASES = {
+      hu_hong: ['Hư hỏng', 'Hỏng, đang quản lý'],   // thực tế STATUS_OPTIONS dùng "Hỏng, đang quản lý"
+      ban_phe_lieu: ['Bán phế liệu', 'Đã bán phế liệu'],
+      mat: ['Mất cắp', 'Mất'],   // R4: «mất cắp / bị mất» → Mất cắp   // danh sách dùng "Đã bán phế liệu"
+    };
+
+    const findOpt = (label) => {
+      if (!label) return null;
+      const target = _normStatusText(label);
+      if (!target) return null;
+      for (const o of opts) if (_normStatusText(o) === target) return o;
+      for (const o of opts) {
+        const oN = _normStatusText(o);
+        if (oN && _stripDaPrefix(oN) === _stripDaPrefix(target)) return o;
+      }
+      for (const o of opts) {
+        const oN = _normStatusText(o);
+        if (!oN || oN.length < 8) continue;
+        if (_containsAscii(target, oN) || _containsAscii(oN, target)) return o;
+      }
+      return null;
+    };
+
+    const rawLooksKhongRo = looksLikeBanKhongRo(raw);
+
+    /*QP:Q1-4*/ // R4: có chữ trên phiếu → chữ thắng mã Gemini. Không khớp mục nào → 'khac' + nguyên văn (không ép sang mục gần giống)
+    if (raw) {
+      const LBL2CODE = { 'Còn sử dụng': 'con_su_dung', 'Bán không rõ người sử dụng': 'ban_khong_ro', 'Đã bán chưa sang tên': 'ban_chua_sang_ten', 'Mất cắp': 'mat' };
+      const cn = canonicalStatus(raw);
+      if (cn) { const opt = findOpt(cn); return { option: opt, code: LBL2CODE[cn], isUnknownStatus: !opt, conflict: false, reason: 'chữ trên phiếu' }; }
+      const rN = _normStatusText(raw), ex = opts.find(o => _normStatusText(o) === rN || _stripDaPrefix(_normStatusText(o)) === _stripDaPrefix(rN));
+      if (ex) return { option: ex, code: normCode || '', isUnknownStatus: false, conflict: false, reason: 'chữ trên phiếu khớp đúng 1 mục' };
+      return { option: null, code: 'khac', isUnknownStatus: true, conflict: false, reason: 'chữ trên phiếu không khớp mục nào — giữ nguyên văn' };
+    }
+
+    // B3: code "chưa sang tên" NHƯNG raw rõ "không rõ người sử dụng/mua" → chuyển thành ban_khong_ro
+    if (normCode === 'ban_chua_sang_ten' && rawLooksKhongRo) {
+      const opt = findOpt('Bán không rõ người sử dụng');
+      return { option: opt, code: 'ban_khong_ro', isUnknownStatus: !opt, conflict: true,
+        reason: 'Raw "không rõ người sử dụng/mua" thắng "chưa sang tên"' };
+    }
+
+    // B2: code rỗng/không xác định nhưng raw rõ "không rõ người sử dụng/mua"
+    if ((!normCode || normCode === 'khong_xac_dinh' || normCode === 'khac') && rawLooksKhongRo) {
+      const opt = findOpt('Bán không rõ người sử dụng');
+      return { option: opt, code: 'ban_khong_ro', isUnknownStatus: !opt, conflict: false,
+        reason: 'statusRaw nói rõ "không rõ người sử dụng/mua"' };
+    }
+
+    // B5: ưu tiên statusCode (contract). Thử lần lượt các nhãn ứng viên (CODE_LABEL + CODE_ALIASES).
+    if (normCode && CODE_LABEL[normCode]) {
+      const labels = (CODE_ALIASES[normCode] || [CODE_LABEL[normCode]]);
+      for (let li = 0; li < labels.length; li++) {
+        const opt = findOpt(labels[li]);
+        if (!opt) continue;
+        const rawN = _normStatusText(raw), optN = _normStatusText(opt);
+        const conflict = rawN.length >= 4 && !rawN.includes(optN) && !optN.includes(rawN);
+        return { option: opt, code: normCode, isUnknownStatus: false, conflict,
+          reason: conflict ? 'statusCode và statusRaw khác nghĩa — cần người kiểm tra' : 'từ statusCode' };
+      }
+      return { option: null, code: normCode, isUnknownStatus: true, conflict: false,
+        reason: 'Nhãn "' + (CODE_ALIASES[normCode] || [CODE_LABEL[normCode]]).join('" / "') + '" chưa có trong danh sách Trạng thái xe' };
+    }
+
+    // B2: không có code → thử statusRaw
+    if (raw) {
+      const m = matchStatus(raw);
+      if (m) return { option: m, code: '', isUnknownStatus: false, conflict: false, reason: 'statusRaw khớp option' };
+      return { option: null, code: '', isUnknownStatus: true, conflict: false, reason: 'statusRaw không khớp option nào' };
+    }
+    return { option: null, code: normCode || '', isUnknownStatus: false, conflict: false, reason: 'rỗng' };
+  }
 
   // Giá trị "bên phiếu" của 1 trường: ưu tiên giá trị người dùng đã SỬA TAY; Người kiểm phiếu lấy mặc định ở thanh công cụ.
   function scanValue(it, key) {
@@ -2081,16 +2432,36 @@ const ScanReview = (() => {
     }
     return prev[n];
   }
+  // C3: 2 ký tự dễ đọc nhầm trên phiếu giấy / do OCR (0↔O, 8↔B, 1↔I, 5↔S, 2↔Z, 0↔D/Q, 6↔G).
+  function _isConfusableChar(a, b) {
+    /*PV2-C*/
+    const M = { O: '0', '0': 'O', I: '1', '1': 'I', B: '8', '8': 'B', S: '5', '5': 'S', Z: '2', '2': 'Z', D: '0', Q: '0', G: '6', '6': 'G' };
+    return M[a] === b || M[b] === a;
+  }
+
   // Biển trong DS "gần giống" biển đang nhập: chứa/được chứa (gõ thiếu-thừa ký tự) hoặc lệch ≤1–2 ký tự. KHÔNG tự gán — người dùng bấm chọn.
   function findPlateCandidates(p, max = 6) {
+    /*PV2-C*/
     if (!p || p.length < 4) return [];
     const out = [];
     for (const [k, rows] of dsIndex()) {
       if (k === p) continue;
-      let score = null;
-      if (Math.min(k.length, p.length) >= 4 && (k.includes(p) || p.includes(k))) score = 0.5 + Math.abs(k.length - p.length) * 0.1;
-      else if (Math.abs(k.length - p.length) <= 1) { const d = lev(k, p); if (d <= (p.length >= 7 ? 2 : 1)) score = d; }
-      if (score != null) out.push({ k, score, row: rows[0] });
+      let score = null, why = '';
+      if (Math.min(k.length, p.length) >= 4 && (k.includes(p) || p.includes(k))) { score = 0.5 + Math.abs(k.length - p.length) * 0.1; why = 'thiếu/thừa ký tự'; }
+      else if (Math.abs(k.length - p.length) <= 1) {
+        const d = lev(k, p);
+        if (d <= (p.length >= 7 ? 2 : 1)) { score = d; why = 'lev=' + d; }
+      }
+      // C3: cùng độ dài, chỉ khác 1 ký tự VÀ cặp ký tự đó là cặp dễ đọc nhầm (0/O, 8/B, 1/I, 5/S, 2/Z, D/Q↔0, 6↔G)
+      if (score == null && k.length === p.length) {
+        let diff = 0, confusable = true;
+        for (let i = 0; i < k.length; i++) if (k[i] !== p[i]) {
+          diff++;
+          if (!_isConfusableChar(k[i], p[i])) { confusable = false; break; }
+        }
+        if (diff === 1 && confusable) { score = 1; why = 'nhầm ký tự'; }
+      }
+      if (score != null) out.push({ k, score, why, row: rows[0] });
     }
     return out.sort((x, y) => x.score - y.score).slice(0, max);
   }
@@ -2167,6 +2538,15 @@ const ScanReview = (() => {
       badges.push(`<span class="rv-badge rv-badge-ai rv-badge-${cls}">${label}</span>`);
     }
     if (it.imgChecked) badges.push('<span class="rv-badge applied">🖼 Đã kiểm với ảnh</span>');
+    // C2: nguồn dữ liệu cho soKhung / soMay / loaiXe (phiếu để trống → điền từ sheet theo biển số khớp)
+    if (it.datasetFill && (it.datasetFill.soKhung || it.datasetFill.soMay || it.datasetFill.loaiXe)) {
+      const fl = ['soKhung', 'soMay', 'loaiXe'].filter(k => it.datasetFill[k]);
+      badges.push(`<span class="rv-badge" title="Phiếu không ghi các trường này — đã điền từ dữ liệu sheet theo biển số khớp">📊 nguồn: dữ liệu (${fl.join(', ')})</span>`);
+    }
+    // C4: đánh dấu biển trùng với STT khác trong cùng phiếu (mục chỉ tạo 1 lần, các lần sau bị bỏ qua)
+    if (it.dupOf) badges.push(`<span class="rv-badge warn" title="Biển số trùng với STT ${it.dupOf} trong cùng phiếu — NGHI VẤN, hãy tự chọn">🔁 trùng STT ${it.dupOf}</span>`);
+    // C5: cần kiểm lại do trạng thái không xác định / phiếu chưa hoàn chỉnh
+    if (it.needsReview) badges.push(`<span class="rv-badge warn" title="Cần kiểm tra lại: trạng thái không xác định hoặc phiếu chưa đủ STT">⚠ Cần kiểm lại</span>`);
     if (userMode(it)) badges.push(`<span class="rv-badge warn" title="Dòng «người mua / sử dụng» trên phiếu → đối chiếu với cột AH–AK «Người sử dụng xe - …» ở bảng bên dưới.">👥 Người sử dụng: ${escapeHtml(partyValue(it, PARTY_FIELDS[0]) || '(chưa rõ tên)')}</span>`);
     else if (it.scanData.partyTen && !it.partyRole) badges.push(`<span class="rv-badge warn" title="Theo phiếu: người mua / sử dụng ≠ chủ xe đứng tên ĐKX. Chọn mục «Thông tin trên phiếu là của» để ghi sang cột riêng.">👥 Người mua / sử dụng: ${escapeHtml(it.scanData.partyTen)}</span>`);
     { const si = slotInfo(it.scanId); if (!si.complete) badges.push(`<span class="rv-badge warn" title="Phiếu kê khai ${si.total} xe nhưng chưa có dữ liệu: ${slotMissingText(si)}">⚠ Thiếu ${slotMissingText(si)}</span>`); }
@@ -2506,7 +2886,7 @@ const ScanReview = (() => {
     const url = URL.createObjectURL(blob); urls.push(url);
     const media = mime === 'application/pdf' ? `<iframe class="rv-pg-pdf" src="${url}" title="${escapeHtml(label)}"></iframe>`
       : `<div class="rv-pg-wrap"><img class="rv-pg-img" src="${url}" alt="${escapeHtml(label)}" title="Bấm vào ảnh để chuyển tới xe · kéo để dời ảnh · nhấp đúp để phóng to / thu nhỏ"><div class="rv-boxes" aria-hidden="true"></div></div>`;   // lớp khung nằm TRONG wrap (position:relative) nên luôn dính theo ảnh khi kéo / phóng
-    const rot = (window.ScanRotate && mime !== 'application/pdf') ? ScanRotate.buttonsHtml(page) : '';   // nút xoay RIÊNG từng mặt (scan-rotate.js)
+    const rot = (window.ScanRotate && mime !== 'application/pdf' && page <= 2) ? ScanRotate.buttonsHtml(page) : '';   // nút xoay RIÊNG từng mặt (scan-rotate.js)
     return `<div class="rv-pg" data-page="${page}"><div class="rv-pg-label">${label} <a class="btn btn-ghost btn-sm" href="${url}" target="_blank" rel="noopener">↗ Mở tab mới</a>${rot}</div>${media}</div>`;
   }
 
@@ -2534,9 +2914,11 @@ const ScanReview = (() => {
      chưa có vùng → bấm ảnh sẽ hiện danh sách xe để chọn (phiếu 1 xe thì đi thẳng tới xe đó). */
   function regionsFor(rec) {
     const m = new Map(), seen = new Set(), vs = (rec && rec.extracted && rec.extracted.vehicles) || [];
+    const perPage = !!(rec && rec.extracted && rec.extracted.boxPerPage);   // chỉ bản quét mới có khung THEO TRANG
     vs.forEach((v, i) => {
-      const key = norm(v.bienSo) || ('#' + i);
-      if (seen.has(key)) return; seen.add(key);
+      let key = norm(v.bienSo) || ('#' + i);
+      if (seen.has(key)) { if (!norm(v.bienSo)) return; key = key + '~stt' + (Number(v.stt) || (i + 1)); if (seen.has(key)) return; }
+      seen.add(key);
       let y0 = Number(v.vungY0), x0 = Number(v.vungX0), y1 = Number(v.vungY1), x1 = Number(v.vungX1);
       if (![y0, x0, y1, x1].every(Number.isFinite)) return;
       const cl = (n) => Math.min(1000, Math.max(0, n));
@@ -2544,7 +2926,7 @@ const ScanReview = (() => {
       if (y0 > y1) [y0, y1] = [y1, y0]; if (x0 > x1) [x0, x1] = [x1, x0];
       if (y1 - y0 < 15 || x1 - x0 < 30) return;                          // khung quá nhỏ = không đáng tin
       if ((y1 - y0) * (x1 - x0) > 0.85 * 1e6) return;                    // gần kín cả trang = vô nghĩa (phân biệt xe)
-      m.set(rec.id + '|' + key, { x0: x0 / 1000, y0: y0 / 1000, x1: x1 / 1000, y1: y1 / 1000, page: 1 });   // Gemini chỉ trả vùng trên MẶT 1
+      m.set(rec.id + '|' + key, { x0: x0 / 1000, y0: y0 / 1000, x1: x1 / 1000, y1: y1 / 1000, page: perPage ? Math.max(1, Number(v.page) || 1) : 1 });   // bản cũ: vùng trên MẶT 1; bản mới: trên trang v.page
     });
     return m;
   }
@@ -2605,7 +2987,7 @@ const ScanReview = (() => {
     if (x0 > x1) [x0, x1] = [x1, x0]; if (y0 > y1) [y0, y1] = [y1, y0];
     if (x1 - x0 < BOX_MINW || y1 - y0 < BOX_MINH || (x1 - x0) * (y1 - y0) > 0.85) return null;
     const r4 = (n) => Math.round(n * 1e4) / 1e4;
-    return { page: Number(b.page) === 2 ? 2 : 1, x0: r4(x0), y0: r4(y0), x1: r4(x1), y1: r4(y1) };
+    return { page: Math.max(1, Math.min(64, Math.round(Number(b.page)) || 1)), x0: r4(x0), y0: r4(y0), x1: r4(x1), y1: r4(y1) };
   }
   // Vùng hiệu lực của 1 phiếu: vùng Gemini (mặt 1) rồi ĐÈ bằng khung người dùng đã lưu (đúng mặt)
   function effectiveRegions(rec) {
@@ -3061,7 +3443,8 @@ const ScanReview = (() => {
       + (window.ScanFiles ? ` <button type="button" class="btn btn-ghost btn-sm" data-rvdl="pdf" data-scan="${escapeHtml(rec.id)}">⬇ PDF đầy đủ</button>` : '')
       + (rec._cloudMsg ? ` <span class="error-text">${escapeHtml(rec._cloudMsg)}</span>` : '');
     $('#rvImgBody').innerHTML = pageBlock('Mặt 1', rec.frontBlob, rec.frontMime, p.urls, 1) +
-      (rec.backBlob ? pageBlock('Mặt 2 (xác nhận / chữ ký)', rec.backBlob, rec.backMime, p.urls, 2) : '<div class="rv-pg" data-page="2"><div class="rv-pg-label">Mặt 2</div><div class="sv-empty">Phiếu không có mặt 2.</div></div>');
+      (rec.backBlob ? pageBlock('Mặt 2 (xác nhận / chữ ký)', rec.backBlob, rec.backMime, p.urls, 2) : '<div class="rv-pg" data-page="2"><div class="rv-pg-label">Mặt 2</div><div class="sv-empty">Phiếu không có mặt 2.</div></div>') +
+      (rec.extraBlobs || []).map((x, i) => (x && x.blob) ? pageBlock('Mặt ' + (i + 3), x.blob, x.mime, p.urls, i + 3) : '').join('');   // mặt 3..N
     markProg(600);                                      // nạp ảnh mới: mọi dịch chuyển cuộn lúc này không tính là người dùng kéo
     applyPaneView();
     drawBoxes();
@@ -3518,6 +3901,85 @@ const ScanReview = (() => {
     rsSummary();
   }
 
+  /*QP:Q5-1*/ // Quét lại TỰ ĐỘNG (scan-audit.js gọi): GỘP kết quả mới vào CHÍNH phiếu cũ (giữ scanId).
+  // - Mục khớp theo biển số rồi theo vị trí (rsMatch). Ô người dùng đã sửa tay / đã khóa → KHÔNG đụng.
+  // - Mục đã áp dụng lên Sheet / đã kiểm xong → KHÔNG đổi giá trị; chỉ ghi «đề xuất» (it.rescanProposal) + cờ cần xem.
+  // - Ô mới trống không xóa giá trị cũ. Xe mới tìm thấy → thêm mục mới (có cờ cần xem). Mục không còn thấy → giữ nguyên.
+  async function rescanMerge(scanId, res, opts) {
+    opts = opts || {};
+    const rec0 = await DB.dbGet(ST_SCANS, scanId); if (!rec0) throw new Error('Không tìm thấy phiếu ' + scanId);
+    const ex = res && res.extracted; if (!ex || !Array.isArray(ex.vehicles)) throw new Error('Kết quả quét lại không hợp lệ');
+    const items = (await itemsByIndex('scanId', scanId)).map(normItem);
+    const vehicles = ex.vehicles, m = rsMatch(items, vehicles);
+    let changed = 0, proposals = 0; const plates = new Set(), oldIds = new Set(items.map(i => i.id));
+    for (const p of m.pairs) {
+      const it = p.it, nd = buildScanData(ex, p.v);
+      const prot = !!(it.done || it.review === 'da_kiem' || Object.keys(it.applied || {}).length);
+      const locked = (it.recheck && it.recheck.locked) || {};
+      const auto = [], prop = [];
+      for (const f of RS_FIELDS) {
+        if (f.k === 'bienSo') continue;
+        const oldV = rsRead(it.scanData, f.k), newV = rsRead(nd, f.k);
+        if (rsNorm(f.kind, newV) === '' || rsNorm(f.kind, oldV) === rsNorm(f.kind, newV)) continue;
+        if (rsHand(it, f.k) != null || locked[f.k]) continue;
+        (prot ? prop : auto).push({ f, oldV, newV });
+      }
+      await track(it, 'Quét lại tự động', async () => {
+        for (const a of auto) { RS_SET[a.f.k](it.scanData, nd); rsReset(it, a.f.k); changed++; }
+        if (auto.length) it.imgChecked = false;
+        if (p.v.stt) { it.stt = Number(p.v.stt) || it.stt; it.slotX = it.stt; }
+        if (p.v.page) it.page = Number(p.v.page) || it.page || 1;
+        if (prop.length) {
+          it.rescanProposal = { at: Date.now(), fields: prop.map(x => ({ k: x.f.k, label: x.f.label, oldV: x.oldV, newV: x.newV })) };
+          it.needsReview = true; it.recheck = it.recheck || { uncertain: {}, locked: {}, lan: 0 }; it.recheck.uncertain = it.recheck.uncertain || {};
+          it.recheck.uncertain.trangThaiXe = it.recheck.uncertain.trangThaiXe || ('Quét lại tự động thấy khác: ' + prop.map(x => x.f.label).join(', '));
+          proposals++;
+        }
+        if (auto.length) await persistEdit(it); else await saveItem(it);
+      });
+      plates.add(it.bienSo);
+    }
+    // Xe mới (không ghép được với mục cũ): tạo mục bằng hàm có sẵn (idempotent, không ghi đè)
+    const idxNew = new Set(m.newVs.map(o => o.idx));
+    if (idxNew.size) {
+      const exNew = (Array.isArray(ex.docs) && ex.docs.length)
+        ? Object.assign({}, ex, { docs: ex.docs.map(d => Object.assign({}, d, { vehicles: (d.vehicles || []).filter((_, i) => idxNew.has(i)) })) })
+        : Object.assign({}, ex, { vehicles: m.newVs.map(o => o.v) });
+      await createItemsForScan(scanId, exNew, rec0.sheetLabel || ((rec0.fileName || '') + (rec0.pagesDesc ? ' · ' + rec0.pagesDesc : '')));
+    }
+    const all = await itemsByIndex('scanId', scanId);
+    const total = Math.max(vehicles.length, ...vehicles.map(v => Number(v.stt) || 0));
+    let added = 0;
+    for (const it of all) {
+      let dirty = false;
+      if (!oldIds.has(it.id)) {
+        added++; it.needsReview = true; it.recheck = it.recheck || { uncertain: {}, locked: {}, lan: 0 }; it.recheck.uncertain = it.recheck.uncertain || {};
+        it.recheck.uncertain.trangThaiXe = it.recheck.uncertain.trangThaiXe || 'Xe MỚI tìm thấy khi quét lại tự động — kiểm tra'; dirty = true; plates.add(it.bienSo);
+      }
+      if (it.slotTotal !== total) { it.slotTotal = total; dirty = true; }
+      if (dirty) await saveItem(it);
+    }
+    // Lưu kết quả vào CHÍNH bản ghi phiếu (giữ bản trước)
+    const rec = (await DB.dbGet(ST_SCANS, scanId)) || rec0;
+    rec.prevExtracted = rec.extracted || null; rec.extracted = ex; rec.geminiRaw = res.geminiRaw;
+    if (res.meta) { rec.model = res.meta.model || rec.model; rec.keyLabel = res.meta.keyLabel || rec.keyLabel; }
+    if (res.rotated && (res.rotated.front || res.rotated.back) && res.front) {
+      rec.frontBlob = res.front.blob; rec.frontMime = res.front.mime;
+      if (res.back) { rec.backBlob = res.back.blob; rec.backMime = res.back.mime; }
+      rec.rotated = res.rotated;
+    }
+    if (opts.extraBlobs && opts.extraBlobs.length) rec.extraBlobs = opts.extraBlobs;
+    if (opts.backBlob && !rec.backBlob) { rec.backBlob = opts.backBlob; rec.backMime = opts.backMime || opts.backBlob.type; }
+    if (opts.pagesDesc) rec.pagesDesc = opts.pagesDesc;
+    rec.pages = opts.pageCount || (1 + (rec.backBlob ? 1 : 0) + (rec.extraBlobs || []).length);
+    rec.rescanAt = Date.now(); rec.rescanCount = (rec.rescanCount || 0) + 1; rec.auditAt = Date.now();
+    await DB.dbPut(ST_SCANS, rec);
+    try { if (window.ScanSync && ScanSync.touch) ScanSync.touch(scanId); } catch (e) { /* bỏ qua */ }
+    for (const pl of plates) if (pl) { try { await recomputeLink(pl); } catch (e) { /* bỏ qua */ } }
+    try { R.items = (await DB.dbGetAll(ST_ITEMS)).map(normItem); refreshMainTable(); } catch (e) { /* bỏ qua */ }
+    return { matched: m.pairs.length, changed, proposals, added, lost: m.lost.length, vehicles: vehicles.length };
+  }
+
   // Áp dụng: auto = true → dùng mới cho mọi ô khác (trừ ô sửa tay / biển số) + thêm mọi xe mới
   async function rsApply(auto) {
     const x = RS.ctx; if (!x) return;
@@ -3754,7 +4216,7 @@ const ScanReview = (() => {
     window.ScanReviewAI.findSimilarPlates = findSimilarPlates;
     
   }
-  return { backfillChecker, reloadPrefs, open, openForPlate, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge,
+  return { backfillChecker, reloadPrefs, open, openForPlate, openViewer, linkMap, computeView, createItemsForScan, backfillItems, purgeScanLocal, afterRemoteMerge, rescanMerge,
     // Mở thêm cho scan-recheck.js dùng (trước đây thiếu → scan-recheck không chạy được):
     applyFoundItem, applyViews, saveItem, normItem, goToItem, setFocus, renderReview, record, clone, markFieldsChecked,
     // Cho scan-recheck.js: hoàn tác được cả cột Sheet, gỡ dấu AI cũ, khóa trường, nạp lại danh sách mục sau khi AI ghi ngầm

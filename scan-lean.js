@@ -34,7 +34,7 @@ const ScanLean = (() => {
     if ('frontBlob' in v || 'backBlob' in v || 'extraBlobs' in v) {
       special = true;
       n += blobSize(v.frontBlob) + blobSize(v.backBlob);
-      if (Array.isArray(v.extraBlobs)) for (const b of v.extraBlobs) n += blobSize(b);
+      if (Array.isArray(v.extraBlobs)) for (const b of v.extraBlobs) n += blobSize(b && b.blob ? b.blob : b);   /*QP:Q4-2*/ // extraBlobs là [{blob,mime}]
     }
     if (typeof v.geminiRaw === 'string') { special = true; n += v.geminiRaw.length * 2; }
     if (v.extracted) { special = true; n += typeof v.extracted === 'string' ? v.extracted.length * 2 : jsonSize(v.extracted); }

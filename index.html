@@ -215,17 +215,26 @@
         <input id="scanFiles" type="file" multiple accept="application/pdf,.pdf,image/jpeg,image/png,image/webp">
       </label>
 
-      <div class="scan-options">
-        <label class="hint-label" for="scanPagesPerSheet" style="margin:0">Mỗi tờ gồm:</label>
-        <select id="scanPagesPerSheet" class="tpl-input" style="width:auto">
-          <option value="2">2 mặt / phiếu (mặc định: mặt trước + mặt sau)</option>
-          <option value="1">1 mặt / phiếu (mỗi trang là 1 tờ)</option>
+            <div class="scan-options">
+        <label class="chk-inline" style="margin:0" title="AI tự đọc từng trang để biết phiếu bắt đầu / kết thúc ở đâu. Bật cái này thì ô chọn số mặt bên cạnh sẽ bị khóa (không dùng đến).">
+          <input type="checkbox" id="scanPpsAuto" checked> 🤖 Tự động nhận diện số trang / phiếu
+        </label>
+        <label class="hint-label" for="scanPagesPerSheet" style="margin:0">hoặc cố định:</label>
+        <select id="scanPagesPerSheet" class="tpl-input" style="width:auto" disabled>
+          <option value="2" selected>2 mặt / phiếu (mặt trước + mặt sau)</option>
+          <option value="1">1 trang / phiếu (mỗi trang là 1 tờ)</option>
           <option value="3">3 mặt / phiếu</option>
           <option value="4">4 mặt / phiếu</option>
           <option value="5">5 mặt / phiếu</option>
           <option value="6">6 mặt / phiếu</option>
           <option value="7">7 mặt / phiếu</option>
           <option value="8">8 mặt / phiếu</option>
+          <option value="9">9 mặt / phiếu</option>
+          <option value="10">10 mặt / phiếu</option>
+          <option value="12">12 mặt / phiếu</option>
+          <option value="16">16 mặt / phiếu</option>
+          <option value="20">20 mặt / phiếu</option>
+          <option value="24">24 mặt / phiếu</option>
         </select>
         <label class="hint-label" for="scanPageFrom" style="margin:0">Quét PDF từ trang:</label>
         <input id="scanPageFrom" type="number" min="1" step="1" class="tpl-input" style="width:80px" placeholder="đầu">
@@ -816,7 +825,8 @@
 <script src="scan-store.js?v=20261013"></script>
 <script src="scan-disk.js?v=20261013"></script>
 <script src="scan-sheet.js?v=20261021"></script>
-<script src="scan-lean?v=20261122.js"></script>
+<script src="scan-lean.js?v=20261122"></script>
+<script src="scan-audit.js?v=20261124"></script>
 <script src="layout.js?v=20261013"></script>
 <script src="bien-ban.js?v=20261103"></script>
 <script src="daily-report.js?v=20261110"></script>
