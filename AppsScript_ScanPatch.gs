@@ -79,7 +79,7 @@ function scanName_(scanId, kind) { return String(scanId).replace(/[^\w\-]/g, '')
 function scanFile_(folder, name) { var it = folder.getFilesByName(name); return it.hasNext() ? it.next() : null; }
 
 function scanPut_(p) {
-  if (!p || !p.scanId || !/^(front|back|meta|keys)$/.test(p.kind)) return { ok: false, error: 'Thiếu scanId / kind' };
+  if (!p || !p.scanId || !/^(front|back|meta|keys|p\d{1,2})$/.test(p.kind)) return { ok: false, error: 'Thiếu scanId / kind' };   /*NM:P5-15*/ // p3, p4… = mặt 3..N
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var folder = scanFolder_(), name = scanName_(p.scanId, p.kind), f = scanFile_(folder, name);
@@ -127,7 +127,7 @@ function scanGetBatch_(p) {
   var folder = scanFolder_(), out = [], total = 0, LIMIT = 6e6;
   (p.items || []).forEach(function (x) {
     if (out.length && total > LIMIT) return;
-    if (!x || !/^(front|back)$/.test(x.kind)) return;
+    if (!x || !/^(front|back|p\d{1,2})$/.test(x.kind)) return;   /*NM:P5-16*/
     var f = scanFile_(folder, scanName_(x.scanId, x.kind));
     if (!f) { out.push({ scanId: x.scanId, kind: x.kind, ok: false, error: 'Không thấy file trên Drive' }); return; }
     var b64 = Utilities.base64Encode(f.getBlob().getBytes()); total += b64.length;
@@ -142,7 +142,7 @@ function scanGetBatch_(p) {
 function scanInventory_() {
   var it = scanFolder_().getFiles(), files = [], gone = [], m;
   while (it.hasNext()) {
-    var f = it.next(); m = /^(.+)__(front|back|meta|keys|gone)$/.exec(f.getName()); if (!m) continue;
+    var f = it.next(); m = /^(.+)__(front|back|meta|keys|gone|p\d{1,2})$/.exec(f.getName()); if (!m) continue;   /*NM:P5-17*/
     if (m[2] === 'gone') { gone.push(m[1]); continue; }
     if (m[2] === 'keys') continue;
     files.push({ scanId: m[1], kind: m[2], size: f.getSize(), updated: f.getLastUpdated().getTime(), plates: String(f.getDescription() || '').replace(/^Biển số:\s*/, '') });
@@ -159,6 +159,10 @@ function scanDelete_(p) {
       var it = folder.getFilesByName(scanName_(p.scanId, k));
       while (it.hasNext()) { it.next().setTrashed(true); n++; }
     });
+    if (kinds.indexOf('meta') >= 0) {   /*NM:P5-18*/ // xóa cả phiếu → dọn mặt 3..N
+      var pre = String(p.scanId).replace(/[^\w\-]/g, '') + '__p', it2 = folder.searchFiles("title contains '" + pre + "'");
+      while (it2.hasNext()) { var f2 = it2.next(); if (new RegExp('^' + pre + '\\d{1,2}$').test(f2.getName())) { f2.setTrashed(true); n++; } }
+    }
     if (kinds.indexOf('meta') >= 0 && !scanFile_(folder, scanName_(p.scanId, 'gone'))) folder.createFile(scanName_(p.scanId, 'gone'), String(Date.now()), 'text/plain');
     return { ok: true, deleted: n };
   } finally { lock.releaseLock(); }
@@ -173,6 +177,7 @@ function scanTextGet_(p) {
    ========================================================================= */
 function scanDispatch_(d) {
   if (!d || !d.action) return null;
+  if (typeof ur_dispatch_ === 'function') { var ur = ur_dispatch_(d); if (ur) return ur; }   /*NM:P5-19*/
   switch (d.action) {
     case 'scanPing': return { ok: true, version: 9, actions: [
       'scanPut','scanGet','scanList','scanGetBatch','scanMetaBatch','scanInventory','scanDelete','scanTextGet',
@@ -415,39 +420,6 @@ function scanSelfTest() {
     if (diag && diag.ok) {
       say(true, 'AV: cột ' + diag.avColLetter + ' (index ' + diag.avCol + '), tiêu đề = "' + (diag.avHeader || '(trống)') + '", plateCol = "' + diag.plateHeader + '".');
       var validHeader = !diag.avHeader || /^(trang thai xe chua kiem|trang thai kiem|trang thai kiem phieu|trang thai kiem tra|av)$/i
-(1) Hàm đã sửa/thêm theo file
-File	Hàm
-index.html	bỏ scan-review-ai.js, thêm ?v cho scan-recheck.js
-scan-review-av.js	computeAV (xóa đoạn thừa), handler recheck (sửa cú pháp, gọi recheckOne), autoRecheckPending
-scan.js	geminiGenerate (thêm priority:'low'), return (thêm isBusy)
-scan-review.js	HÀM MỚI stripAiTag, lockUser; sửa applyFoundItem, applyViews, quickSign, onPartyApply, onCfApply, ROW_KEYS, return (export rowSnap/stripAiTag/lockUser/reloadItems)
-scan-recheck.js	refreshMainTable, aiCompareItem, aiApplyCertain (viết lại), _writeUncertainMeta, _runRecheckQueueInner (viết lại); HÀM MỚI recheckOne, resumeIfPending, refreshReviewUi, helper tiến độ IndexedDB, applyManualView, ensureManualObserver; sửa goToNextUncertain, bindRecheckUI, ScanReviewAVFilter, window.ScanRecheck
-app.js	c08StripTrace
-AppsScript_ScanPatch.gs	AV_HEADER, syncAvStatus_, scanSelfTest
-
-Không đổi chữ ký hay giá trị trả về của hàm nào đang được nơi khác gọi. Chỉ thêm tham số tùy chọn priority và thêm khóa export. Không đổi tên ID/class nào.
-
-(2) THIẾU HÀM, chưa làm được phần nào
-Thiếu	Ảnh hưởng
-AppsScript_UpdateRow.gs (hàm ur_*, doPost thật)	Chưa kiểm được việc ghi cột AV có nằm đúng cột 48 không, và có bỏ qua tiêu đề khác không.
-scan-review.css, scan-review-ui.css	Chưa kiểm class .rv-manual, .rv-unc-hide có bị CSS khác đè không (đã thêm style nội tuyến !important).
-PHẦN 8 AppsScript_ScanPatch.gs (hàng đợi server)	Không sửa, khuyên không cài trigger: dùng key riêng, model cũ, chỉ so xe đầu tiên của phiếu, không có quy tắc “chắc chắn” và không khóa trường. Chạy ngầm trong trình duyệt (đã sửa ở trên) là đủ.
-(3) 5 bước tự kiểm tra
-Nạp file: mở web, bấm F12 → Console. Không được còn SyntaxError, phải thấy [scan-review-av] bootstrap xong. Gõ ScanRecheck.recheckOne phải ra function. Mở <URL/exec>?action=syncAvStatusDiagnose và scanSelfTest phải ra “MỌI THỨ SẴN SÀNG”.
-Yêu cầu 1 và 2 (ghi như người dùng): bấm “🔁 Kiểm lại tất cả chưa kiểm (AI)” với 3 phiếu thử.
-Phiếu đúng: Ghi chú có AI kiểm lần 1: xác định đúng (dd/mm/yyyy), ô 🖼 được tick, cột AV có giá trị.
-Bấm “Quay lại bước trước”: Sheet trả về giá trị cũ.
-Chạy lần 2: dấu AI không bị nhân đôi.
-Yêu cầu 3 (nghi vấn, khóa, nhảy tiếp):
-Trường nghi vấn không bị ghi. Có huy hiệu 🤖, và bộ lọc “Còn nghi vấn” lọc đúng.
-Bấm “⚖ Kiểm thủ công mục nghi vấn”: mở đúng thẻ và ảnh, chỉ còn trường nghi vấn.
-Bấm “✅ Google Sheet đúng” hoặc “Dữ liệu từ phiếu scan đúng”: trường bị khóa (lọc “Đã khoá (bạn xác nhận)” thấy xe này).
-Hết trường nghi vấn thì tự nhảy sang xe kế.
-Chạy lại AI: trường đã khóa không bị đọc lại.
-Yêu cầu 4 (ngầm, ưu tiên thấp, lưu tiến độ):
-Bắt đầu quét 1 file khi AI đang chạy: dòng chân trang báo “Tạm dừng: người dùng đang bận”, và log có “Nhường hàng đợi quét”.
-Giữa chừng bấm F5: sau ~25 giây tự chạy tiếp, không gửi lại các phiếu đã kiểm. Bấm nút khi đang chạy sẽ hỏi dừng; dừng xong thì F5 không tự chạy.
-Yêu cầu 5 (không phá chức năng cũ): thử bằng tay “Áp dụng xe này”, “Quay lại bước trước”, “Rà soát với Google Sheet thật”, quét phiếu mới. Mở bảng C08 và xuất file, cột “Kết quả rà soát” không được chứa chữ “AI kiểm lần”.
         .test(String(diag.avHeader).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim());
       say(validHeader, 'Tiêu đề AV hợp lệ (trống hoặc "Trạng thái kiểm").' + (validHeader ? '' : ' → đổi AV1 thành "Trạng thái kiểm" hoặc xoá trắng.'));
     } else {

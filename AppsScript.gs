@@ -24,7 +24,7 @@
  * ============================================================================
  */
 
-const SHEET_NAME = 'Data';          // Đổi tên tab chứa dữ liệu xe cho đúng
+const SHEET_NAME = 'Tong hop';          // Đổi tên tab chứa dữ liệu xe cho đúng
 const SETTINGS_SHEET_NAME = 'Settings'; // Tab lưu mẫu Bản cam kết (tự tạo nếu chưa có)
 
 /* --------------------------- ĐIỂM VÀO (ENTRY POINTS) --------------------------- */
@@ -32,18 +32,33 @@ const SETTINGS_SHEET_NAME = 'Settings'; // Tab lưu mẫu Bản cam kết (tự 
 function doGet(e) {
   try {
     const action = (e && e.parameter && e.parameter.action) || 'read';
+    // Báo cáo C08: đọc nguyên 1 sheet theo tên (vd 'DL PC08 do'). Chỉ đọc, không ghi.
+    if (action === 'readSheet') return c08ReadSheetResponse_(e.parameter.sheet);
     if (action === 'read') return readData_();
     if (action === 'settings') return readSettings_();
+    // ĐƯỜNG GHI DỰ PHÒNG QUA GET: web gửi ?action=updateRow&data=<JSON>. doGet là hàm DUY NHẤT nên không bị doPost trùng tên che mất.
+    if (action === 'updateRow' || action === 'appendRow' || action === 'saveSettings' || action === 'urPing') {
+      if (typeof ur_handleGet_ === 'function') return jsonResponse_(ur_handleGet_(e.parameter));   // bản mới (AppsScript_UpdateRow.gs bản 10)
+      const body = JSON.parse((e.parameter && e.parameter.data) || '{}');                          // chưa có file mới: dùng hàm cũ ngay trong file này
+      if (action === 'updateRow') return updateRow_(body);
+      if (action === 'appendRow') return appendRow_(body);
+      if (action === 'saveSettings') return saveSettings_(body);
+      return jsonResponse_({ ok: true, urVersion: 0 });
+    }
     return jsonResponse_({ ok: false, error: 'Unknown GET action: ' + action });
   } catch (err) {
     return jsonResponse_({ ok: false, error: String(err) });
   }
 }
 
-function doPost(e) {
+/* ĐÃ ĐỔI TÊN: doPost duy nhất nay nằm ở AppsScript_UpdateRow.gs (dự án chỉ được có 1 doPost). Hàm này giữ lại làm dự phòng. */
+function doPostOld1_(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const action = body.action;
+    // Các action của phần Quét phiếu (scanPut, scanOrphanUpsert, scanOrphanDelete...)
+    const sr = scanDispatch_(body);
+    if (sr) return jsonResponse_(sr);
     if (action === 'updateRow') return updateRow_(body);
     if (action === 'saveSettings') return saveSettings_(body);
     if (action === 'appendRow') return appendRow_(body);
@@ -94,6 +109,23 @@ function updateRow_(body) {
   }
 
   const updates = body.updates || {};
+  // ---- Cột AV «Trạng thái xe chưa kiểm» luôn nằm ĐÚNG cột AV (số 48) ----
+  const AV_HEADER = 'Trạng thái xe chưa kiểm', AV_COL = 48;
+  const warns = [];
+  if (Object.prototype.hasOwnProperty.call(updates, AV_HEADER)) {
+    const at = headers.indexOf(AV_HEADER);
+    if (at === -1) {
+      const cur = String(headers[AV_COL - 1] == null ? '' : headers[AV_COL - 1]).trim();
+      // AV1 đang là tiêu đề KHÁC -> không ghi đè, báo lỗi rõ để web hiện cho người dùng
+      if (cur) return jsonResponse_({ ok: false, error: 'Ô AV1 đang là tiêu đề khác («' + cur + '») — không ghi đè. Đổi/xóa tiêu đề đó rồi thử lại.' });
+      if (sh.getMaxColumns() < AV_COL) sh.insertColumnsAfter(sh.getMaxColumns(), AV_COL - sh.getMaxColumns());
+      sh.getRange(1, AV_COL).setValue(AV_HEADER);
+      while (headers.length < AV_COL) headers.push('');
+      headers[AV_COL - 1] = AV_HEADER;
+    } else if (at !== AV_COL - 1) {
+      warns.push('Cột «' + AV_HEADER + '» đang ở cột số ' + (at + 1) + ', không phải AV — vẫn ghi vào cột đó.');
+    }
+  }
   Object.keys(updates).forEach(function (colName) {
     let colIdx = headers.indexOf(colName);
     if (colIdx === -1) {
@@ -105,7 +137,7 @@ function updateRow_(body) {
     sh.getRange(rowIndex + 1, colIdx + 1).setValue(updates[colName]);
   });
 
-  return jsonResponse_({ ok: true, rowIndex: rowIndex + 1 });
+  return jsonResponse_({ ok: true, rowIndex: rowIndex + 1, warning: warns.join('; ') });
 }
 
 /** Thêm 1 dòng mới vào cuối Sheet. body: { row: { 'Biển số': '...', ... } } */
@@ -147,4 +179,43 @@ function getDataSheet_() {
 
 function jsonResponse_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/* =========================================================================
+   AppsScript_C08Patch.gs — thêm action «readSheet» cho báo cáo C08.
+   Cho phép web đọc NGUYÊN 1 sheet bất kỳ theo tên (dùng để đọc "DL PC08 do").
+   Chỉ ĐỌC, không ghi gì. Web tự dò dòng tiêu đề + ghép cột nên không cần sửa gì thêm.
+
+   CÁCH GẮN (1 lần):
+   1) Dán toàn bộ file này vào cuối dự án Apps Script (không trùng tên hàm nào đang có).
+   2) Trong hàm doGet(e) HIỆN CÓ, thêm 1 dòng ĐẦU TIÊN (trước khi xử lý action 'read'):
+        if (e && e.parameter && e.parameter.action === 'readSheet') return c08ReadSheetResponse_(e.parameter.sheet);
+   3) Triển khai → Quản lý bản triển khai → ✏️ → Phiên bản mới → Triển khai.
+   ========================================================================= */
+
+// Chuẩn hoá tên sheet để tìm "gần đúng" (bỏ dấu, viết thường, bỏ khoảng trắng thừa):
+// "DL PC08 do" khớp cả "DL PC08 đỏ", "dl pc08 do ".
+function c08NormName_(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// Trả về ContentService JSON: { ok:true, values:[[...],...] } hoặc { ok:false, error }.
+// values = toàn bộ vùng dữ liệu, dạng chữ hiển thị (giữ nguyên số 0 đầu của CCCD, số khung...).
+function c08ReadSheetResponse_(sheetName) {
+  var out;
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sh = ss.getSheetByName(sheetName);
+    if (!sh) {
+      var want = c08NormName_(sheetName);
+      var all = ss.getSheets();
+      for (var i = 0; i < all.length; i++) { if (c08NormName_(all[i].getName()) === want) { sh = all[i]; break; } }
+    }
+    out = sh ? { ok: true, sheet: sh.getName(), values: sh.getDataRange().getDisplayValues() }
+             : { ok: false, error: 'Không thấy sheet: ' + sheetName };
+  } catch (err) {
+    out = { ok: false, error: String(err) };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
 }

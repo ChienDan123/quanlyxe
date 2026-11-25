@@ -123,6 +123,8 @@
     if (!a) return { state: 'empty' };
     const aN = norm(a), bN = norm(b);
     if (aN && bN && (aN === bN || stripDa(aN) === stripDa(bN))) return { state: 'same' };
+    /*NM:R3-2*/ // dùng chung bảng STATUS_MAP: hai cách viết cùng ra 1 trạng thái chuẩn thì coi là khớp
+    { const api = root.ScanStatusApi; if (api && api.canonicalStatus) { const ca = api.canonicalStatus(a), cb = api.canonicalStatus(b); if (ca && cb && ca === cb) return { state: 'same' }; } }
     const list = (typeof STATUS_OPTIONS !== 'undefined') ? STATUS_OPTIONS : [];
     const known = list.some(o => norm(o) === aN);
     const unk = known ? '' : ' · «' + a + '» chưa có trong danh sách Trạng thái xe — bấm ➕ để thêm';

@@ -118,7 +118,8 @@ const ScanSync = (() => {
     return out;
   }
   const hasBlobs = (r) => r.status === 'done' && !r.isTest && !!r.frontBlob;
-  const blobsUp = (r) => !!(r.cloud && r.cloud.frontId && (!r.backBlob || r.cloud.backId));
+  const blobsUp = (r) => !!(r.cloud && r.cloud.frontId && (!r.backBlob || r.cloud.backId)
+    && (r.cloud.extraErr || (r.extraBlobs || []).every((x, i) => !x || !x.blob || (r.cloud.extraIds && r.cloud.extraIds[i]))));   /*NM:P5-9*/ // gồm cả mặt ≥3 (extraErr: server không nhận → thôi thử lại liên tục)
 
   /* ---------------- TRẠNG THÁI HIỂN THỊ ---------------- */
   async function refreshStatus() {
@@ -144,6 +145,9 @@ const ScanSync = (() => {
       hasFront: !!(rec.cloud && rec.cloud.frontId), hasBack: !!(rec.cloud && rec.cloud.backId),
       matchedBienSo: rec.matchedBienSo || [], extracted: rec.extracted, items,
       imgRev: rec.imgRev || {}, rotChecked: !!rec.rotChecked, delItems: rec.delItems || {},   // xoay ảnh (scan-rotate.js): mốc từng mặt + đã kiểm tra hướng
+      pagesHash: rec.pagesHash || '', pageHashes: rec.pageHashes || [], pageCount: rec.pageCount || rec.pages || 0, layout: rec.layout || null,   /*NM:P5-5*/
+      extraMimes: (rec.extraBlobs || []).map(x => (x && x.mime) || 'image/jpeg'),
+      extraUp: ((rec.cloud && rec.cloud.extraIds) || []).map(Boolean),   /*NM:P5-12*/ // mặt ≥3 nào đã lên Drive
     };
   }
   // GỘP TRƯỚC KHI GHI ĐÈ (last-write-wins theo từng mục): nếu meta online MỚI hơn bản ta đã biết (máy/tab khác vừa sửa)
@@ -181,6 +185,25 @@ const ScanSync = (() => {
       if (dirty) delete rec.imgDirty[side];
       await DB.dbPut(ST_SCANS, rec);          // lưu ngay từng bước: đứt mạng giữa chừng lần sau chỉ làm tiếp phần còn thiếu
     }
+    { /*NM:P5-11*/ // mặt 3..N → kind 'p3','p4'…; lỗi do server chưa nhận kind này KHÔNG chặn meta/mặt 1–2
+      const ex = rec.extraBlobs || []; rec.cloud.extraIds = rec.cloud.extraIds || [];
+      for (let i = 0; i < ex.length; i++) {
+        const x = ex[i], key = 'p' + (i + 3), dirty = !!(rec.imgDirty && rec.imgDirty[key]);
+        if (!x || !x.blob || (rec.cloud.extraIds[i] && !dirty)) continue;
+        try {
+          const b64 = await blobToB64(x.blob);
+          if (b64.length > MAX_B64) throw new Error('Ảnh quá lớn để lưu online (' + Math.round(b64.length / 1e6) + 'MB).');
+          const rr = await call({ action: 'scanPut', scanId, kind: key, mime: x.mime || x.blob.type, b64, plates });
+          rec.cloud.extraIds[i] = rr.fileId; delete rec.cloud.extraErr;
+          if (dirty) delete rec.imgDirty[key];
+          await DB.dbPut(ST_SCANS, rec);
+        } catch (e) {
+          const msg = String((e && e.message) || e);
+          if ((e && e.code === 'NOACTION') || isPerScanError(e) || /kind|không hỗ trợ|unsupported|invalid/i.test(msg)) { rec.cloud.extraErr = msg.slice(0, 120); await DB.dbPut(ST_SCANS, rec); break; }
+          throw e;   // lỗi mạng/quota: dừng cả lượt như cũ
+        }
+      }
+    }
     const r = await call({ action: 'scanPut', scanId, kind: 'meta', mime: 'application/json', text: JSON.stringify(metaOf(rec, items)), plates });
     rec.cloud.metaAt = r.updated;             // nhớ mốc để lần kéo sau không tải lại chính bản mình vừa đẩy
     await DB.dbPut(ST_SCANS, rec);
@@ -200,7 +223,7 @@ const ScanSync = (() => {
       if (!Y.pulled || Date.now() - Y.pullAt > PULL_EVERY) { await pull(); Y.pulled = true; Y.pullAt = Date.now(); }
       // Việc còn dang dở: (1) phiếu ảnh chưa lên / ảnh vừa xoay, (2) phiếu đã «xong» mà CHƯA có meta online (đẩy ảnh xong nhưng đứt trước khi ghi meta),
       // (3) danh sách thay đổi chưa đẩy đã nhớ bền từ phiên trước
-      (await forEachScan(r => ((hasBlobs(r) && (!blobsUp(r) || (r.imgDirty && (r.imgDirty.front || r.imgDirty.back))))
+      (await forEachScan(r => ((hasBlobs(r) && (!blobsUp(r) || (r.imgDirty && Object.keys(r.imgDirty).some(k => r.imgDirty[k]))))   /*NM:P5-10*/
         || (r.status === 'done' && !r.isTest && !(r.cloud && r.cloud.metaAt) && (r.frontBlob || r.cloud))) ? r.id : null)).forEach(id => Y.touched.add(id));
       loadDirty().forEach(id => Y.touched.add(id));
       if (!Y.reconciled) {            // 1 lần mỗi lần mở trang: tìm mục sửa SAU lần đẩy cuối (thay đổi cũ chưa từng được ghi nhận là «cần đẩy»)
@@ -268,9 +291,19 @@ const ScanSync = (() => {
     if (!rec) {   // phiếu mới từ máy khác: tạo bản ghi chưa có ảnh (ảnh tải khi mở xem)
       rec = { id: m.scanId, timestamp: m.timestamp, source: 'cloud', isTest: false, fileName: m.fileName, pagesDesc: m.pagesDesc, sheetLabel: m.sheetLabel,
         frontBlob: null, backBlob: null, frontMime: m.frontMime, backMime: m.backMime, frontHash: m.frontHash, backBlank: !!m.backBlank,
-        status: 'done', matchedBienSo: m.matchedBienSo || [], extracted: m.extracted, cloud: {} };
+        status: 'done', matchedBienSo: m.matchedBienSo || [], extracted: m.extracted, cloud: {},
+        pagesHash: m.pagesHash || '', pageHashes: m.pageHashes || [], pageCount: m.pageCount || 0, layout: m.layout || null };   /*NM:P5-7*/
     }
     rec.cloud = rec.cloud || {};
+    /*NM:P5-6*/ // nhận dấu băm cả bộ + bố cục + số mặt từ máy khác (không ghi đè nếu máy này đã có)
+    if (m.pagesHash && !rec.pagesHash) rec.pagesHash = m.pagesHash;
+    if (m.pageHashes && m.pageHashes.length && !(rec.pageHashes && rec.pageHashes.length)) rec.pageHashes = m.pageHashes;
+    if (m.pageCount && !rec.pageCount) rec.pageCount = m.pageCount;
+    if (m.layout && !rec.layout) rec.layout = m.layout;
+    if (Array.isArray(m.extraUp) && m.extraUp.some(Boolean)) {   /*NM:P5-13*/ // máy khác báo có mặt ≥3 trên Drive → giữ chỗ để ensureBlobs tải khi xem
+      rec.cloud.extraIds = rec.cloud.extraIds || [];
+      m.extraUp.forEach((u, i) => { if (u && !rec.cloud.extraIds[i]) rec.cloud.extraIds[i] = 'remote'; });
+    }
     if (m.hasFront && !rec.cloud.frontId) rec.cloud.frontId = 'remote';
     if (m.hasBack && !rec.cloud.backId) rec.cloud.backId = 'remote';
     if (!m.hasBack && rec.cloud.backId === 'remote') delete rec.cloud.backId;     // mặt 2 đã xóa ở máy khác (ô giữ chỗ chưa tải)
@@ -417,12 +450,27 @@ const ScanSync = (() => {
     if (inflight.has(rec.id)) return inflight.get(rec.id);
     const p = (async () => {
       rec._cloudMsg = '';
-      let need = ['front', 'back'].filter(sd => !rec[sd + 'Blob'] && rec.cloud[sd + 'Id']);
-      if (!need.length) return rec;
+      let need = ['front', 'back'].filter(sd => !rec[sd + 'Blob'] && rec.cloud[sd + 'Id']);   /*NM:P5-14*/ // không thoát sớm: mặt ≥3 vẫn phải được xét bên dưới
       const dk = await fromDisk(rec.id, need);                    // có trong thư mục trên máy -> dùng luôn, khỏi tải Drive
       Object.keys(dk).forEach(sd => { rec[sd + 'Blob'] = dk[sd].blob; rec[sd + 'Mime'] = dk[sd].mime || rec[sd + 'Mime']; });
       if (Object.keys(dk).length) await storeBlobs(rec.id, dk, true);
       need = need.filter(sd => !dk[sd]);
+      { /*NM:P5-8*/ // mặt 3..N: đọc từ thư mục ổ đĩa (p3, p4…) nếu có; tải Drive do fetchFiles nếu cloud.extraIds đã có
+        const ids = rec.cloud.extraIds || [];
+        rec.extraBlobs = rec.extraBlobs || [];
+        for (let i = 0; i < ids.length; i++) {
+          if (rec.extraBlobs[i] && rec.extraBlobs[i].blob) continue;
+          const g = await fromDisk(rec.id, ['p' + (i + 3)]);
+          if (g['p' + (i + 3)]) { rec.extraBlobs[i] = { blob: g['p' + (i + 3)].blob, mime: g['p' + (i + 3)].mime || 'image/jpeg' }; continue; }
+          if (!online()) continue;
+          try {
+            const { map } = await fetchFiles([{ id: rec.id, side: 'p' + (i + 3) }], true);
+            const x = map.get(rec.id + '|p' + (i + 3));
+            if (x) rec.extraBlobs[i] = { blob: x.blob, mime: x.mime || 'image/jpeg' };
+          } catch (e) { /* mặt phụ lỗi không chặn mặt 1–2 */ }
+        }
+        if (rec.extraBlobs.some(Boolean)) { try { await DB.dbPut(ST_SCANS, rec); } catch (e) { /* bỏ qua */ } }
+      }
       if (!need.length) return rec;
       if (!online()) { rec._cloudMsg = 'Ảnh phiếu đang lưu online — cần kết nối Apps Script (2 chiều) để tải về máy này.'; return rec; }
       try {

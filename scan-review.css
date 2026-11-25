@@ -92,8 +92,9 @@ textarea.rv-edit { resize: vertical; }
 .rv-pg-wrap > .rv-pg-img { width: 100%; }
 .rv-pg-img { width: calc(var(--z) * 1%); max-width: none; display: block; cursor: zoom-in; border: 1px solid #d1d5db; }
 .rv-pg-pdf { width: calc(var(--z) * 1%); height: 60vh; border: 0; }
-.rv-imgpane-body[data-mode="side1"] .rv-pg:nth-child(2) { display: none; }
-.rv-imgpane-body[data-mode="side2"] .rv-pg:nth-child(1) { display: none; }
+/*NM:P4-7*/ /* theo data-page, không theo thứ tự: chế độ «Mặt 1» chỉ hiện mặt 1; «Mặt 2» chỉ hiện mặt 2; mặt ≥3 chỉ hiện ở «Cả hai» */
+.rv-imgpane-body[data-mode="side1"] .rv-pg:not([data-page="1"]) { display: none; }
+.rv-imgpane-body[data-mode="side2"] .rv-pg:not([data-page="2"]) { display: none; }
 .rv-imgpane-actions { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 6px 8px; border-top: 1px solid #e5e7eb; background: #fafafa; }
 .rv-work.with-pane .rv-split-head { display: none; }
 .rv-work.with-pane .rv-row { grid-template-columns: 90px 1fr 1fr; }

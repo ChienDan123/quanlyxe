@@ -661,9 +661,9 @@ const ScanApp = (() => {
   }
 
   /* ---------------------------- 6. PROMPT + JSON SCHEMA ---------------------------- */
-  /*QUET-PHIEU:P1-1*/ const TINH_TRANG = ['dang_hoat_dong', 'da_ban_chua_sang_ten', 'ban_khong_ro_nguoi_su_dung', 'mat_cap', 'het_nien_han', 'mua_chua_sang_ten', 'khac', 'khong_ro'];
+  /*NM:P1-1*/ const TINH_TRANG = ['dang_hoat_dong', 'da_ban_chua_sang_ten', 'ban_khong_ro_nguoi_su_dung', 'ban_da_biet_nguoi_mua', 'mat_cap', 'het_nien_han', 'mua_chua_sang_ten', 'khac', 'khong_ro'];
   /*QUET-PHIEU:P1-1*/ const TINH_TRANG_LABEL = {
-    dang_hoat_dong: 'Đang hoạt động', da_ban_chua_sang_ten: 'Đã bán chưa sang tên', ban_khong_ro_nguoi_su_dung: 'Bán không rõ người sử dụng', mat_cap: 'Mất cắp',
+    dang_hoat_dong: 'Đang hoạt động', da_ban_chua_sang_ten: 'Đã bán chưa sang tên', ban_khong_ro_nguoi_su_dung: 'Bán không rõ người sử dụng', ban_da_biet_nguoi_mua: 'Bán, biết người mua', /*NM:P1-2*/ mat_cap: 'Mất cắp',
     het_nien_han: 'Hết niên hạn', mua_chua_sang_ten: 'Mua chưa sang tên', khac: 'Khác', khong_ro: 'Không rõ',
   };
   const S = 'STRING';
@@ -707,6 +707,8 @@ const ScanApp = (() => {
       cccd: { type: S },
       sdt: { type: S },
       ghiChuTay: { type: S },
+      chuPhieuLoai: { type: S, enum: ['ca_nhan', 'to_chuc'] },   /*NM:P3-1*/
+      daiDien: { type: 'OBJECT', properties: { ten: { type: S }, cccd: { type: S }, sdt: { type: S }, chucVu: { type: S } } },   /*NM:P3-1*/
       backHasContent: { type: 'BOOLEAN' },
       backNote: { type: S },
       truongKhongRo: { type: 'ARRAY', items: { type: S } },
@@ -738,7 +740,7 @@ QUY TẮC:
    - ghiChu: ghi chú riêng của xe đó (nếu có).
    - tenDKX: họ tên ghi ở ô «Tên trong ĐKX» của DÒNG XE đó (đây là CHỦ PHƯƠNG TIỆN thật sự). Dòng xe không ghi tên thì "" — TUYỆT ĐỐI không tự điền tên chủ hộ vào.
    - nguoiMuaSuDung: họ tên ghi ở dòng «Tên người mua / người sử dụng» ngay dưới của xe đó (người đang sử dụng / mua xe hiện tại). Không ghi thì "".
-3. chuHo: họ tên CHỦ PHIẾU / chủ hộ ở phần đầu phiếu (người khai). Người này có thể KHÔNG phải chủ xe — chủ xe của từng xe là tenDKX. Giữ nguyên dấu tiếng Việt. Nếu chủ phiếu là TỔ CHỨC (có «Tổ chức», «Mã số thuế», «Đại diện»): chuHo = TÊN TỔ CHỨC, cccd = MÃ SỐ THUẾ; họ tên/CCCD/SĐT/chức vụ người đại diện ghi vào ghiChuTay, KHÔNG làm chủ xe.
+3. chuHo: họ tên CHỦ PHIẾU / chủ hộ ở phần đầu phiếu (người khai). Người này có thể KHÔNG phải chủ xe — chủ xe của từng xe là tenDKX. Giữ nguyên dấu tiếng Việt. Nếu chủ phiếu là TỔ CHỨC (có «Tổ chức», «Mã số thuế», «Đại diện»): chuHo = TÊN TỔ CHỨC, cccd = MÃ SỐ THUẾ; họ tên/CCCD/SĐT/chức vụ người đại diện ghi vào ghiChuTay, KHÔNG làm chủ xe. /*NM:P3-2*/ Đồng thời đặt chuPhieuLoai = "to_chuc" và điền daiDien {ten, cccd, sdt, chucVu} (trường nào không có để ""); chủ phiếu là cá nhân thì chuPhieuLoai = "ca_nhan", daiDien để rỗng.
 4. cccd: số CCCD/CMND/MST, CHỈ gồm chữ số đúng như trên phiếu. Nếu thiếu số hoặc mờ, chép phần đọc được — KHÔNG tự thêm số.
 5. sdt: số điện thoại, chỉ chữ số.
 6. ghiChuTay: toàn bộ chữ viết tay/ghi chú thêm không thuộc ô in sẵn. Không có thì "".
@@ -816,7 +818,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     });
     const TT2CODE = {
       dang_hoat_dong: 'con_su_dung', da_ban_chua_sang_ten: 'ban_chua_sang_ten', ban_khong_ro_nguoi_su_dung: 'ban_khong_ro',
-      mat_cap: 'mat', het_nien_han: 'khac', mua_chua_sang_ten: 'ban_chua_sang_ten', khac: 'khac', khong_ro: 'khong_xac_dinh',
+      mat_cap: 'mat', het_nien_han: 'khac', mua_chua_sang_ten: 'ban_chua_sang_ten', ban_da_biet_nguoi_mua: 'ban_chua_sang_ten', /*NM:P1-3*/ khac: 'khac', khong_ro: 'khong_xac_dinh',
     };
     const vehiclesDoc = xe.map((v, i) => ({
       stt: (v && Number(v.stt)) || (i + 1),
@@ -839,6 +841,26 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       source: 'scan',
       conf: 0.8,
     }));
+    /*NM:P3-3*/ // trường theo HỢP ĐỒNG: trang, vung[x,y,w,h] 0–1, tinCay, flags (đặt cả trên xe gốc lẫn xe trong docs)
+    const _plateOk = (p) => /^\d{2}[A-Z]{1,2}\d?\d{4,5}$/.test(p);
+    const _cnt = new Map();
+    xe.forEach(v => { const k = normalizeBienSo((v && v.bienSo) || ''); if (k) _cnt.set(k, (_cnt.get(k) || 0) + 1); });
+    xe.forEach((v, i) => {
+      if (!v) return;
+      const k = normalizeBienSo(v.bienSo || ''), fl = [];
+      if (!k) fl.push('bien_rong'); else { if (!_plateOk(k)) fl.push('bien_nghi_van'); if (_cnt.get(k) > 1) fl.push('trung_bien_trong_phieu'); }
+      if (v.tinhTrang === 'khac' || v.statusCode === 'khac' || v.statusCode === 'khong_xac_dinh') fl.push('tinh_trang_la');
+      const c = Number(v.conf), x0 = Number(v.vungX0), y0 = Number(v.vungY0), x1 = Number(v.vungX1), y1 = Number(v.vungY1);
+      if (Number.isFinite(c) && c < 0.6) fl.push('conf_thap');
+      v.trang = Number(v.page) || 1; v.flags = fl;
+      v.tinCay = { bienSo: Math.min(k ? (_plateOk(k) ? 0.9 : 0.5) : 0.2, Number.isFinite(c) && c > 0 ? c : 1), tinhTrang: fl.includes('tinh_trang_la') ? 0.5 : 0.85 };
+      if ([x0, y0, x1, y1].every(Number.isFinite) && x1 > x0 && y1 > y0) v.vung = [x0 / 1000, y0 / 1000, (x1 - x0) / 1000, (y1 - y0) / 1000];
+      const d = vehiclesDoc[i]; if (d) { d.trang = v.trang; d.flags = v.flags; d.tinCay = v.tinCay; if (v.vung) d.vung = v.vung; }
+    });
+    const _dd = (j.daiDien && typeof j.daiDien === 'object') ? j.daiDien : {};
+    const _loai = j.chuPhieuLoai || ((_dd.ten || '').trim() ? 'to_chuc' : 'ca_nhan');
+    const ownerObj = { loai: _loai, ten: (j.chuHo || '').trim(), mst: _loai === 'to_chuc' ? normalizeCccd(j.cccd) : '',
+      daiDien: { ten: String(_dd.ten || '').trim(), cccd: normalizeCccd(_dd.cccd), sdt: normalizeCccd(_dd.sdt), chucVu: String(_dd.chucVu || '').trim() } };
     const maxStt = vehiclesDoc.reduce((m, v) => Math.max(m, Number(v.stt) || 0), 0);
     const docType = j.loaiPhieu === 'ban_cam_ket' ? 'cam_ket' : 'bien_ban';
     const doc = {
@@ -851,7 +873,9 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       missingStt: Array.isArray(j.missingStt) ? j.missingStt.slice() : [],
       vehicles: vehiclesDoc,
     };
+    if (ownerObj.loai === 'to_chuc') { doc.owner.orgName = ownerObj.ten; doc.owner.mst = ownerObj.mst; doc.owner.representative = ownerObj.daiDien.ten; }   /*NM:P3-4*/
     return {
+      owner: ownerObj,   /*NM:P3-4*/
       boxPerPage: true,
       loaiPhieu: j.loaiPhieu || 'khac',
       bienSo: xe.map(v => normalizeBienSo(v.bienSo)).filter(Boolean),
@@ -877,10 +901,11 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         if (!lv.bienSo && (v.plateRaw || v.plate)) lv.bienSo = v.plateRaw || v.plate;
         if (!lv.statusCode && v.statusCode) lv.statusCode = v.statusCode;
         if (!lv.tinhTrangGhiTrenPhieu && v.statusRaw) lv.tinhTrangGhiTrenPhieu = v.statusRaw;
+        if (v.flags && v.flags.length) lv.flags = Array.from(new Set((lv.flags || []).concat(v.flags)));   /*NM:P3-5*/ // cờ do verifyAndFillMissing đặt (trùng biển…)
         continue;
       }
       ex.vehicles.push({ bienSo: v.plateRaw || v.plate || '', loaiXe: v.loaiXe || '', tinhTrang: 'khong_ro', tinhTrangGhiTrenPhieu: v.statusRaw || '',
-        statusCode: v.statusCode || '', ghiChu: v.note || '', soKhung: v.soKhung || '', soMay: v.soMay || '', stt: v.stt, page: v.page, checkMark: !!v.checkMark });
+        statusCode: v.statusCode || '', ghiChu: v.note || '', soKhung: v.soKhung || '', soMay: v.soMay || '', stt: v.stt, page: v.page, trang: v.page, flags: (v.flags || []).slice(), checkMark: !!v.checkMark });   /*NM:P3-5*/
       if (v.plate) ex.bienSo.push(v.plate);
       ex.bienSoRaw.push(v.plateRaw || v.plate || ''); ex.tinhTrang.push('khong_ro');
     }
@@ -1296,8 +1321,11 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     const n = pages.length;
     if (!n) return { groups: [] };
     if (n === 1) return { groups: [{ startPage: 1, endPage: 1 }] };
-    const fallback = function () {
-      return { groups: Array.from({ length: n }, function (_, i) { return { startPage: i + 1, endPage: i + 1 }; }) };
+    const fallback = function () {   /*NM:R2-1*/ // không chia được → KHÔNG cắt từng trang; gom 1 phiếu (≤12 trang) hoặc 2 trang/tờ, kèm cờ uncertain
+      if (n <= 12) return { groups: [{ startPage: 1, endPage: n }], uncertain: true };
+      const gs = [];
+      for (let i = 1; i <= n; i += 2) gs.push({ startPage: i, endPage: Math.min(n, i + 1) });
+      return { groups: gs, uncertain: true };
     };
 
     let thumbs;
@@ -1554,9 +1582,11 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
   }
 
   // Tìm bản ghi scan đã xong có cùng hash ảnh mặt 1 (chống quét trùng)
-  async function findDoneByHash(hash) {
-    const all = await tx(ST_SCANS, 'readonly', os => os.index('frontHash').getAll(hash));
-    return (all || []).find(r => r.status === 'done' && !r.isTest) || null;
+  async function findDoneByHash(hash, pagesHash) {
+    /*NM:P5-1*/ // pagesHash (tuỳ chọn): có thì ưu tiên đúng bộ trang; phiếu cũ thiếu pagesHash vẫn dùng như trước
+    const all = ((await tx(ST_SCANS, 'readonly', os => os.index('frontHash').getAll(hash))) || []).filter(r => r.status === 'done' && !r.isTest);
+    if (!pagesHash) return all[0] || null;
+    return all.find(r => r.pagesHash === pagesHash) || all.find(r => !r.pagesHash) || null;
   }
 
   /* ---- ĐỐI SÁNH (Sprint 2: chỉ khớp EXACT biển số đã chuẩn hóa) ----
@@ -1737,6 +1767,20 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
     const have = collectStt();
     const target = Math.max(0, Number(doc.lastStt) || 0, Number(doc.declaredTotal) || 0);
     doc.missingStt = target > 0 ? Array.from({ length: target }, function (_, i) { return i + 1; }).filter(function (i) { return !have.has(String(i)); }) : [];
+    /*NM:P3-6*/ // (a) cờ «trùng biển trong phiếu» cho cả dòng gốc lẫn dòng lặp; (b) «ô thiếu»: STT vẫn thiếu → dòng giữ chỗ nghi vấn, không bỏ
+    byPlate.forEach(function (list) {
+      if (list.length <= 1) return;
+      list.forEach(function (v) { v.flags = Array.from(new Set((v.flags || []).concat('trung_bien_trong_phieu'))); });
+    });
+    doc.vehicles.forEach(function (v) { if (v && v.placeholder && v.plate) { v.placeholder = false; v.flags = (v.flags || []).filter(function (f) { return f !== 'o_thieu'; }); } });
+    const pgOf = function (s) { let best = 0; doc.vehicles.forEach(function (v) { if (v && Number(v.stt) < s && Number(v.stt) > best) best = Number(v.stt); }); const pv = doc.vehicles.find(function (v) { return v && Number(v.stt) === best; }); return (pv && pv.page) || 1; };
+    if (doc.missingStt.length && doc.missingStt.length <= 200) {
+      doc.missingStt.forEach(function (s) {
+        if (doc.vehicles.some(function (v) { return v && Number(v.stt) === s; })) return;
+        doc.vehicles.push({ stt: s, page: pgOf(s), plate: '', plateRaw: '', loaiXe: '', soKhung: '', soMay: '', statusRaw: '', statusCode: 'khong_xac_dinh', note: 'Ô THIẾU: STT ' + s + ' chưa đọc được', checkMark: false, dupOf: null, source: 'scan', conf: 0.2, flags: ['o_thieu'], placeholder: true });
+      });
+    }
+    doc.missingStt = Array.from(new Set(doc.missingStt.concat(doc.vehicles.filter(function (v) { return v && v.placeholder && !v.plate; }).map(function (v) { return Number(v.stt); })))).sort(function (a, b) { return a - b; });
     doc.complete = doc.missingStt.length === 0;
     return doc;
   }
@@ -1764,7 +1808,13 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       const to = Math.min(n, Math.max(from, parseInt(entry.pageTo, 10) || n));
 
       let groups = null;
-      if (pps === 'auto') {
+      const hintN = (() => { const m = /_(\d{1,3})_?m[aặ]t/i.exec(entry.name || ''); return m ? parseInt(m[1], 10) : 0; })();   /*NM:P2-2*/
+      entry.hintFromName = hintN || 0;
+      entry.segUncertain = false;   /*NM:R2-4*/
+      if (pps === 'auto' && hintN > 1 && hintN === (to - from + 1)) {
+        groups = [{ startPage: 1, endPage: hintN }]; entry.segGroups = { from: from, to: to, g: groups };
+        dbgLog('Tên file gợi ý ' + hintN + ' mặt = đúng số trang PDF → gom 1 phiếu, bỏ bước chia nhóm.', 'ok');
+      } else if (pps === 'auto') {
         if (entry.segGroups && entry.segGroups.from === from && entry.segGroups.to === to && Array.isArray(entry.segGroups.g) && entry.segGroups.g.length) {
           groups = entry.segGroups.g; dbgLog('Dùng lại cách chia nhóm đã lưu (' + groups.length + ' phiếu).');
         } else try {
@@ -1773,7 +1823,9 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
           );
           const seg = await autoSegmentPages(lowPages);
           groups = seg && seg.groups && seg.groups.length ? seg.groups : null;
-          if (groups) entry.segGroups = { from: from, to: to, g: groups };
+          entry.segUncertain = !!(seg && seg.uncertain);   /*NM:R2-2*/
+          if (entry.segUncertain) dbgLog('Không chia được nhóm phiếu tự động → gom tạm, đánh dấu «cần người xem».', 'warn');
+          if (groups && !entry.segUncertain) entry.segGroups = { from: from, to: to, g: groups };   // không lưu cache cách chia chưa chắc
         } catch (e) {
           dbgLog('autoSegment lỗi: ' + (e.message || e), 'warn');
         }
@@ -1817,6 +1869,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
           const lowPages = await Promise.all(files.map(f => prepareImageFile(f, 800, MAX_IMG_BYTES)));
           const seg = await autoSegmentPages(lowPages);
           groups = seg && seg.groups && seg.groups.length ? seg.groups : null;
+          entry.segUncertain = !!(seg && seg.uncertain);   /*NM:R2-3*/
         } catch (e) {
           dbgLog('autoSegment lỗi: ' + (e.message || e), 'warn');
         }
@@ -1907,10 +1960,12 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
       const front = pages[0], back = pages[1] || null, extras = pages.slice(2);
       dbgLog(`  mặt 1: ${Math.round(front.blob.size / 1024)}KB` + (back ? `, mặt 2: ${Math.round(back.blob.size / 1024)}KB` : ' (không có mặt 2)') + (extras.length ? `, +${extras.length} mặt phụ` : ''));
       const hash = await sha256Hex(front.blob);
+      const pageHashes = []; for (const p of pages) pageHashes.push((await sha256Hex(p.blob)) || '');   /*NM:P5-2*/
+      const pagesHash = await sha256Hex(new Blob([pageHashes.join('|')]));
       let mergeInto = null;   /*QP:Q2-4*/
       if (st.skipDuplicates && hash) {
         releaseHash = await acquireHash(hash);   // chờ nếu 1 tờ cùng hash đang được quét — xong rồi mới kiểm tra trùng
-        const ex = await findDoneByHash(hash);
+        const ex = await findDoneByHash(hash, pagesHash);
         if (ex) {
           const exN = (ex.frontBlob ? 1 : 0) + (ex.backBlob ? 1 : 0) + (ex.extraBlobs || []).filter(x => x && x.blob).length;
           if (exN < pages.length) {   // phiếu cũ chỉ lưu ít mặt hơn lần này → KHÔNG coi là trùng: quét lại đủ mặt rồi ghép vào CHÍNH phiếu cũ
@@ -1930,6 +1985,7 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         const outM = await ScanReview.rescanMerge(mergeInto.id, resM, {
           extraBlobs: pages.slice(2).map(p => ({ blob: p.blob, mime: p.mime })),
           backBlob: back ? back.blob : null, backMime: back ? back.mime : '', pagesDesc: job.pagesDesc, pageCount: pages.length });
+        try { const rm = await dbGet(ST_SCANS, mergeInto.id); if (rm) { rm.pagesHash = pagesHash; rm.pageHashes = pageHashes; rm.pageCount = pages.length; await dbPut(ST_SCANS, rm); } } catch (x) { /* bỏ qua */ }   /*NM:P5-4*/
         job.scanId = mergeInto.id; job.extracted = resM.extracted; job.json = resM.json; job.match = matchPlates(resM.extracted.bienSo, dsIdx); job.status = 'done';
         dbgLog(`  ✔ Đã ghép vào phiếu cũ: ${outM.vehicles} xe · +${outM.added} xe mới · ${outM.changed} ô đổi · ${outM.proposals} đề xuất chờ xem.`, 'ok');
         return;
@@ -1939,8 +1995,8 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         fileName: job.entry.name, pagesDesc: job.pagesDesc,
         frontBlob: front.blob, frontMime: front.mime, backBlob: back ? back.blob : null, backMime: back ? back.mime : null,
         extraBlobs: extras.map(p => ({ blob: p.blob, mime: p.mime })),
-        frontHash: hash, backBlank: false, status: 'analyzing', matchedBienSo: [],
-        pages: pages.length, layout: { auto: (job.entry.pps === 'auto'), pages: pages.length, pagesDesc: job.pagesDesc },   /*QP:Q2-5*/
+        frontHash: hash, pagesHash, pageHashes, pageCount: pages.length, backBlank: false, status: 'analyzing', matchedBienSo: [],   /*NM:P5-3*/
+        pages: pages.length, layout: { auto: (job.entry.pps === 'auto'), conf: (job.entry.hintFromName && job.entry.hintFromName === pages.length) ? 0.95 : 0.7, pages: pages.length, pagesDesc: job.pagesDesc, hintFromName: job.entry.hintFromName || 0 },   /*NM:P2-1*/
       };
       job.scanId = rec.id;
       if (job.prevScanId && job.prevScanId !== rec.id) { try { const o = await dbGet(ST_SCANS, job.prevScanId); if (o && o.status !== 'done') await dbDelete(ST_SCANS, o.id); } catch (x) { /* bỏ qua */ } job.prevScanId = null; }   // bản dở / lỗi của lần trước: bỏ, tránh rác + bản ghi đôi
@@ -1960,6 +2016,21 @@ ${extraN > 0 ? `12. Phiếu này có thêm ${extraN} MẶT PHỤ (MẶT 3${extra
         matchedBienSo: match ? match.filter(m => m.found).map(m => m.bienSo) : [], match,
         logicVer: 2,
       });
+      { /*NM:P2-3*/ // rec.layout theo HỢP ĐỒNG: pages[{n,roles}], tablePages; kiểm chéo STT liên tục + gợi ý số trang trong tên file. Mâu thuẫn → conf thấp + «cần người xem» (không đoán)
+        const vs = Array.isArray(res.extracted.vehicles) ? res.extracted.vehicles : [], n = pages.length, issues = [];
+        const tp = Array.from(new Set(vs.map(v => Number(v.page) || 1))).sort((a, b) => a - b);
+        const lastTable = tp.length ? tp[tp.length - 1] : 0, roles = [];
+        for (let p = 1; p <= n; p++) { const r = []; if (p === 1) r.push('dau_phieu'); if (tp.includes(p)) r.push('bang_xe'); if (p === n && n > 1) r.push('chu_ky'); if (!r.length) r.push(p > lastTable ? 'dieu_khoan' : 'trang'); roles.push({ n: p, roles: r }); }
+        const maxByPage = new Map(), minByPage = new Map();
+        vs.forEach(v => { const pg = Number(v.page) || 1, s = Number(v.stt); if (!Number.isFinite(s) || s <= 0) return; maxByPage.set(pg, Math.max(maxByPage.get(pg) || 0, s)); minByPage.set(pg, Math.min(minByPage.get(pg) || 1e9, s)); });
+        let prevMax = 0;
+        tp.forEach(pg => { const mn = minByPage.get(pg), mx = maxByPage.get(pg); if (mn == null) return; if (prevMax && mn > prevMax + 1) issues.push('STT nhảy cóc ở trang ' + pg + ' (trang trước kết thúc ' + prevMax + ', trang này bắt đầu ' + mn + ')'); if (prevMax && mn <= prevMax - 3) issues.push('STT trang ' + pg + ' lùi về ' + mn + ' (< ' + prevMax + ')'); prevMax = Math.max(prevMax, mx); });
+        const hint = job.entry.hintFromName || 0;
+        if (hint && hint !== n) issues.push('Tên file gợi ý ' + hint + ' mặt nhưng phiếu có ' + n + ' trang');
+        if (job.entry.segUncertain) issues.push('Chia nhóm trang tự động thất bại — đã gom tạm, cần người xem');   /*NM:R2-5*/
+        rec.layout = Object.assign({}, rec.layout, { conf: issues.length ? 0.4 : (hint && hint === n ? 0.95 : 0.7), pages: roles, tablePages: tp, hintFromName: hint, inferred: true, issues });
+        if (issues.length) { const d0 = res.extracted.docs && res.extracted.docs[0]; if (d0) d0.complete = false; dbgLog('  ⚠ Bố cục chưa chắc chắn: ' + issues.join('; '), 'warn'); }
+      }
       await dbPut(ST_SCANS, rec);
       job.entry.logicVer = 2;
       job.extracted = res.extracted; job.json = res.json; job.match = match; job.status = 'done';

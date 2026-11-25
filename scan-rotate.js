@@ -49,8 +49,11 @@ const ScanRotate = (() => {
     return [x, y];
   }
   // Quy đổi khung xe (vungX0/Y0/X1/Y1) của từng xe; xe không có vùng giữ nguyên. Trả mảng MỚI (không sửa mảng cũ).
-  function rotateVehicles(vehicles, deg) {
+  function rotateVehicles(vehicles, deg, page) {
+    /*NM:P4-5*/
+    const pg = Number(page) || 1;
     return (vehicles || []).map((v) => {
+      if ((Number(v && v.page) || 1) !== pg) return v;   // xe thuộc trang khác: giữ nguyên
       const x0 = Number(v.vungX0), y0 = Number(v.vungY0), x1 = Number(v.vungX1), y1 = Number(v.vungY1);
       if (![x0, y0, x1, y1].every(Number.isFinite)) return v;
       const a = rotPoint(x0, y0, deg), b = rotPoint(x1, y1, deg);
@@ -68,8 +71,30 @@ const ScanRotate = (() => {
     next.catch(() => {}).then(() => { if (chains.get(scanId) === next) chains.delete(scanId); });
     return next;
   }
+  /*NM:P4-8*/ // HÀM MỚI: xoay mặt ≥3 (nằm trong extraBlobs[page-3]); không đụng mặt 1–2
+  async function rotateExtra(scanId, page, deg) {
+    const idx = page - 3, key = 'p' + page;
+    let rec = await DB.dbGet(ST_SCANS, scanId);
+    if (!rec) throw new Error('Không tìm thấy phiếu trên máy này.');
+    if (!(rec.extraBlobs && rec.extraBlobs[idx] && rec.extraBlobs[idx].blob) && window.ScanSync && rec.cloud) rec = await ScanSync.ensureBlobs(rec);
+    const x = rec.extraBlobs && rec.extraBlobs[idx];
+    if (!x || !x.blob) throw new Error('Chưa có ảnh mặt ' + page + ' trên máy này.');
+    if (isPdf(x.mime || x.blob.type)) throw new Error('File PDF không xoay được (chỉ xoay ảnh).');
+    const out = await rotateBlob(x.blob, deg);
+    const cur = await DB.dbGet(ST_SCANS, scanId); if (!cur || !cur.extraBlobs) return null;
+    cur.extraBlobs[idx] = { blob: out, mime: 'image/jpeg' };
+    if (cur.extracted && Array.isArray(cur.extracted.vehicles) && cur.extracted.boxPerPage) cur.extracted = { ...cur.extracted, vehicles: rotateVehicles(cur.extracted.vehicles, deg, page) };
+    cur.rot = { ...(cur.rot || {}), [key]: ((((cur.rot && cur.rot[key]) || 0) + deg) % 360) };
+    cur.imgRev = { ...(cur.imgRev || {}), [key]: Date.now() };
+    cur.imgDirty = { ...(cur.imgDirty || {}), [key]: true };
+    await DB.dbPut(ST_SCANS, cur);
+    if (window.ScanDisk && ScanDisk.writeRec) { try { Promise.resolve(ScanDisk.writeRec(cur)).catch(() => {}); } catch (e) { /* bỏ qua */ } }
+    if (window.ScanSync) ScanSync.touch(scanId);
+    return cur;
+  }
   async function rotateNow(scanId, page, deg) {
     deg = normDeg(deg); if (!deg) return null;
+    if (Number(page) >= 3) return rotateExtra(scanId, Number(page), deg);   /*NM:P4-9*/
     const side = SIDE(page);
     let rec = await DB.dbGet(ST_SCANS, scanId);
     if (!rec) throw new Error('Không tìm thấy phiếu trên máy này.');
@@ -82,7 +107,10 @@ const ScanRotate = (() => {
     const cur = await DB.dbGet(ST_SCANS, scanId);
     if (!cur) return null;
     cur[side + 'Blob'] = out; cur[side + 'Mime'] = 'image/jpeg';
-    if (side === 'front' && cur.extracted && Array.isArray(cur.extracted.vehicles)) cur.extracted = { ...cur.extracted, vehicles: rotateVehicles(cur.extracted.vehicles, deg) };
+    if (cur.extracted && Array.isArray(cur.extracted.vehicles)) {   /*NM:P4-6*/ // chỉ quy đổi xe nằm trên đúng trang vừa xoay (bản quét mới); phiếu cũ không có boxPerPage thì chỉ mặt 1
+      const pg = Number(page) || 1, perPage = !!cur.extracted.boxPerPage;
+      if (perPage || pg === 1) cur.extracted = { ...cur.extracted, vehicles: rotateVehicles(cur.extracted.vehicles, deg, pg) };
+    }
     cur.rot = { ...(cur.rot || {}), [side]: ((((cur.rot && cur.rot[side]) || 0) + deg) % 360) };   // tổng góc đã xoay thêm (chỉ để tham khảo)
     cur.rotChecked = true;                                                                          // người dùng đã chỉnh -> khỏi tự nhận hướng nữa
     cur.imgRev = { ...(cur.imgRev || {}), [side]: Date.now() };                                     // máy khác thấy mốc mới hơn -> tải lại ảnh

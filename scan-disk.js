@@ -55,7 +55,9 @@ const ScanDisk = (() => {
   // Ghi cả 2 mặt của 1 bản ghi phiếu (chạy ngầm, lỗi thì bỏ qua)
   function writeRec(rec) {
     if (!rec || !D.handle) return Promise.resolve();
-    return Promise.all(['front', 'back'].map(sd => write(rec.id, sd, rec[sd + 'Blob']))).then(() => refreshUi()).catch(() => {});
+    const jobs = ['front', 'back'].map(sd => write(rec.id, sd, rec[sd + 'Blob']));   /*NM:P4-4*/
+    (rec.extraBlobs || []).forEach((x, i) => { if (x && x.blob) jobs.push(write(rec.id, 'p' + (i + 3), x.blob)); });   // «<mã>__p3.jpg»…
+    return Promise.all(jobs).then(() => refreshUi()).catch(() => {});
   }
   // Phiếu vừa quét xong -> lưu ảnh vào thư mục ngay
   S.on('sheetDone', async (d) => { try { if (D.handle) writeRec(await DB.dbGet(ST_SCANS, d.scanId)); } catch (e) { /* bỏ qua */ } });

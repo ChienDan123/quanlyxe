@@ -125,6 +125,30 @@ const ScanReview = (() => {
       result: items[items.length - 1].result || '',
       updatedAt: Date.now(),
     };
+    /*NM:P5-20*/ // nhiều phiếu cùng 1 biển: so tình trạng đọc được giữa các phiếu; khác nhau → cờ «mâu thuẫn», KHÔNG tự chọn
+    {
+      const api = window.ScanStatusApi;
+      const keyOf = (it) => {
+        const sd = it.scanData || {}, raw = String(sd.statusRaw || sd.tinhTrangGoc || '').trim();
+        if (!raw) return '';
+        return (api && api.canonicalStatus && api.canonicalStatus(raw)) || (api && api.normText ? api.normText(raw) : raw.toLowerCase());
+      };
+      const bySc = new Map();
+      items.forEach(it => { const k = keyOf(it); if (k && !bySc.has(it.scanId)) bySc.set(it.scanId, k); });
+      link.conflict = link.scanIds.length > 1 && new Set(bySc.values()).size > 1;
+      if (link.conflict) {
+        for (const it of items) {
+          if (it.done || it.needsReview) continue;
+          it.needsReview = true;
+          it.recheck = it.recheck || { uncertain: {}, locked: {}, lan: 0 };
+          it.recheck.uncertain = it.recheck.uncertain || {};
+          if (!it.recheck.uncertain.trangThaiXe) it.recheck.uncertain.trangThaiXe = 'NGHI VẤN: mâu thuẫn giữa các phiếu cùng biển — xem ảnh từng phiếu rồi chọn';
+          try { await DB.dbPut(ST_ITEMS, it); } catch (e) { /* bỏ qua */ }
+          const mem = (R.items || []).find(x => x.id === it.id);
+          if (mem) { mem.needsReview = true; mem.recheck = it.recheck; }
+        }
+      }
+    }
     linkMap.set(plate, link);
     await DB.dbPut(ST_LINKS, link);
   }
@@ -443,15 +467,17 @@ const ScanReview = (() => {
         dupOf: ent.dupOf || null,
         statusCode: ent.statusCode || '',
         datasetFill: Object.keys(datasetFill).length ? datasetFill : null,
+        pageNo: ent.page || 1, layoutFlags: Array.isArray(v && v.flags) ? v.flags.slice() : [],   /*NM:P3-10*/ // mục cũ thiếu 2 trường này vẫn mở được
         needsReview: false,
       };
 
       // C5: đánh dấu cần kiểm lại khi trạng thái không xác định / doc chưa hoàn chỉnh (hiện trong bộ lọc "nghi vấn" hiện có)
-      const needFromCode = ent.statusCode === 'khong_xac_dinh';
+      const needFromCode = ent.statusCode === 'khong_xac_dinh' || (ent.statusCode === 'khac' && !!String(v.statusRaw || v.tinhTrangGhiTrenPhieu || '').trim());   /*NM:P1-7*/ // «Không tham gia đào tạo»… → nghi vấn
       const needFromDoc = ent.docComplete === false;
-      if (needFromCode || needFromDoc || isDup) {
+      const lf = (v && Array.isArray(v.flags)) ? v.flags : [];   /*NM:P3-7*/ // cờ theo xe do scan.js đặt
+      if (needFromCode || needFromDoc || isDup || lf.includes('o_thieu') || lf.includes('bien_nghi_van')) {   /*NM:P3-8*/
         it.needsReview = true;
-        const reason = isDup ? ('NGHI VẤN: biển số trùng STT ' + ent.dupOf + ' trong cùng phiếu — cần người chọn') : (needFromCode ? 'Trạng thái không xác định — cần kiểm tra' : 'Phiếu chưa hoàn chỉnh (thiếu STT)');
+        const reason = isDup ? ('NGHI VẤN: biển số trùng STT ' + ent.dupOf + ' trong cùng phiếu — cần người chọn') : (needFromCode ? ('Trạng thái lạ/không xác định' + (v.statusRaw ? ' «' + v.statusRaw + '»' : '') + ' — cần kiểm tra, đã giữ nguyên văn') /*NM:P1-8*/ : (lf.includes('o_thieu') ? ('Ô THIẾU: STT ' + (ent.stt || '?') + ' chưa đọc được — xem ảnh rồi nhập tay') : (lf.includes('bien_nghi_van') ? 'Biển số nghi vấn (sai định dạng) — kiểm với ảnh' : 'Phiếu chưa hoàn chỉnh (thiếu STT)')));   /*NM:P3-9*/
         it.recheck = { uncertain: { trangThaiXe: reason }, locked: {}, lan: 0 };
       }
 
@@ -620,10 +646,21 @@ const ScanReview = (() => {
   /* ---- Ánh xạ «Tình trạng phương tiện» (phiếu) -> «Trạng thái xe» (web) ----
      Thứ tự: khớp chữ ghi trên phiếu -> khớp nhãn chuẩn của mã -> mã có tương ứng rõ ràng -> nhãn/chữ trên phiếu (CHƯA có trong
      danh sách => người dùng bấm ➕ để thêm lựa chọn mới). Mã chưa rõ nghĩa thì KHÔNG tự đoán sang trạng thái khác. */
-  /*QUET-PHIEU:P1-4*/ const STATUS_BY_CODE = {
-    dang_hoat_dong: 'Còn sử dụng',
-    ban_khong_ro_nguoi_su_dung: 'Bán không rõ người sử dụng',
+  /*NM:P1-4*/ // BẢNG DUY NHẤT: chữ trên phiếu (đã chuẩn hoá) → trạng thái. Muốn thêm cách viết: thêm 1 dòng vào rules.
+  const STATUS_MAP = {
+    byCode: {
+      dang_hoat_dong: 'Còn sử dụng',
+      ban_khong_ro_nguoi_su_dung: 'Bán không rõ người sử dụng',
+      ban_da_biet_nguoi_mua: 'Đã bán chưa sang tên',
+    },
+    rules: [
+      { test: (t, raw) => looksLikeBanKhongRo(raw), label: 'Bán không rõ người sử dụng' },
+      { test: (t) => /^(ban |chuyen nhuong )?chua sang ten$/.test(t), label: 'Đã bán chưa sang tên' },
+      { test: (t) => /^(con )?(dang )?(duoc )?(su dung|hoat dong)$/.test(t), label: 'Còn sử dụng' },
+      { test: (t) => /^(mat cap|bi mat cap|bi mat|mat)$/.test(t), label: 'Mất cắp' },
+    ],
   };
+  const STATUS_BY_CODE = STATUS_MAP.byCode;
   const statusList = () => (typeof STATUS_OPTIONS !== 'undefined' ? STATUS_OPTIONS : []);
   // /*PV2-B*/ Nhan dien "ban khong ro nguoi su dung/mua" tu chu goc.
   // Dung _normStatusText (giu khoang trang giua tu) — KHONG dung C.flat vi C.flat xoa het khoang trang lam mat ranh gioi tu.
@@ -685,14 +722,22 @@ const ScanReview = (() => {
   const addStatus = (name) => (typeof addStatusOption === 'function' ? addStatusOption(name) : null);
   /*QP:Q1-1*/ // HÀM MỚI — bảng quy đổi DUY NHẤT chữ viết trên phiếu → trạng thái chuẩn (R4). Không khớp → '' (KHÔNG đoán).
   function canonicalStatus(raw) {
-    if (looksLikeBanKhongRo(raw)) return 'Bán không rõ người sử dụng';
+    /*NM:P1-5*/
     const t = _normStatusText(raw).replace(/\bxe\b/g, ' ').replace(/\s+/g, ' ').trim().replace(/^da /, '');
     if (!t) return '';
-    if (/^(ban |chuyen nhuong )?chua sang ten$/.test(t)) return 'Đã bán chưa sang tên';
-    if (/^(con )?(dang )?(duoc )?(su dung|hoat dong)$/.test(t)) return 'Còn sử dụng';
-    if (/^(mat cap|bi mat cap|bi mat|mat)$/.test(t)) return 'Mất cắp';
-    return '';
+    for (const r of STATUS_MAP.rules) if (r.test(t, raw)) return r.label;
+    return '';   // không khớp → KHÔNG ép; mapStatusToOption trả 'khac' + nguyên văn
   }
+  /*NM:P1-6*/ // Tự kiểm trong console:  ScanStatusSelfTest()
+  function statusSelfTest() {
+    const samples = ['Còn đang sử dụng', 'Còn sử dụng', 'Đã bán không rõ người sử dụng', 'bán ko rõ người sử dụng', 'Đã bán k0 rõ NSD', 'Bán khg rõ ng sd',
+      'Đã bán xo rõ người mua', 'Đã bán chưa sang tên', 'Không tham gia đào tạo', 'Xe nát không di chuyển được', 'Mất cắp', 'bị mất cắp', 'Con sd'];
+    const rows = samples.map(s => { const r = mapStatusToOption(s, '', statusList()) || {}; return { phieu: s, chuan: canonicalStatus(s) || '(lạ → khac, giữ nguyên văn)', option: r.option || null, code: r.code || '', lạ: !!r.isUnknownStatus }; });
+    try { console.table(rows); } catch (e) { console.log(rows); }
+    return rows;
+  }
+  window.ScanStatusSelfTest = statusSelfTest;
+  window.ScanStatusApi = { canonicalStatus, normText: _normStatusText, matchStatus };   /*NM:R3-1*/ // cho scan-compare.js dùng chung bảng STATUS_MAP
   function scanStatus(it) {
     /*QP:Q1-2*/
     const d = it.scanData || {};
@@ -2551,6 +2596,10 @@ const ScanReview = (() => {
     else if (it.scanData.partyTen && !it.partyRole) badges.push(`<span class="rv-badge warn" title="Theo phiếu: người mua / sử dụng ≠ chủ xe đứng tên ĐKX. Chọn mục «Thông tin trên phiếu là của» để ghi sang cột riêng.">👥 Người mua / sử dụng: ${escapeHtml(it.scanData.partyTen)}</span>`);
     { const si = slotInfo(it.scanId); if (!si.complete) badges.push(`<span class="rv-badge warn" title="Phiếu kê khai ${si.total} xe nhưng chưa có dữ liệu: ${slotMissingText(si)}">⚠ Thiếu ${slotMissingText(si)}</span>`); }
     if (v.rowCount > 1) badges.push(`<span class="rv-badge warn" title="Có ${v.rowCount} dòng cùng biển trên Sheet; chỉ cập nhật dòng đầu">⚠ ${v.rowCount} dòng trùng biển</span>`);
+    { /*NM:P5-23*/ // biển này có trên nhiều phiếu → thẻ «Nguồn phiếu»; mở viewer để xem từng phiếu
+      const lk = it.bienSo ? linkMap.get(it.bienSo) : null;
+      if (lk && lk.scanIds && lk.scanIds.length > 1) badges.push(`<span class="rv-badge ${lk.conflict ? 'warn' : ''}" title="Biển này có trên ${lk.scanIds.length} phiếu khác nhau — mở xem phiếu để chuyển qua lại${lk.conflict ? '. Tình trạng đọc được KHÁC NHAU giữa các phiếu — cần người chọn' : ''}">📚 ${lk.scanIds.length} phiếu${lk.conflict ? ' · ⚠ mâu thuẫn' : ''}</span>`);
+    }
     if (it.done && !it.dirty) badges.push('<span class="rv-badge applied">Đã áp dụng</span>');
     let body = v.fields.map(f => fieldRowHtml(it, f, v)).join('');
     if (it.orphanSheet && v.found) {   // hàng phiếu lạ đã ghi và đã tải lại -> vẫn cho xử lý nếu hóa ra trùng xe có sẵn
@@ -2886,7 +2935,7 @@ const ScanReview = (() => {
     const url = URL.createObjectURL(blob); urls.push(url);
     const media = mime === 'application/pdf' ? `<iframe class="rv-pg-pdf" src="${url}" title="${escapeHtml(label)}"></iframe>`
       : `<div class="rv-pg-wrap"><img class="rv-pg-img" src="${url}" alt="${escapeHtml(label)}" title="Bấm vào ảnh để chuyển tới xe · kéo để dời ảnh · nhấp đúp để phóng to / thu nhỏ"><div class="rv-boxes" aria-hidden="true"></div></div>`;   // lớp khung nằm TRONG wrap (position:relative) nên luôn dính theo ảnh khi kéo / phóng
-    const rot = (window.ScanRotate && mime !== 'application/pdf' && page <= 2) ? ScanRotate.buttonsHtml(page) : '';   // nút xoay RIÊNG từng mặt (scan-rotate.js)
+    const rot = (window.ScanRotate && mime !== 'application/pdf') ? ScanRotate.buttonsHtml(page) : '';   /*NM:P4-10*/ // mở nút xoay cho mọi mặt (mặt ≥3 do rotateExtra xử lý)   // nút xoay RIÊNG từng mặt (scan-rotate.js)
     return `<div class="rv-pg" data-page="${page}"><div class="rv-pg-label">${label} <a class="btn btn-ghost btn-sm" href="${url}" target="_blank" rel="noopener">↗ Mở tab mới</a>${rot}</div>${media}</div>`;
   }
 
@@ -2916,7 +2965,7 @@ const ScanReview = (() => {
     const m = new Map(), seen = new Set(), vs = (rec && rec.extracted && rec.extracted.vehicles) || [];
     const perPage = !!(rec && rec.extracted && rec.extracted.boxPerPage);   // chỉ bản quét mới có khung THEO TRANG
     vs.forEach((v, i) => {
-      let key = norm(v.bienSo) || ('#' + i);
+      let key = norm(v.bienSo) || ('#stt-' + (Number(v.stt) || (i + 1)));   /*NM:P4-1*/ // khớp đúng id mục do createItemsForScan tạo
       if (seen.has(key)) { if (!norm(v.bienSo)) return; key = key + '~stt' + (Number(v.stt) || (i + 1)); if (seen.has(key)) return; }
       seen.add(key);
       let y0 = Number(v.vungY0), x0 = Number(v.vungX0), y1 = Number(v.vungY1), x1 = Number(v.vungX1);
@@ -3229,7 +3278,7 @@ const ScanReview = (() => {
     const p = R.pane, body = $('#rvImgBody'); if (!p.open || !body) return false;
     const reg = (p.edit && p.edit.id === id) ? p.edit : p.regions.get(id), pgNo = (reg && reg.page) || 1;
     if (!reg) return false;                                              // không có vùng (phiếu cũ) → để nguyên ảnh
-    if ((pgNo === 1 && p.mode === 'side2') || (pgNo === 2 && p.mode === 'side1')) { p.mode = 'both'; applyPaneView(); }   // đang chỉ xem mặt kia → hiện lại mặt có khung
+    if (p.mode !== 'both' && ((pgNo === 1 && p.mode === 'side2') || (pgNo === 2 && p.mode === 'side1') || pgNo >= 3)) { p.mode = 'both'; applyPaneView(); }   /*NM:P4-2*/
     const img = body.querySelector(`.rv-pg[data-page="${pgNo}"] .rv-pg-img`);
     if (img && (!img.complete || !img.naturalWidth)) { p.pendingScroll = id; return false; }
     requestAnimationFrame(() => {
@@ -4040,6 +4089,23 @@ const ScanReview = (() => {
       ? `<iframe class="sv-frame" src="${url}" title="${escapeHtml(title)}"></iframe>`
       : `<img class="sv-img" src="${url}" alt="${escapeHtml(title)}" title="Bấm để phóng to / thu nhỏ">`);
   }
+  /*NM:P5-21*/ // HÀM MỚI: thông tin «Nguồn phiếu» của từng phiếu chứa biển này (tên file, ngày quét, trang, tình trạng đọc được)
+  async function viewerSources(ids, plate) {
+    const out = [];
+    for (const id of ids) {
+      let rec = null, its = [];
+      try { rec = await DB.dbGet(ST_SCANS, id); } catch (e) { /* bỏ qua */ }
+      try { its = plate ? (await itemsByIndex('scanId', id)).filter(x => x.bienSo === plate) : []; } catch (e) { /* bỏ qua */ }
+      const it = its[0] || null, sd = (it && it.scanData) || {};
+      out.push({
+        id, fileName: rec ? (rec.sheetLabel || rec.fileName || '') : '', ts: rec ? rec.timestamp : 0,
+        pages: rec ? (Number(rec.pageCount) || Number(rec.pages) || 0) : 0,
+        pageNo: it ? (it.pageNo || it.page || 1) : 0, stt: it ? (it.stt || 0) : 0,
+        statusRaw: String(sd.statusRaw || sd.tinhTrangGoc || '').trim(),
+      });
+    }
+    return out;
+  }
   async function showViewerIdx(i) {
     revokeUrls(); V.idx = i;
     let rec = await DB.dbGet(ST_SCANS, V.ids[i]);
@@ -4055,8 +4121,20 @@ const ScanReview = (() => {
       const cur = it.bienSo && it.bienSo === V.plate;
       return `<span class="scan-plate ${cur ? 'ok' : ''}">${escapeHtml(it.bienSoRaw || '(?)')}</span>`;
     }).join(' ');
+    /*NM:P5-22*/ // tab «Nguồn phiếu»: liệt kê TẤT CẢ phiếu của biển này; khác tình trạng → cảnh báo mâu thuẫn
+    const srcs = V.ids.length > 1 ? await viewerSources(V.ids, V.plate) : [];
+    if (V.idx !== i) return;
+    const sCanon = (s) => { const a = window.ScanStatusApi; return s ? ((a && a.canonicalStatus && a.canonicalStatus(s)) || (a && a.normText ? a.normText(s) : s.toLowerCase())) : ''; };
+    const sConflict = new Set(srcs.map(s => sCanon(s.statusRaw)).filter(Boolean)).size > 1;
+    const shortName = (s) => { s = String(s || ''); return s.length > 22 ? s.slice(0, 21) + '…' : s; };
     $('#svTabs').innerHTML = V.ids.length > 1
-      ? V.ids.map((id, k) => `<button type="button" class="btn ${k === i ? 'btn-primary' : 'btn-ghost'} btn-sm" data-sv="${k}">Phiếu ${k + 1}</button>`).join(' ') : '';
+      ? V.ids.map((id, k) => `<button type="button" class="btn ${k === i ? 'btn-primary' : 'btn-ghost'} btn-sm" data-sv="${k}">Phiếu ${k + 1}${srcs[k] && srcs[k].fileName ? ' · ' + escapeHtml(shortName(srcs[k].fileName)) : ''}</button>`).join(' ')
+        + (sConflict ? '<div class="rv-badge warn" style="margin-top:4px">⚠ Mâu thuẫn giữa các phiếu: tình trạng đọc được khác nhau — xem ảnh từng phiếu rồi chọn ở màn So sánh.</div>' : '')
+        + '<div class="hint" style="margin-top:4px"><b>Nguồn phiếu:</b><br>' + srcs.map((s, k) => 'Phiếu ' + (k + 1) + ': ' + escapeHtml(s.fileName || s.id.slice(0, 8))
+          + (s.ts ? ' · quét ' + new Date(s.ts).toLocaleDateString('vi-VN') : '')
+          + (s.pageNo ? ' · trang ' + s.pageNo + (s.pages ? '/' + s.pages : '') + (s.stt ? ' (STT ' + s.stt + ')' : '') : '')
+          + ' · đọc: ' + (s.statusRaw ? '«' + escapeHtml(s.statusRaw) + '»' : '—')).join('<br>') + '</div>'
+      : '';
     $('#svInfo').innerHTML = `Nguồn: <b>${escapeHtml(rec.sheetLabel || rec.fileName || '')}</b> · quét lúc ${new Date(rec.timestamp).toLocaleString('vi-VN')} · mã ${escapeHtml(rec.id.slice(0, 8))}` +
       `<br>Phiếu này gồm ${items.length} xe (cùng mở ra ảnh này): ${plates}`;
     const act = $('#svActions');
@@ -4069,6 +4147,15 @@ const ScanReview = (() => {
     $('#svBack').innerHTML = rec.backBlob
       ? pageHtml(rec.backBlob, rec.backMime, 'phieu-mat2-' + rec.id.slice(0, 8), 2) + (rec.backBlank ? '<div class="hint">Mặt 2 gần như trống.</div>' : '')
       : '<div class="sv-empty">Phiếu không có mặt 2.</div>';
+    { /*NM:P4-3*/ // các mặt 3..N
+      const old = document.getElementById('svExtra'); if (old) old.remove();
+      const ex = (rec.extraBlobs || []).filter(x => x && x.blob);
+      if (ex.length) {
+        const host = $('#svFront').closest('.sv-split'), box = document.createElement('div'); box.id = 'svExtra';
+        box.innerHTML = ex.map((x, k) => `<h4>Mặt ${k + 3}</h4><div class="sv-pane">${pageHtml(x.blob, x.mime, 'phieu-mat' + (k + 3) + '-' + rec.id.slice(0, 8), k + 3)}</div>`).join('');   /*NM:P4-11*/
+        if (host) host.insertAdjacentElement('afterend', box);
+      }
+    }
   }
   async function openViewer({ plate, scanId }) {
     const link = plate ? linkMap.get(plate) : null;
